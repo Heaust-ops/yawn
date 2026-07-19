@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:22-alpine AS base
 
 # Install Rust nightly and required tools
 RUN apk add --no-cache \
@@ -27,6 +27,15 @@ RUN yarn install
 
 # Copy source code
 COPY . .
+
+FROM base AS development
+
+# Expose Vite's development server and run the Rust/Vite watchers.
+EXPOSE 8080
+
+CMD ["yarn", "dev"]
+
+FROM base AS production
 
 # Build the project
 RUN yarn run build
