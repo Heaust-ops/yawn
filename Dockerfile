@@ -10,7 +10,8 @@ RUN apk add --no-cache \
     && rustup toolchain install nightly-2025-10-20 \
     && rustup target add wasm32-unknown-unknown --toolchain nightly-2025-10-20 \
     && rustup component add rust-src --toolchain nightly-2025-10-20 \
-    && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+    && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh \
+    && cargo install rsw
 
 # Set environment variables for Rust
 ENV PATH="/root/.cargo/bin:$PATH"
