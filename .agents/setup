@@ -21,6 +21,7 @@ run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-r
     curl \
     pkg-config \
     xz-utils \
+    xauth \
     xvfb
 
 echo "==> Installing Node.js ${NODE_VERSION}"
