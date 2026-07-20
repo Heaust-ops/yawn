@@ -40,7 +40,7 @@ FROM base AS development
 # Expose Vite's development server and run the Rust/Vite watchers.
 EXPOSE 8080
 
-CMD ["npm", "run", "dev"]
+CMD ["npm", "run", "dev:container"]
 
 FROM base AS production
 

@@ -1,10 +1,10 @@
 # Build, Lint, and Test Commands
-- `npm run dev`: Start Vite dev server with hot reload for WASM bundle
+- `npm run dev`: Recreate the Docker Compose stack and start the Rust/Vite development watchers
+- `npm run dev:container`: Start the Rust/Vite watchers inside the development container
 - `npm run build`: Build optimized WASM and JS in `dist/` for development
 - `npm run build-release`: Build optimized WASM and JS for production
 - `cargo check`: Validate Rust sources quickly before full builds
 - `cargo fmt`: Format Rust code with rustfmt
-- `docker compose up --build`: Build and run the Rust/Vite development watchers on port 8080
 - No unit tests currently exist; add them as `*_tests.rs` modules
 
 # Renderer Baseline in Fresh Orbs
