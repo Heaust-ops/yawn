@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:22-alpine AS base
 
 # Install Rust nightly and required tools
 RUN apk add --no-cache \
@@ -10,7 +10,8 @@ RUN apk add --no-cache \
     && rustup toolchain install nightly-2025-10-20 \
     && rustup target add wasm32-unknown-unknown --toolchain nightly-2025-10-20 \
     && rustup component add rust-src --toolchain nightly-2025-10-20 \
-    && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+    && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh \
+    && cargo install rsw
 
 # Set environment variables for Rust
 ENV PATH="/root/.cargo/bin:$PATH"
@@ -20,19 +21,28 @@ ENV RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals"
 WORKDIR /app
 
 # Copy package files
-COPY package.json yarn.lock ./
+COPY package.json package-lock.json ./
 
 # Install Node.js dependencies
-RUN yarn install
+RUN npm ci
 
 # Copy source code
 COPY . .
 
+FROM base AS development
+
+# Expose Vite's development server and run the Rust/Vite watchers.
+EXPOSE 8080
+
+CMD ["npm", "run", "dev"]
+
+FROM base AS production
+
 # Build the project
-RUN yarn run build
+RUN npm run build
 
 # Expose port for serving
 EXPOSE 8080
 
 # Command to serve the built application
-CMD ["yarn", "start", "--", "--host"]
+CMD ["npm", "run", "start", "--", "--host", "0.0.0.0"]

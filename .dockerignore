@@ -1,0 +1,6 @@
+.git
+.amp
+node_modules
+target
+dist
+**/pkg

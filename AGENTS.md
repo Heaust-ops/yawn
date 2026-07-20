@@ -4,6 +4,7 @@
 - `npm run build-release`: Build optimized WASM and JS for production
 - `cargo check`: Validate Rust sources quickly before full builds
 - `cargo fmt`: Format Rust code with rustfmt
+- `docker compose up --build`: Build and run the Rust/Vite development watchers on port 8080
 - No unit tests currently exist; add them as `*_tests.rs` modules
 
 # Renderer Baseline in Fresh Orbs
