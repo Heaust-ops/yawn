@@ -6,6 +6,12 @@
 - `cargo fmt`: Format Rust code with rustfmt
 - No unit tests currently exist; add them as `*_tests.rs` modules
 
+# Renderer Baseline in Fresh Orbs
+- Before renderer implementation or browser validation, read `amp_chromium.txt` and follow its production-parity WebGPU procedure.
+- First launch the demo and headed Chromium as Amp supervised services, attach over CDP before navigating, and use the HTTPS portal URL rather than localhost.
+- Capture baseline screenshots of both the Procedural scene and `/themanor.glb` under `.amp/in/artifacts/`. Confirm each scene reports loaded geometry and inspect worker/page console errors before changing renderer code.
+- Leave the browser on `about:blank` after capture so Chromium remains ready without continuously rendering or flooding logs.
+
 # Code Style Guidelines
 - **Rust 2021 idioms**: Use snake_case for modules, files, functions, and variables
 - **Indentation**: 4 spaces (configured in rustfmt)
