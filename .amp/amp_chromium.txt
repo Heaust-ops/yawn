@@ -1,6 +1,8 @@
 Amp Chromium/WebGPU production-parity setup
 ============================================
 
+Repository location: `.amp/amp_chromium.txt`
+
 Purpose
 -------
 Run the Yawn demo in the Amp orb through a real headed Chromium process with
