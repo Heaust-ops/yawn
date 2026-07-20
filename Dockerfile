@@ -1,15 +1,21 @@
-FROM node:22-alpine AS base
+FROM node:22-bookworm-slim AS base
 
 # Install Rust nightly and required tools
-RUN apk add --no-cache \
-    build-base \
-    curl \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-    && source ~/.cargo/env \
-    && rustup default nightly-2025-10-20 \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+        -y --profile minimal --default-toolchain none \
+    && . "$HOME/.cargo/env" \
     && rustup toolchain install nightly-2025-10-20 \
-    && rustup target add wasm32-unknown-unknown --toolchain nightly-2025-10-20 \
-    && rustup component add rust-src --toolchain nightly-2025-10-20 \
+        --profile minimal \
+        --component rust-src \
+        --target wasm32-unknown-unknown \
+    && rustup default nightly-2025-10-20 \
     && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh \
     && cargo install rsw
 
