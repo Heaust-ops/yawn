@@ -26,6 +26,14 @@ struct VertexOutput {
     @location(1) normal: vec3<f32>
 }
 
+fn normal_matrix(model: mat3x3<f32>) -> mat3x3<f32> {
+    let cofactor0 = cross(model[1], model[2]);
+    let cofactor1 = cross(model[2], model[0]);
+    let cofactor2 = cross(model[0], model[1]);
+    let inverse_determinant = 1.0 / dot(model[0], cofactor0);
+    return mat3x3<f32>(cofactor0, cofactor1, cofactor2) * inverse_determinant;
+}
+
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -39,7 +47,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let world_position = model * vec4<f32>(in.pos, 1.0);
     out.clip_position = view_proj * world_position;
     out.world_pos = world_position.xyz;
-    out.normal = normalize(in.normal);
+    let model_linear = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+    out.normal = normalize(normal_matrix(model_linear) * in.normal);
     return out;
 }
 

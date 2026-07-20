@@ -1,29 +1,68 @@
-use std::sync::mpsc::Receiver;
-use std::{cell::RefCell, rc::Rc};
-use ultraviolet::Mat4;
+use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
+
+thread_local! { static WEB_RUNTIME: RefCell<Option<renderer::app_setup::WebAppRuntime>> = const { RefCell::new(None) }; }
+
+#[wasm_bindgen]
+pub fn load_scene(url: String) {
+    WEB_RUNTIME.with(|runtime| {
+        if let Some(runtime) = runtime.borrow().as_ref() {
+            let worker = runtime.worker();
+            let message = js_sys::Object::new();
+            let result = js_sys::Reflect::set(&message, &"type".into(), &"load-scene".into())
+                .and_then(|_| js_sys::Reflect::set(&message, &"url".into(), &url.into()))
+                .and_then(|_| worker.post_message(&message));
+            if let Err(error) = result {
+                log::error!("failed to request scene load: {:?}", error);
+            }
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn worker_register_scene_payload(load_id: u32, bytes: &[u8]) {
+    renderer::renderer::register_scene_payload(load_id, bytes);
+}
+
+#[wasm_bindgen]
+pub fn worker_report_scene_error(load_id: u32, message: String) {
+    renderer::renderer::report_scene_payload_error(load_id, message);
+}
+
+#[wasm_bindgen]
+pub fn worker_maintain_renderer() {
+    renderer::renderer::worker_maintain_renderer();
+}
+
+#[wasm_bindgen]
+pub fn worker_report_pick(
+    request_id: u32,
+    status: String,
+    slot: u32,
+    generation: u32,
+    snapshot_id: u32,
+    publication_version: u32,
+) {
+    renderer::renderer::report_pick(
+        request_id,
+        status,
+        slot,
+        generation,
+        snapshot_id,
+        publication_version,
+    );
+}
 
 use renderer::app_setup::WebApp;
 use renderer::camera::Camera;
-use renderer::message::WindowEvent;
 use renderer::renderer as gpu_renderer;
-use renderer::renderer::scene::{mesh_vertex_layout, FrameMetadata, Mesh, MeshBuilder};
-
-/// Simple vertex format.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    pos: [f32; 3],
-    color: [f32; 3],
-}
+use renderer::renderer::scene::FrameMetadata;
 
 pub struct EditorScene {
     uniform_buffers: [wgpu::Buffer; 2],
     bind_groups: [wgpu::BindGroup; 2],
-    bind_group_layouts: [wgpu::BindGroupLayout; 2],
     frame_metadata: FrameMetadata,
     cam: Camera,
-    meshes: Vec<Mesh>,
 }
 
 impl renderer::renderer::scene::Scene for EditorScene {
@@ -51,20 +90,12 @@ impl renderer::renderer::scene::Scene for EditorScene {
 
         resources.set_bind_group_layouts(&bind_group_layouts);
 
-        let mut scene = EditorScene {
+        let scene = EditorScene {
             uniform_buffers: [uniform_resource.buffer, camera_resource.buffer],
             bind_groups: [uniform_resource.bind_group, camera_resource.bind_group],
-            bind_group_layouts,
             frame_metadata,
             cam: camera,
-            meshes: Vec::new(),
         };
-
-        scene.create_default_scene(
-            &renderer_context.device,
-            resources,
-            renderer_context.surface_config.format,
-        );
 
         scene
     }
@@ -85,28 +116,16 @@ impl renderer::renderer::scene::Scene for EditorScene {
         &self.bind_groups
     }
 
-    fn meshes(&self) -> &[Mesh] {
-        &self.meshes
-    }
-
     fn handle_mouse_click(&mut self, x: f32, y: f32) {
         self.frame_metadata.mouse_click = [x, y];
     }
 
-    fn handle_zoom(&mut self, _delta_y: f32) {
-        // TODO: Implement zoom properly when Camera exposes necessary methods
+    fn handle_zoom(&mut self, message: &renderer::message::WheelMessage) {
+        self.cam.zoom(message);
     }
 
     fn handle_orbit(&mut self, delta_x: f32, delta_y: f32) {
         self.cam.orbit(delta_x, delta_y);
-    }
-
-    fn clear(&mut self) {
-        self.meshes.clear();
-    }
-
-    fn add_mesh(&mut self, mesh: Mesh) {
-        self.meshes.push(mesh);
     }
 
     fn set_camera_depth_range(&mut self, near: f32, far: f32) {
@@ -129,82 +148,6 @@ impl WebApp for LevelEditor {
     type Scene = EditorScene;
 }
 
-impl EditorScene {
-    /// Ground plane vertex data.
-    const VERTICES: &[Vertex] = &[
-        // First triangle of quad
-        Vertex {
-            pos: [-5.0, 0.0, -5.0],
-            color: [0.2, 0.8, 0.2], // Green
-        },
-        Vertex {
-            pos: [5.0, 0.0, -5.0],
-            color: [0.2, 0.8, 0.2], // Green
-        },
-        Vertex {
-            pos: [-5.0, 0.0, 5.0],
-            color: [0.2, 0.8, 0.2], // Green
-        },
-        // Second triangle of quad
-        Vertex {
-            pos: [5.0, 0.0, -5.0],
-            color: [0.2, 0.8, 0.2], // Green
-        },
-        Vertex {
-            pos: [5.0, 0.0, 5.0],
-            color: [0.2, 0.8, 0.2], // Green
-        },
-        Vertex {
-            pos: [-5.0, 0.0, 5.0],
-            color: [0.2, 0.8, 0.2], // Green
-        },
-    ];
-    // Wind the ground plane so the upward-facing side is front-facing (CCW from
-    // above) to avoid being culled by the default back-face culling.
-    const INDICES: &[u32] = &[0, 2, 1, 3, 5, 4];
-
-    fn create_default_scene(
-        &mut self,
-        device: &wgpu::Device,
-        resources: &mut gpu_renderer::GpuResources,
-        surface_format: wgpu::TextureFormat,
-    ) {
-        let positions: Vec<[f32; 3]> = Self::VERTICES.iter().map(|v| v.pos).collect();
-        // Ground plane normals point upward (Y+)
-        let normals: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]; positions.len()];
-        let uvs: &[[f32; 2]] = &[
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ];
-
-        let vertex_layout = mesh_vertex_layout();
-
-        let pipeline_index = resources.get_or_create_pipeline(
-            device,
-            "ground_plane",
-            &vertex_layout,
-            include_str!("./program.wgsl"),
-            surface_format,
-        );
-
-        let scale_factor = 100.0;
-        let scale_matrix = Mat4::from_scale(scale_factor);
-
-        let mesh = MeshBuilder::default()
-            .with_vertices(device, resources, &positions, &normals, uvs)
-            .with_indices(device, resources, Self::INDICES)
-            .with_pipeline(pipeline_index)
-            .with_model_matrix(device, resources, scale_matrix)
-            .build();
-
-        self.meshes.push(mesh);
-    }
-}
-
 /// Entrypoint for the level editor
 #[wasm_bindgen]
 pub fn main() {
@@ -212,9 +155,28 @@ pub fn main() {
     wasm_logger::init(wasm_logger::Config::default());
 
     wasm_bindgen_futures::spawn_local(async {
-        let runtime = LevelEditor::setup_runtime().unwrap();
-        // Keep the runtime running and prevent drops
-        Box::leak(Box::new(runtime));
+        let runtime = match LevelEditor::setup_runtime() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                log::error!("failed to start level editor runtime: {:?}", error);
+                let global = js_sys::global();
+                if let Ok(callback) = js_sys::Reflect::get(&global, &"rendererStartupFailed".into())
+                {
+                    if callback.is_function() {
+                        if let Err(callback_error) = callback
+                            .unchecked_into::<js_sys::Function>()
+                            .call1(&global, &error)
+                        {
+                            log::error!(
+                                "failed to report renderer startup failure: {callback_error:?}"
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+        };
+        WEB_RUNTIME.with(|stored| *stored.borrow_mut() = Some(runtime));
     });
 }
 

@@ -4,9 +4,11 @@
   <meta charset="UTF-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Document</title>
+  <link rel="icon" href="data:,">
+  <title>Yawn renderer demo</title>
   <style>
     * {
+      box-sizing: border-box;
       margin: 0;
       padding: 0;
     }
@@ -18,9 +20,26 @@
       height: 100vh;
       background-color: yellowgreen;
     }
+    .scene-picker {
+      position: fixed;
+      z-index: 1;
+      top: 1rem;
+      left: 1rem;
+      padding: 0.6rem 0.75rem;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 0.5rem;
+      color: white;
+      background: rgba(15, 18, 24, 0.85);
+      font: 14px/1.2 system-ui, sans-serif;
+      backdrop-filter: blur(8px);
+    }
+    .scene-picker select, .scene-picker button {
+      margin-left: 0.4rem;
+    }
   </style>
 </head>
 <body>
+  <div class="scene-picker"><label>Scene <select id="scene"><option value="procedural">Procedural</option><option value="/themanor.glb">The Manor</option><option value="/sponza.glb">Sponza</option></select></label><button id="load-file">Load File</button><input id="file-input" type="file" accept=".glb,model/gltf-binary" hidden><span id="load-status" role="status"></span><span id="pick-status" role="status"> Pick unavailable</span><span> · Middle-drag orbit · Wheel move</span></div>
   <header>
     <nav>
       <ul>

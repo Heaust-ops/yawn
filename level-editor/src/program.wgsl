@@ -39,7 +39,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let world_position = model * vec4<f32>(in.pos, 1.0);
     out.clip_position = view_proj * world_position;
     out.world_pos = world_position.xyz;
-    out.normal = normalize(in.normal);
+    out.normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
     return out;
 }
 

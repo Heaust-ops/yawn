@@ -19,6 +19,7 @@ web-sys = { version = "0.3.77", features = [
     "FileList",
     "OffscreenCanvas",
     "MouseEvent",
+    "PointerEvent",
     "WheelEvent",
     "KeyboardEvent",
     "Worker",

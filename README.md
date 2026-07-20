@@ -32,7 +32,7 @@ npm run dev
 What algorithms are we planning to have,
 
 - gpu picking?
-- HZB occlusion + frustum/portal culling?
+- [done] conservative previous-frame HZB occlusion + frustum culling
 - deferred + forward lighting?
 - hair/fur support?
 - splines?

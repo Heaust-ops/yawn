@@ -1,0 +1,209 @@
+Amp Chromium/WebGPU production-parity setup
+============================================
+
+Purpose
+-------
+Run the Yawn demo in the Amp orb through a real headed Chromium process with
+the same Vulkan/WebGPU flags used locally, then attach browser automation over
+the Chrome DevTools Protocol (CDP). This is necessary because a default
+headless or Playwright-managed browser can fail before reaching Dawn's WebGPU
+validation and therefore report a false clean console.
+
+
+1. Start the Yawn demo as an Amp supervised service
+---------------------------------------------------
+
+Use the repository's declared Amp service when available:
+
+    amp orb services ensure
+
+Inspect the resulting portal URL:
+
+    cat .amp/portals/yawn-demo.json
+
+In this orb the demo service can also be inspected with:
+
+    amp orb service status yawn-demo
+
+Always navigate Chromium to the HTTPS portal URL from the JSON file. Do not
+use localhost because the app requires the portal's browser security headers,
+including cross-origin isolation for SharedArrayBuffer.
+
+
+2. Locate Chromium and its SwiftShader Vulkan ICD
+-------------------------------------------------
+
+This orb already had Playwright Chromium installed at:
+
+    /home/user/.cache/ms-playwright/chromium-1187/chrome-linux/chrome
+
+Its software Vulkan implementation was located at:
+
+    /home/user/.cache/ms-playwright/chromium-1187/chrome-linux/vk_swiftshader_icd.json
+
+The exact versioned directory can change. Locate the current files with:
+
+    find /home/user/.cache/ms-playwright -type f -name chrome
+    find /home/user/.cache/ms-playwright -type f -name vk_swiftshader_icd.json
+
+Verify the browser version with:
+
+    /path/to/chrome --version
+
+
+3. Launch headed Chromium with production WebGPU flags
+------------------------------------------------------
+
+The orb has no physical display or physical GPU, so use Xvfb and force
+Chromium to use its bundled SwiftShader Vulkan ICD. Start Chromium as an Amp
+supervised service so it survives Amp CLI updates and orb pause/resume:
+
+    amp orb service start chrome-webgpu --command 'VK_ICD_FILENAMES=/home/user/.cache/ms-playwright/chromium-1187/chrome-linux/vk_swiftshader_icd.json xvfb-run -a /home/user/.cache/ms-playwright/chromium-1187/chrome-linux/chrome --no-sandbox --enable-features=Vulkan,UseSkiaRenderer,DefaultANGLEVulkan --use-vulkan --enable-unsafe-webgpu --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=/home/user/.cache/chrome-debug-profile about:blank'
+
+The important production flags, matching the local launch, are:
+
+    --enable-features=Vulkan,UseSkiaRenderer,DefaultANGLEVulkan
+    --use-vulkan
+    --enable-unsafe-webgpu
+
+The additional orb-specific requirements are:
+
+    VK_ICD_FILENAMES=/path/to/vk_swiftshader_icd.json
+    xvfb-run -a
+    --no-sandbox
+
+The CDP/MCP attachment requirements are:
+
+    --remote-debugging-address=127.0.0.1
+    --remote-debugging-port=9222
+    --user-data-dir=/home/user/.cache/chrome-debug-profile
+
+Do not replace these with --use-angle=vulkan. That launch is not equivalent
+to the production flags above.
+
+
+4. Verify that the browser and CDP endpoint are ready
+-----------------------------------------------------
+
+    amp orb service status chrome-webgpu
+    curl -fsS http://127.0.0.1:9222/json/version
+
+The second command must return browser metadata and a webSocketDebuggerUrl.
+An MCP browser should attach to port 9222. Playwright can attach to the same
+endpoint with chromium.connectOverCDP("http://127.0.0.1:9222").
+
+
+5. Attach before navigating and capture worker console output
+-------------------------------------------------------------
+
+Register console and page-error listeners before navigating to the demo.
+The renderer runs in a DedicatedWorker using an OffscreenCanvas, but its
+log::error! output is surfaced as page console events by Chromium.
+
+Minimal Playwright/CDP outline:
+
+    const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
+    const context = browser.contexts()[0];
+    const page = context.pages()[0] ?? await context.newPage();
+
+    page.on("console", message => {
+      console.log(`[console:${message.type()}] ${message.text()}`);
+    });
+    page.on("pageerror", error => {
+      console.error(`[pageerror] ${error.stack || error.message}`);
+    });
+
+    await page.goto(PORTAL_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+    await page.waitForTimeout(2500);
+
+Do not treat successful navigation or the presence of navigator.gpu as a
+passing result. Wait for renderer frames and inspect all console errors,
+especially messages containing:
+
+    uncaptured WebGPU error
+    Validation
+    bind group
+    Invalid CommandBuffer
+    GPUDevice
+
+Chromium's own GPU-process diagnostics are also available with:
+
+    amp orb service logs chrome-webgpu
+
+
+6. Match the production viewport when reproducing dispatch dimensions
+-----------------------------------------------------------------------
+
+The reported production failure dispatched HZB workgroups as (132, 116, 1).
+To reproduce those exact dimensions in this environment, set:
+
+    await page.setViewportSize({ width: 2128, height: 1856 });
+
+Then navigate to the demo. The resulting console error was:
+
+    uncaptured WebGPU error: No bind group set at group index 0.
+     - While encoding [ComputePassEncoder "HZB max reduction"].DispatchWorkgroups(132, 116, 1).
+     - While finishing [CommandEncoder "Render command encoder"].
+
+It was followed by:
+
+    uncaptured WebGPU error: [Invalid CommandBuffer "Render command encoder" from CommandEncoder "Render command encoder"] is invalid.
+     - While calling [Queue].Submit([[Invalid CommandBuffer "Render command encoder" from CommandEncoder "Render command encoder"]])
+
+
+7. Capture screenshots
+----------------------
+
+Create the artifact directory and capture the rendered page:
+
+    mkdir -p .amp/in/artifacts
+
+Playwright:
+
+    await page.screenshot({
+      path: ".amp/in/artifacts/webgpu-production-repro.png",
+      fullPage: true,
+    });
+
+The reproduced failure rendered a completely black canvas with the scene
+controls visible and no cubes, spheres, or GLB geometry.
+
+
+8. Leave Chromium ready without flooding logs
+----------------------------------------------
+
+After capturing the failure, navigate the test page back to about:blank:
+
+    await page.goto("about:blank");
+
+Disconnect the CDP client without calling browser.close(). Calling
+browser.close() can terminate the supervised Chromium process. Confirm it is
+still ready with:
+
+    curl -fsS http://127.0.0.1:9222/json/version >/dev/null && echo ready
+
+Stop Chromium only when it is no longer needed:
+
+    amp orb service stop chrome-webgpu
+
+
+Why the earlier browser check missed the error
+-----------------------------------------------
+
+The earlier automation did not use the exact production flags and did not
+force a usable Vulkan implementation in the GPU-less orb. Chromium emitted
+Skia/Vulkan initialization failures and never reached the same Dawn WebGPU
+validation path. Consequently, observing no application console error did
+not mean the renderer was valid.
+
+The reliable setup is therefore:
+
+    exact production Chromium flags
+        + headed Chromium under Xvfb
+        + SwiftShader Vulkan ICD in the GPU-less orb
+        + CDP/MCP attachment before navigation
+        + worker console and Chromium GPU-log inspection
+        + a short frame wait before declaring the console clean

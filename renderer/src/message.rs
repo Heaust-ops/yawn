@@ -1,6 +1,6 @@
 use core::fmt;
-use std::sync::mpsc::TryRecvError;
 use std::cell::BorrowMutError;
+use std::sync::mpsc::TryRecvError;
 
 #[derive(Debug)]
 pub enum WindowEvent {
@@ -46,9 +46,11 @@ pub struct MouseMessage {
 
 impl MouseMessage {
     pub fn from_evt(event: web_sys::MouseEvent) -> Self {
-        let window = web_sys::window().unwrap();
+        let scale_factor = web_sys::window()
+            .map(|window| window.device_pixel_ratio())
+            .map_or(1.0, |value| value);
         Self {
-            scale_factor: window.device_pixel_ratio(),
+            scale_factor,
             button: event.button() as f64,
             buttons: event.buttons(),
             client_x: event.client_x() as f64,
@@ -74,9 +76,11 @@ pub struct WheelMessage {
 
 impl WheelMessage {
     pub fn from_evt(event: web_sys::WheelEvent) -> Self {
-        let window = web_sys::window().unwrap();
+        let scale_factor = web_sys::window()
+            .map(|window| window.device_pixel_ratio())
+            .map_or(1.0, |value| value);
         Self {
-            scale_factor: window.device_pixel_ratio(),
+            scale_factor,
             delta_x: event.delta_x(),
             delta_y: event.delta_y(),
             delta_z: event.delta_z(),

@@ -1,9 +1,13 @@
 pub mod app_setup;
+pub mod bounds;
 pub mod camera;
 pub mod gltf;
 pub mod message;
 pub mod platform;
+pub mod render_abi;
+pub mod render_data;
 pub mod renderer;
+pub mod spatial;
 
 /// Worker entrypoint helper - executes the closure it is spawned with
 /// Applications should export this with #[wasm_bindgen]

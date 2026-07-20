@@ -46,3 +46,4 @@ target/
 # WASM build artifacts
 .rsw/
 static/level-editor/
+.amp/
