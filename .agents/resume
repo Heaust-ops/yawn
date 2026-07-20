@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Yawn has no database, tunnel, or other persistent backing service to repair.
-# The Vite and Chromium processes used for development are started on demand as
-# Amp supervised services, so waking an orb requires no lifecycle work.
-echo "Yawn has no persistent services to resume."
+run_as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+run_as_root systemctl start docker
+if ! run_as_root docker compose ps --status running --quiet | grep -q .; then
+    run_as_root docker compose up --detach
+fi
+
+echo "Docker and the Yawn development stack are running."

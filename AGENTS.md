@@ -5,6 +5,7 @@
 - `npm run build-release`: Build optimized WASM and JS for production
 - `cargo check`: Validate Rust sources quickly before full builds
 - `cargo fmt`: Format Rust code with rustfmt
+- `SNAPSHOT_URL=<portal-url> npm run snapshot-check`: Capture and validate the Procedural and The Manor renderer baselines through production-parity Chromium
 - No unit tests currently exist; add them as `*_tests.rs` modules
 
 # Renderer Baseline in Fresh Orbs

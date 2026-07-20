@@ -4,6 +4,7 @@ set -euo pipefail
 NODE_VERSION="v22.17.1"
 PLAYWRIGHT_VERSION="1.55.0"
 RUST_TOOLCHAIN="nightly-2025-10-20"
+COMPOSE_VERSION="v5.3.1"
 
 run_as_root() {
     if [[ "$(id -u)" -eq 0 ]]; then
@@ -19,10 +20,35 @@ run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-r
     build-essential \
     ca-certificates \
     curl \
+    docker.io \
     pkg-config \
     xz-utils \
     xauth \
     xvfb
+
+echo "==> Installing Docker Compose ${COMPOSE_VERSION}"
+case "$(uname -m)" in
+    x86_64) compose_arch="x86_64" ;;
+    aarch64|arm64) compose_arch="aarch64" ;;
+    *) echo "Unsupported Docker Compose architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+compose_asset="docker-compose-linux-${compose_arch}"
+compose_tmp="$(mktemp -d)"
+trap 'rm -rf "${compose_tmp}" "${tmp_dir:-}"' EXIT
+curl -fsSLo "${compose_tmp}/${compose_asset}" \
+    "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/${compose_asset}"
+curl -fsSLo "${compose_tmp}/checksums.txt" \
+    "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/checksums.txt"
+(
+    cd "${compose_tmp}"
+    grep -E "[[:space:]]+\*?${compose_asset}$" checksums.txt | sha256sum --check --strict
+)
+run_as_root install -D -m 0755 "${compose_tmp}/${compose_asset}" \
+    /usr/local/lib/docker/cli-plugins/docker-compose
+run_as_root systemctl enable --now docker
+if [[ "$(id -u)" -ne 0 ]]; then
+    run_as_root usermod -aG docker "$(id -un)"
+fi
 
 echo "==> Installing Node.js ${NODE_VERSION}"
 case "$(uname -m)" in
@@ -34,7 +60,6 @@ node_dir="${HOME}/.local/share/node-${NODE_VERSION}-linux-${node_arch}"
 if [[ ! -x "${node_dir}/bin/node" ]]; then
     archive="node-${NODE_VERSION}-linux-${node_arch}.tar.xz"
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "${tmp_dir}"' EXIT
     curl -fsSLo "${tmp_dir}/${archive}" "https://nodejs.org/dist/${NODE_VERSION}/${archive}"
     curl -fsSLo "${tmp_dir}/SHASUMS256.txt" "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt"
     (
@@ -73,9 +98,47 @@ echo "==> Installing locked JavaScript dependencies"
 npm ci
 
 echo "==> Installing Chromium ${PLAYWRIGHT_VERSION} and its Linux dependencies"
-npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium
+npx playwright install --with-deps chromium
+
+echo "==> Recreating the Docker Compose development stack"
+run_as_root env PATH="${PATH}" npm run dev -- --detach
+
+echo "==> Waiting for Vite and both initial WASM builds"
+for _ in $(seq 1 180); do
+    build_count="$(run_as_root docker compose logs --no-color app 2>/dev/null | \
+        grep -c 'Your wasm pkg is ready' || true)"
+    if [[ "${build_count}" -ge 2 ]] && curl -fsSI http://127.0.0.1:8080/ >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+if [[ "${build_count:-0}" -lt 2 ]] || ! curl -fsSI http://127.0.0.1:8080/ >/dev/null 2>&1; then
+    run_as_root docker compose logs --no-color --tail=160 app
+    echo "Docker Compose development server did not become ready" >&2
+    exit 1
+fi
+
+echo "==> Starting production-parity Chromium"
+chrome="$(find "${HOME}/.cache/ms-playwright" -type f -path '*/chrome-linux/chrome' -print -quit)"
+swiftshader_icd="$(find "${HOME}/.cache/ms-playwright" -type f -name vk_swiftshader_icd.json -print -quit)"
+[[ -x "${chrome}" && -f "${swiftshader_icd}" ]]
+amp orb service stop chrome-webgpu >/dev/null 2>&1 || true
+amp orb service start chrome-webgpu --command \
+    "VK_ICD_FILENAMES='${swiftshader_icd}' xvfb-run -a '${chrome}' --no-sandbox --enable-features=Vulkan,UseSkiaRenderer,DefaultANGLEVulkan --use-vulkan --enable-unsafe-webgpu --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir='${HOME}/.cache/chrome-debug-profile' about:blank"
+for _ in $(seq 1 30); do
+    if curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+curl -fsS http://127.0.0.1:9222/json/version >/dev/null
+
+echo "==> Capturing and validating renderer snapshots"
+portal_url="$(amp orb portal 8080)"
+SNAPSHOT_URL="${portal_url}" npm run snapshot-check
 
 echo "==> Orb setup complete"
+docker compose version
 node --version
 rustc --version
 wasm-pack --version
