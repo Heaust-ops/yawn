@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Yawn has no database, tunnel, or other persistent backing service to repair.
+# The Vite and Chromium processes used for development are started on demand as
+# Amp supervised services, so waking an orb requires no lifecycle work.
+echo "Yawn has no persistent services to resume."

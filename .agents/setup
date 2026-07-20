@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NODE_VERSION="v22.17.1"
+PLAYWRIGHT_VERSION="1.55.0"
+RUST_TOOLCHAIN="nightly-2025-10-20"
+
+run_as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+echo "==> Installing system build and headed-browser dependencies"
+run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
+run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    pkg-config \
+    xz-utils \
+    xvfb
+
+echo "==> Installing Node.js ${NODE_VERSION}"
+case "$(uname -m)" in
+    x86_64) node_arch="x64" ;;
+    aarch64|arm64) node_arch="arm64" ;;
+    *) echo "Unsupported Node.js architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+node_dir="${HOME}/.local/share/node-${NODE_VERSION}-linux-${node_arch}"
+if [[ ! -x "${node_dir}/bin/node" ]]; then
+    archive="node-${NODE_VERSION}-linux-${node_arch}.tar.xz"
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "${tmp_dir}"' EXIT
+    curl -fsSLo "${tmp_dir}/${archive}" "https://nodejs.org/dist/${NODE_VERSION}/${archive}"
+    curl -fsSLo "${tmp_dir}/SHASUMS256.txt" "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt"
+    (
+        cd "${tmp_dir}"
+        grep "  ${archive}$" SHASUMS256.txt | sha256sum --check --strict
+    )
+    mkdir -p "${HOME}/.local/share"
+    tar -xJf "${tmp_dir}/${archive}" -C "${HOME}/.local/share"
+fi
+mkdir -p "${HOME}/.local/bin"
+for command in node npm npx corepack; do
+    ln -sfn "${node_dir}/bin/${command}" "${HOME}/.local/bin/${command}"
+done
+export PATH="${HOME}/.local/bin:${PATH}"
+
+echo "==> Installing Rust ${RUST_TOOLCHAIN} with WASM support"
+if [[ ! -x "${HOME}/.cargo/bin/rustup" ]]; then
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain none
+fi
+export PATH="${HOME}/.cargo/bin:${PATH}"
+rustup toolchain install "${RUST_TOOLCHAIN}" \
+    --profile minimal \
+    --component rust-src \
+    --target wasm32-unknown-unknown
+
+echo "==> Installing wasm-pack"
+if ! command -v wasm-pack >/dev/null 2>&1; then
+    curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+fi
+for command in cargo rustc rustdoc rustup wasm-pack; do
+    ln -sfn "${HOME}/.cargo/bin/${command}" "${HOME}/.local/bin/${command}"
+done
+
+echo "==> Installing locked JavaScript dependencies"
+npm ci
+
+echo "==> Installing Chromium ${PLAYWRIGHT_VERSION} and its Linux dependencies"
+npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium
+
+echo "==> Orb setup complete"
+node --version
+rustc --version
+wasm-pack --version
