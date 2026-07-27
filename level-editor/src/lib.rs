@@ -29,7 +29,7 @@ pub struct EditorScene {
 impl renderer::renderer::scene::Scene for EditorScene {
     fn setup(
         renderer_context: &gpu_renderer::RendererContext,
-        resources: &mut gpu_renderer::GpuResources,
+        resources: &mut gpu_renderer::PipelineLibrary,
         render_data: &mut RenderData,
     ) -> Self {
         let dimension = ultraviolet::Vec2::new(
@@ -90,12 +90,16 @@ impl renderer::renderer::scene::Scene for EditorScene {
         self.frame_metadata.mouse_click = [x, y];
     }
 
-    fn handle_zoom(&mut self, _delta_y: f32) {
-        // TODO: Implement zoom properly when Camera exposes necessary methods
+    fn handle_zoom(&mut self, delta_y: f32) {
+        self.cam.zoom(delta_y);
     }
 
     fn handle_orbit(&mut self, delta_x: f32, delta_y: f32) {
         self.cam.orbit(delta_x, delta_y);
+    }
+
+    fn handle_pan(&mut self, delta_x: f32, delta_y: f32, viewport_height: f32) {
+        self.cam.pan(delta_x, delta_y, viewport_height);
     }
 
     fn set_camera_depth_range(&mut self, near: f32, far: f32) {
@@ -149,13 +153,14 @@ impl EditorScene {
     fn create_default_scene(
         &mut self,
         device: &wgpu::Device,
-        resources: &mut gpu_renderer::GpuResources,
+        resources: &mut gpu_renderer::PipelineLibrary,
         render_data: &mut RenderData,
         surface_format: wgpu::TextureFormat,
     ) {
         let positions: Vec<[f32; 3]> = Self::VERTICES.iter().map(|v| v.pos).collect();
         // Ground plane normals point upward (Y+)
         let normals: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]; positions.len()];
+        let tangents: Vec<[f32; 4]> = vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
         let uvs: &[[f32; 2]] = &[
             [0.0, 0.0],
             [1.0, 0.0],
@@ -183,9 +188,11 @@ impl EditorScene {
             .create_mesh(MeshCreateInfo {
                 positions: &positions,
                 normals: &normals,
+                tangents: &tangents,
                 uvs,
                 indices: Self::INDICES,
                 pipeline: pipeline_index,
+                material: renderer::render_data::MaterialKey::DEFAULT,
                 flags: RenderFlags::VISIBLE,
                 default_instance_flags: RenderFlags::VISIBLE,
                 default_transform: transform,
@@ -196,11 +203,11 @@ impl EditorScene {
 
 /// Entrypoint for the level editor
 #[wasm_bindgen]
-pub fn main() -> Result<RendererBridge, JsValue> {
+pub fn main(profile: bool) -> Result<RendererBridge, JsValue> {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     wasm_logger::init(wasm_logger::Config::default());
 
-    let runtime = LevelEditor::setup_runtime()?;
+    let runtime = LevelEditor::setup_runtime(profile)?;
     Ok(RendererBridge { runtime })
 }
 

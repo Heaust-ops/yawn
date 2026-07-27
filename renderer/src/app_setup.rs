@@ -18,9 +18,10 @@ use web_sys::AddEventListenerOptions;
 #[cfg(target_arch = "wasm32")]
 pub struct EventListeners {
     pub resize_listener: Option<Closure<dyn FnMut()>>,
-    pub mousemove_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
-    pub mousedown_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
+    pub pointer_listener: Option<Closure<dyn FnMut(web_sys::PointerEvent)>>,
+    pub click_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
     pub wheel_listener: Option<Closure<dyn FnMut(web_sys::WheelEvent)>>,
+    pub contextmenu_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
     pub keyboard_listener: Option<Closure<dyn FnMut(web_sys::KeyboardEvent)>>,
 }
 
@@ -29,9 +30,10 @@ impl EventListeners {
     pub fn new() -> Self {
         Self {
             resize_listener: None,
-            mousemove_listener: None,
-            mousedown_listener: None,
+            pointer_listener: None,
+            click_listener: None,
             wheel_listener: None,
+            contextmenu_listener: None,
             keyboard_listener: None,
         }
     }
@@ -54,65 +56,82 @@ pub fn setup_event_listeners(
         let width = f64::from(resize_canvas.client_width().max(1));
         let height = f64::from(resize_canvas.client_height().max(1));
 
-        resize_worker_chan
-            .send(WindowEvent::Resize(ResizeMessage {
-                width,
-                height,
-                scale_factor: window.device_pixel_ratio(),
-            }))
-            .unwrap();
+        let _ = resize_worker_chan.send(WindowEvent::Resize(ResizeMessage {
+            width,
+            height,
+            scale_factor: window.device_pixel_ratio(),
+        }));
     });
 
     window.add_event_listener_with_callback("resize", resize_listener.as_ref().unchecked_ref())?;
 
-    let mousemove_worker_chan = worker_chan.clone();
-    let mousemove_listener: Closure<dyn FnMut(web_sys::MouseEvent)> =
+    let pointer_worker_chan = worker_chan.clone();
+    let pointer_canvas = canvas.clone();
+    let pointer_listener: Closure<dyn FnMut(web_sys::PointerEvent)> =
+        Closure::new(move |event: web_sys::PointerEvent| {
+            use crate::message::{camera_drag, MouseMessage};
+
+            if event.pointer_type() != "mouse" {
+                return;
+            }
+            match event.type_().as_str() {
+                "pointerdown" if matches!(event.button(), 1 | 2) => {
+                    event.prevent_default();
+                    let _ = pointer_canvas.set_pointer_capture(event.pointer_id());
+                }
+                "pointermove"
+                    if pointer_canvas.has_pointer_capture(event.pointer_id())
+                        && camera_drag(event.buttons()).is_some() =>
+                {
+                    event.prevent_default();
+                    let message = MouseMessage::from_pointer_evt(
+                        &event,
+                        f64::from(pointer_canvas.client_height().max(1)),
+                    );
+                    let _ = pointer_worker_chan.send(WindowEvent::PointerMove(message));
+                }
+                "pointerup" | "pointercancel"
+                    if pointer_canvas.has_pointer_capture(event.pointer_id()) =>
+                {
+                    let _ = pointer_canvas.release_pointer_capture(event.pointer_id());
+                }
+                _ => {}
+            }
+        });
+
+    for event_name in ["pointerdown", "pointermove", "pointerup", "pointercancel"] {
+        canvas.add_event_listener_with_callback(
+            event_name,
+            pointer_listener.as_ref().unchecked_ref(),
+        )?;
+    }
+
+    let click_worker_chan = worker_chan.clone();
+    let click_canvas = canvas.clone();
+    let click_listener: Closure<dyn FnMut(web_sys::MouseEvent)> =
         Closure::new(move |event: web_sys::MouseEvent| {
             use crate::message::MouseMessage;
-            if event.buttons() & 0x04 != 0 {
-                event.prevent_default();
+            if event.button() != 0 {
+                return;
             }
-            let mouse_event_data = MouseMessage::from_evt(event.clone());
-
-            let mut event_data = WindowEvent::PointerMove(mouse_event_data.clone());
-            if event.type_() == "click" {
-                event_data = WindowEvent::PointerClick(mouse_event_data.clone());
-            }
-
-            mousemove_worker_chan.clone().send(event_data).unwrap();
+            let message =
+                MouseMessage::from_evt(&event, f64::from(click_canvas.client_height().max(1)));
+            let _ = click_worker_chan.send(WindowEvent::PointerClick(message));
         });
-
-    window.add_event_listener_with_callback(
-        "mousemove",
-        mousemove_listener.as_ref().unchecked_ref(),
-    )?;
-
-    window
-        .add_event_listener_with_callback("click", mousemove_listener.as_ref().unchecked_ref())?;
-
-    let mousedown_listener: Closure<dyn FnMut(web_sys::MouseEvent)> =
-        Closure::new(move |event: web_sys::MouseEvent| {
-            if event.button() == 1 {
-                event.prevent_default();
-            }
-        });
-
-    window.add_event_listener_with_callback(
-        "mousedown",
-        mousedown_listener.as_ref().unchecked_ref(),
-    )?;
+    canvas.add_event_listener_with_callback("click", click_listener.as_ref().unchecked_ref())?;
 
     let wheel_worker_chan = worker_chan.clone();
+    let wheel_canvas = canvas.clone();
     let wheel_listener: Closure<dyn FnMut(web_sys::WheelEvent)> =
         Closure::new(move |event: web_sys::WheelEvent| {
             use crate::message::WheelMessage;
 
             event.prevent_default();
-            let wheel_event_data = WheelMessage::from_evt(event);
-
-            wheel_worker_chan
-                .send(WindowEvent::PointerWheel(wheel_event_data))
-                .unwrap();
+            if let Some(message) =
+                WheelMessage::from_evt(&event, f64::from(wheel_canvas.client_height().max(1)))
+            {
+                let _ = wheel_worker_chan.send(WindowEvent::PointerWheel(message));
+            }
         });
 
     let wheel_options = {
@@ -121,10 +140,17 @@ pub fn setup_event_listeners(
         options
     };
 
-    window.add_event_listener_with_callback_and_add_event_listener_options(
+    canvas.add_event_listener_with_callback_and_add_event_listener_options(
         "wheel",
         wheel_listener.as_ref().unchecked_ref(),
         &wheel_options,
+    )?;
+
+    let contextmenu_listener: Closure<dyn FnMut(web_sys::MouseEvent)> =
+        Closure::new(move |event: web_sys::MouseEvent| event.prevent_default());
+    canvas.add_event_listener_with_callback(
+        "contextmenu",
+        contextmenu_listener.as_ref().unchecked_ref(),
     )?;
 
     let keyboard_worker_chan = worker_chan.clone();
@@ -134,9 +160,7 @@ pub fn setup_event_listeners(
 
             let keyboard_event_data = KeyboardMessage::from_evt(event);
 
-            keyboard_worker_chan
-                .send(WindowEvent::Keyboard(keyboard_event_data))
-                .unwrap();
+            let _ = keyboard_worker_chan.send(WindowEvent::Keyboard(keyboard_event_data));
         });
 
     window
@@ -144,9 +168,10 @@ pub fn setup_event_listeners(
 
     Ok(EventListeners {
         resize_listener: Some(resize_listener),
-        mousemove_listener: Some(mousemove_listener),
-        mousedown_listener: Some(mousedown_listener),
+        pointer_listener: Some(pointer_listener),
+        click_listener: Some(click_listener),
         wheel_listener: Some(wheel_listener),
+        contextmenu_listener: Some(contextmenu_listener),
         keyboard_listener: Some(keyboard_listener),
     })
 }
@@ -166,6 +191,7 @@ impl WebAppRuntime {
     pub fn new<T: crate::renderer::scene::Scene + 'static>(
         worker_name: &str,
         canvas_selector: &str,
+        profile: bool,
     ) -> Result<Self, JsValue> {
         let (sender, receiver) = mpsc::channel::<WindowEvent>();
 
@@ -179,7 +205,7 @@ impl WebAppRuntime {
         let worker = MainWorker::spawn(worker_name, 1, ring_ptr, move || {
             spawn_local(async move {
                 let ring = unsafe { &*(ring_ptr as *const CommandRing) };
-                MainWorker::run_render_loop::<T>(receiver, ring).await;
+                MainWorker::run_render_loop::<T>(receiver, ring, profile).await;
             });
         })?;
 
@@ -228,9 +254,12 @@ pub trait WebApp {
     fn on_runtime_initialized(_runtime: &mut WebAppRuntime) {}
 
     /// Perform the default WASM initialization routine.
-    fn setup_runtime() -> Result<WebAppRuntime, JsValue> {
-        let mut runtime =
-            WebAppRuntime::new::<Self::Scene>(Self::worker_name(), Self::canvas_selector())?;
+    fn setup_runtime(profile: bool) -> Result<WebAppRuntime, JsValue> {
+        let mut runtime = WebAppRuntime::new::<Self::Scene>(
+            Self::worker_name(),
+            Self::canvas_selector(),
+            profile,
+        )?;
         Self::on_runtime_initialized(&mut runtime);
         Ok(runtime)
     }

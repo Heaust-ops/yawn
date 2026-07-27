@@ -913,6 +913,7 @@ dependencies = [
  "console_log",
  "futures",
  "gltf",
+ "image",
  "js-sys",
  "log",
  "raw-window-handle",

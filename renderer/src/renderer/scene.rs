@@ -3,7 +3,7 @@ use wgpu::util::DeviceExt;
 use crate::{
     camera::Camera,
     render_data::RenderData,
-    renderer::{self, GpuResources},
+    renderer::{self, PipelineLibrary},
 };
 
 pub struct UniformResource {
@@ -76,13 +76,14 @@ impl FrameMetadata {
 pub trait Scene: Sized {
     fn setup(
         context: &renderer::RendererContext,
-        resources: &mut GpuResources,
+        resources: &mut PipelineLibrary,
         data: &mut RenderData,
     ) -> Self;
     fn bind_groups(&self) -> &[wgpu::BindGroup];
     fn handle_mouse_click(&mut self, x: f32, y: f32);
     fn handle_zoom(&mut self, delta_y: f32);
     fn handle_orbit(&mut self, dx: f32, dy: f32);
+    fn handle_pan(&mut self, dx: f32, dy: f32, viewport_height: f32);
     fn set_camera_depth_range(&mut self, near: f32, far: f32);
     fn set_camera_look_at(&mut self, eye: ultraviolet::Vec3, center: ultraviolet::Vec3);
     fn frame_metadata_mut(&mut self) -> Option<&mut FrameMetadata> {
@@ -90,6 +91,9 @@ pub trait Scene: Sized {
     }
     fn camera_mut(&mut self) -> Option<&mut Camera> {
         None
+    }
+    fn frustum_planes(&mut self) -> Option<Result<[[f32; 4]; 6], crate::camera::FrustumError>> {
+        self.camera_mut().map(|camera| camera.frustum_planes())
     }
     fn uniform_buffers(&self) -> Option<[&wgpu::Buffer; 2]> {
         None
@@ -103,7 +107,7 @@ pub trait Scene: Sized {
         }
         self.write_uniforms(queue);
     }
-    fn update(&mut self, context: &renderer::RendererContext) {
+    fn update_cpu(&mut self) {
         let position = match self.camera_mut() {
             Some(c) => c.position(),
             None => return,
@@ -112,7 +116,6 @@ pub trait Scene: Sized {
             f.time = js_sys::Date::now() as f32 * 0.001;
             f.set_camera_position(position)
         }
-        self.write_uniforms(&context.queue);
     }
     fn write_uniforms(&mut self, queue: &wgpu::Queue) {
         let frame = self.frame_metadata_mut().copied();

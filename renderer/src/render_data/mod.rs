@@ -40,6 +40,24 @@ impl PipelineKey {
     }
 }
 
+/// Stable CPU-side identity for a device-independent material.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct MaterialKey(u32);
+
+impl MaterialKey {
+    /// The glTF/default material.
+    pub const DEFAULT: Self = Self(0);
+
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderFlags(u32);
@@ -101,9 +119,11 @@ pub struct GeometryRange {
 pub struct MeshCreateInfo<'a> {
     pub positions: &'a [[f32; 3]],
     pub normals: &'a [[f32; 3]],
+    pub tangents: &'a [[f32; 4]],
     pub uvs: &'a [[f32; 2]],
     pub indices: &'a [u32],
     pub pipeline: PipelineKey,
+    pub material: MaterialKey,
     pub flags: RenderFlags,
     pub default_instance_flags: RenderFlags,
     pub default_transform: ModelTransform,
@@ -120,6 +140,7 @@ pub struct MeshView {
     pub handle: MeshHandle,
     pub geometry: GeometryRange,
     pub pipeline: PipelineKey,
+    pub material: MaterialKey,
     pub flags: RenderFlags,
     pub aabb: Aabb,
     pub default_instance: InstanceHandle,
@@ -178,6 +199,7 @@ pub fn affine_world_aabb(local: Aabb, model: ModelTransform) -> Result<Aabb, Ren
 pub struct VertexStreams<'a> {
     pub positions: &'a [[f32; 3]],
     pub normals: &'a [[f32; 3]],
+    pub tangents: &'a [[f32; 4]],
     pub uvs: &'a [[f32; 2]],
 }
 
@@ -267,6 +289,7 @@ pub enum RenderDataError {
 struct VertexSoa {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    tangents: Vec<[f32; 4]>,
     uvs: Vec<[f32; 2]>,
     logical_capacity: u32,
     max_capacity: Option<u32>,
@@ -287,6 +310,7 @@ struct MeshSoa {
     index_starts: Vec<u32>,
     index_counts: Vec<u32>,
     pipeline_keys: Vec<PipelineKey>,
+    material_keys: Vec<MaterialKey>,
     flags: Vec<RenderFlags>,
     aabb_mins: Vec<[f32; 3]>,
     aabb_maxs: Vec<[f32; 3]>,
@@ -416,6 +440,7 @@ impl RenderData {
             vertices: VertexSoa {
                 positions: Vec::new(),
                 normals: Vec::new(),
+                tangents: Vec::new(),
                 uvs: Vec::new(),
                 logical_capacity: 0,
                 max_capacity: config.max_vertices,
@@ -553,6 +578,8 @@ impl RenderData {
             .copy_from_slice(info.positions);
         self.vertices.normals[as_usize(vertex_range.start)..as_usize(vertex_range.end)]
             .copy_from_slice(info.normals);
+        self.vertices.tangents[as_usize(vertex_range.start)..as_usize(vertex_range.end)]
+            .copy_from_slice(info.tangents);
         self.vertices.uvs[as_usize(vertex_range.start)..as_usize(vertex_range.end)]
             .copy_from_slice(info.uvs);
         self.indices.values[as_usize(index_range.start)..as_usize(index_range.end)]
@@ -567,6 +594,7 @@ impl RenderData {
                 index_count,
             },
             info.pipeline,
+            info.material,
             info.flags,
             bounds,
             default_instance,
@@ -766,6 +794,7 @@ impl RenderData {
         VertexStreams {
             positions: &self.vertices.positions,
             normals: &self.vertices.normals,
+            tangents: &self.vertices.tangents,
             uvs: &self.vertices.uvs,
         }
     }
@@ -783,6 +812,7 @@ impl RenderData {
         self.instances.slots.clear();
         self.vertices.positions.clear();
         self.vertices.normals.clear();
+        self.vertices.tangents.clear();
         self.vertices.uvs.clear();
         self.indices.values.clear();
         self.vertices.allocator.clear();
@@ -800,6 +830,7 @@ impl RenderData {
         )?;
         reserve_vec(&mut self.vertices.positions, target, "vertices")?;
         reserve_vec(&mut self.vertices.normals, target, "vertices")?;
+        reserve_vec(&mut self.vertices.tangents, target, "vertices")?;
         reserve_vec(&mut self.vertices.uvs, target, "vertices")?;
         self.vertices.logical_capacity = target;
         Ok(())
@@ -821,6 +852,9 @@ impl RenderData {
         let vertices = as_usize(self.vertices.allocator.high_water());
         self.vertices.positions.resize(vertices, [0.0; 3]);
         self.vertices.normals.resize(vertices, [0.0; 3]);
+        self.vertices
+            .tangents
+            .resize(vertices, [0.0, 0.0, 0.0, 1.0]);
         self.vertices.uvs.resize(vertices, [0.0; 2]);
         self.indices
             .values
@@ -833,6 +867,9 @@ impl RenderData {
             .truncate(as_usize(self.vertices.allocator.high_water()));
         self.vertices
             .normals
+            .truncate(as_usize(self.vertices.allocator.high_water()));
+        self.vertices
+            .tangents
             .truncate(as_usize(self.vertices.allocator.high_water()));
         self.vertices
             .uvs
@@ -852,6 +889,7 @@ impl MeshSoa {
             index_starts: Vec::new(),
             index_counts: Vec::new(),
             pipeline_keys: Vec::new(),
+            material_keys: Vec::new(),
             flags: Vec::new(),
             aabb_mins: Vec::new(),
             aabb_maxs: Vec::new(),
@@ -871,6 +909,7 @@ impl MeshSoa {
         reserve_vec(&mut self.index_starts, target, "meshes")?;
         reserve_vec(&mut self.index_counts, target, "meshes")?;
         reserve_vec(&mut self.pipeline_keys, target, "meshes")?;
+        reserve_vec(&mut self.material_keys, target, "meshes")?;
         reserve_vec(&mut self.flags, target, "meshes")?;
         reserve_vec(&mut self.aabb_mins, target, "meshes")?;
         reserve_vec(&mut self.aabb_maxs, target, "meshes")?;
@@ -885,6 +924,7 @@ impl MeshSoa {
         prepared: PreparedSlot,
         geometry: GeometryRange,
         pipeline: PipelineKey,
+        material: MaterialKey,
         flags: RenderFlags,
         bounds: Aabb,
         default: InstanceHandle,
@@ -895,6 +935,7 @@ impl MeshSoa {
         resize_column(&mut self.index_starts, len, 0);
         resize_column(&mut self.index_counts, len, 0);
         resize_column(&mut self.pipeline_keys, len, PipelineKey::new(0));
+        resize_column(&mut self.material_keys, len, MaterialKey::DEFAULT);
         resize_column(&mut self.flags, len, RenderFlags::NONE);
         resize_column(&mut self.aabb_mins, len, [0.0; 3]);
         resize_column(&mut self.aabb_maxs, len, [0.0; 3]);
@@ -906,6 +947,7 @@ impl MeshSoa {
         self.index_starts[index] = geometry.index_start;
         self.index_counts[index] = geometry.index_count;
         self.pipeline_keys[index] = pipeline;
+        self.material_keys[index] = material;
         self.flags[index] = flags;
         self.aabb_mins[index] = bounds.min;
         self.aabb_maxs[index] = bounds.max;
@@ -925,6 +967,7 @@ impl MeshSoa {
                 index_count: self.index_counts[index],
             },
             pipeline: self.pipeline_keys[index],
+            material: self.material_keys[index],
             flags: self.flags[index],
             aabb: Aabb {
                 min: self.aabb_mins[index],
@@ -1054,7 +1097,10 @@ fn validate_geometry(info: &MeshCreateInfo<'_>) -> Result<u32, RenderDataError> 
     if info.positions.is_empty() {
         return Err(RenderDataError::EmptyVertices);
     }
-    if info.positions.len() != info.normals.len() || info.positions.len() != info.uvs.len() {
+    if info.positions.len() != info.normals.len()
+        || info.positions.len() != info.tangents.len()
+        || info.positions.len() != info.uvs.len()
+    {
         return Err(RenderDataError::MismatchedVertexStreams);
     }
     let vertex_count =
@@ -1068,6 +1114,7 @@ fn validate_geometry(info: &MeshCreateInfo<'_>) -> Result<u32, RenderDataError> 
         .iter()
         .flatten()
         .chain(info.normals.iter().flatten())
+        .chain(info.tangents.iter().flatten())
         .chain(info.uvs.iter().flatten())
         .any(|value| !value.is_finite())
     {

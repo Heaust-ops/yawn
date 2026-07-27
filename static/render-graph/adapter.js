@@ -1,75 +1,420 @@
-import { CATALOG_VERSION, descriptors, GRAPH_ID } from "./catalog.js";
+import {
+  CATALOG_VERSION,
+  descriptors,
+  GRAPH_ID,
+  nodeDefinitions,
+  socketTypes,
+} from "./catalog.js";
 
 export class AuthoringGraphError extends Error {
-  constructor(code, details = {}) { super(code); this.name="AuthoringGraphError"; this.code=code; this.details=Object.freeze(details); }
-}
-const fail=(code,details)=>{throw new AuthoringGraphError(code,details)};
-const object=v=>v !== null && typeof v === "object" && !Array.isArray(v);
-const validId=v=>typeof v === "string" && /^[A-Za-z][A-Za-z0-9_.-]*$/.test(v) && new TextEncoder().encode(v).length<=64;
-const validSocketId=v=>typeof v === "string" && /^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*$/.test(v) && new TextEncoder().encode(v).length<=129;
-const keysEqual=(a,b)=>a.length===b.length && a.every(x=>b.includes(x));
-
-/** Validate hostile fxnode state and return an app-owned, layout-free projection. */
-export function projectAuthoringSnapshot(raw) {
-  if(!object(raw)||!Array.isArray(raw.nodes)||!Array.isArray(raw.links)) fail("AUTHORING_SHAPE",{field:"snapshot"});
-  if(raw.graphId!==GRAPH_ID||raw.catalogVersion!==CATALOG_VERSION) fail("AUTHORING_CATALOG",{graphId:raw.graphId,catalogVersion:raw.catalogVersion});
-  const nodeIds=new Set(), socketIds=new Set(), byId=new Map(), byType=new Map();
-  for(const n of raw.nodes){
-    if(!object(n)||!validId(n.id)) fail("AUTHORING_ID",{kind:"node",id:n?.id});
-    if(nodeIds.has(n.id)) fail("AUTHORING_ID_DUPLICATE",{kind:"node",id:n.id}); nodeIds.add(n.id);
-    const d=descriptors[n.typeId];
-    if(!d) fail("AUTHORING_NODE_TYPE",{nodeId:n.id,typeId:n.typeId});
-    if(n.known!==true) fail("AUTHORING_NODE_UNKNOWN",{nodeId:n.id});
-    if(n.typeVersion!==d.version) fail("AUTHORING_NODE_VERSION",{nodeId:n.id,expected:d.version,actual:n.typeVersion});
-    if(typeof n.muted!=="boolean") fail("AUTHORING_NODE_MUTED",{nodeId:n.id});
-    if(n.muted&&n.typeId!=="scene_forward") fail("AUTHORING_NODE_MUTED",{nodeId:n.id});
-    if(byType.has(n.typeId)) fail("AUTHORING_TOPOLOGY",{reason:"duplicate-type",typeId:n.typeId});
-    if(!Array.isArray(n.sockets)||!keysEqual(n.sockets.map(s=>s?.key),Object.keys(d.sockets))) fail("AUTHORING_SOCKET_SET",{nodeId:n.id});
-    const sockets={};
-    for(const s of n.sockets){ const expected=d.sockets[s.key];
-      if(!object(s)||!validSocketId(s.id)) fail("AUTHORING_ID",{kind:"socket",id:s?.id});
-      if(socketIds.has(s.id)) fail("AUTHORING_ID_DUPLICATE",{kind:"socket",id:s.id}); socketIds.add(s.id);
-      if(s.direction!==expected[0]||s.dataType!==expected[1]) fail("AUTHORING_SOCKET",{nodeId:n.id,socket:s.key});
-      sockets[s.key]={id:s.id,direction:s.direction,type:s.dataType,nodeId:n.id};
-    }
-    const p=object(n.parameters)?n.parameters:null;
-    if(!p||!keysEqual(Object.keys(p),d.parameters)) fail("AUTHORING_PARAMETERS",{nodeId:n.id});
-    let parameters={};
-    if(n.typeId==="scene_forward"){
-      const c=p.clearColor, z=p.clearDepth;
-      if(!object(c)||c.kind!=="color"||!Array.isArray(c.value)||c.value.length!==4||c.value.some(v=>!Number.isFinite(v)||v<0||v>1)) fail("AUTHORING_PARAMETER",{parameter:"clearColor"});
-      if(!object(z)||z.kind!=="number"||!Number.isFinite(z.value)||z.value<0||z.value>1) fail("AUTHORING_PARAMETER",{parameter:"clearDepth"});
-      parameters={clearColor:[...c.value],clearDepth:z.value};
-    }
-    const projected={type:n.typeId,id:n.id,sockets,parameters,muted:n.muted}; byId.set(n.id,projected); byType.set(n.typeId,projected);
+  constructor(code, details = {}) {
+    super(code);
+    this.name = "AuthoringGraphError";
+    this.code = code;
+    this.details = Object.freeze({ ...details });
   }
-  if(!keysEqual([...byType.keys()],Object.keys(descriptors))) fail("AUTHORING_TOPOLOGY",{reason:"node-set"});
-  const linkIds=new Set(), incoming=new Set(), links=[];
-  for(const l of raw.links){
-    if(!object(l)||!validId(l.id)) fail("AUTHORING_ID",{kind:"link",id:l?.id});
-    if(linkIds.has(l.id)) fail("AUTHORING_ID_DUPLICATE",{kind:"link",id:l.id}); linkIds.add(l.id);
-    if(typeof l.muted!=="boolean") fail("AUTHORING_LINK",{linkId:l.id,reason:"muted"});
-    const from=byId.get(l.fromNodeId),to=byId.get(l.toNodeId),fs=from&&Object.values(from.sockets).find(s=>s.id===l.fromSocketId),ts=to&&Object.values(to.sockets).find(s=>s.id===l.toSocketId);
-    if(!fs||!ts||fs.direction!=="output"||ts.direction!=="input"||fs.type!==ts.type) fail("AUTHORING_LINK",{linkId:l.id});
-    if(incoming.has(ts.id)) fail("AUTHORING_LINK_INCOMING",{socketId:ts.id}); incoming.add(ts.id);
-    links.push({from:`${from.type}.${Object.keys(from.sockets).find(k=>from.sockets[k]===fs)}`,to:`${to.type}.${Object.keys(to.sockets).find(k=>to.sockets[k]===ts)}`,muted:l.muted});
-  }
-  const required=["surface_color.surface>scene_forward.color","depth32.depth>scene_forward.depth","scene_forward.result>present.surface"];
-  const active=links.filter(l=>!l.muted).map(l=>`${l.from}>${l.to}`).sort();
-  if(!keysEqual(active,required.sort())||links.length!==3) fail("AUTHORING_TOPOLOGY",{reason:"links"});
-  return Object.freeze({graphId:GRAPH_ID,clearColor:byType.get("scene_forward").parameters.clearColor,clearDepth:byType.get("scene_forward").parameters.clearDepth,passState:byType.get("scene_forward").muted?"disabled":"enabled"});
 }
 
-export function semanticProjectionToV1(p, revision=1){
-  if(!Number.isInteger(revision)||revision<1||revision>0xffffffff) fail("AUTHORING_REVISION",{revision});
-  const extent={kind:"surface_relative",width:{numerator:1,denominator:1},height:{numerator:1,denominator:1},depthOrArrayLayers:1};
-  return {schemaVersion:1,graphId:p.graphId,revision,resources:[
-    {id:"surface",version:0,residency:{kind:"external",source:"surface_color"},texture:{dimension:"d2",format:"surface",extent,mipLevelCount:1,sampleCount:1}},
-    {id:"depth",version:0,residency:{kind:"transient"},texture:{dimension:"d2",format:"depth32_float",extent,mipLevelCount:1,sampleCount:1}},
-  ],passes:[{id:"forward",state:p.passState,executor:{key:"scene_forward",version:1},parameters:{},reads:[],writes:[
-    {binding:"color",resource:{id:"surface",version:0},access:{kind:"color_attachment",location:0,load:{op:"clear",value:p.clearColor},store:"store"}},
-    {binding:"depth",resource:{id:"depth",version:0},access:{kind:"depth_attachment",load:{op:"clear",value:p.clearDepth},store:"store"}},
-  ]}],outputs:[{name:"present",resource:{id:"surface",version:0}}]};
+const fail = (code, details) => {
+  throw new AuthoringGraphError(code, details);
+};
+const object = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const identifier = (value) =>
+  typeof value === "string" &&
+  /^[A-Za-z][A-Za-z0-9_.-]*$/.test(value) &&
+  new TextEncoder().encode(value).length <= 64;
+const exactKeys = (value, keys) =>
+  object(value) &&
+  Object.keys(value).length === keys.length &&
+  keys.every((key) => Object.hasOwn(value, key));
+const finiteJson = (value) =>
+  value === null ||
+  typeof value === "string" ||
+  typeof value === "boolean" ||
+  (typeof value === "number" && Number.isFinite(value)) ||
+  (Array.isArray(value) && value.every(finiteJson)) ||
+  (object(value) && Object.values(value).every(finiteJson));
+const canonical = (value) =>
+  Array.isArray(value)
+    ? value.map(canonical)
+    : object(value)
+      ? Object.fromEntries(
+          Object.keys(value)
+            .sort()
+            .map((key) => [key, canonical(value[key])]),
+        )
+      : value;
+const deepFreeze = (value) => {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+};
+const sourceMaps = new WeakMap();
+export const getSourceMap = (ir) => sourceMaps.get(ir);
+export const mapAuthoringDiagnostic = (ir, diagnostic) => {
+  const details = diagnostic?.details;
+  const path = [details?.path, diagnostic?.path, details?.field, diagnostic?.field]
+    .find((value) => typeof value === "string");
+  const map = getSourceMap(ir);
+  let match;
+  if (path && map)
+    for (const key of Object.keys(map))
+      if (
+        (path === key || path.startsWith(`${key}.`) || path.startsWith(`${key}[`)) &&
+        (!match || key.length > match.length)
+      )
+        match = key;
+  return deepFreeze({
+    name: diagnostic?.name,
+    code: diagnostic?.code,
+    message: details?.message ?? diagnostic?.message ?? diagnostic?.code,
+    details: details === undefined ? undefined : structuredClone(details),
+    path,
+    source: match ? structuredClone(map[match]) : undefined,
+  });
+};
+
+const mapValuePaths = (paths, path, source, value) => {
+  paths[path] = source;
+  if (Array.isArray(value))
+    value.forEach((child, index) => mapValuePaths(paths, `${path}[${index}]`, source, child));
+  else if (object(value))
+    for (const key of Object.keys(value))
+      mapValuePaths(paths, `${path}.${key}`, source, value[key]);
+};
+
+function parameterValue(raw, schema, nodeId, key) {
+  const expected = schema.type === "json" ? "json" : schema.type;
+  if (
+    !exactKeys(raw, ["kind", "value"]) ||
+    raw.kind !== expected ||
+    !finiteJson(raw.value)
+  )
+    fail("AUTHORING_PARAMETER", { nodeId, parameter: key });
+  if (
+    (expected === "number" && typeof raw.value !== "number") ||
+    (expected === "string" && typeof raw.value !== "string") ||
+    (expected === "boolean" && typeof raw.value !== "boolean") ||
+    (expected === "json" && !finiteJson(raw.value))
+  )
+    fail("AUTHORING_PARAMETER", { nodeId, parameter: key });
+  return canonical(structuredClone(raw.value));
 }
-export const adaptFxNodeSnapshot=(snapshot,revision=1)=>semanticProjectionToV1(projectAuthoringSnapshot(snapshot),revision);
-export const adaptGraphSnapshot=adaptFxNodeSnapshot;
+
+export function adaptFxNodeSnapshot(raw, revision = 1) {
+  try {
+    const rootKeys = ["graphId", "catalogVersion", "nodes", "links", "metadata", "version"];
+    if (
+      !exactKeys(raw, rootKeys) ||
+      !Array.isArray(raw.nodes) ||
+      !Array.isArray(raw.links) ||
+      !object(raw.metadata) ||
+      !finiteJson(raw.metadata)
+    )
+      fail("AUTHORING_SHAPE");
+    if (raw.graphId !== GRAPH_ID || raw.catalogVersion !== CATALOG_VERSION)
+      fail("AUTHORING_CATALOG");
+    if (
+      !Number.isSafeInteger(raw.version) || raw.version < 0
+    )
+      fail("AUTHORING_SHAPE");
+    if (!Number.isInteger(revision) || revision < 1 || revision > 0xffffffff)
+      fail("AUTHORING_REVISION");
+    const nodes = new Map(),
+      sockets = new Map(),
+      paths = {};
+    for (let ordinal = 0; ordinal < raw.nodes.length; ordinal++) {
+      const n = raw.nodes[ordinal];
+      if (!object(n) || !identifier(n.id)) fail("AUTHORING_ID", { id: n?.id });
+      if (nodes.has(n.id)) fail("AUTHORING_ID_DUPLICATE", { id: n.id });
+      const descriptor = descriptors[n.typeId],
+        definition = nodeDefinitions[n.typeId];
+      if (!descriptor)
+        fail("AUTHORING_NODE_TYPE", { nodeId: n.id, typeId: n.typeId });
+      const nodeKeys = ["id", "typeId", "typeVersion", "position", "size", "label", "parameters", "sockets", "muted", "collapsed", "extensions", "known"];
+      if (Object.hasOwn(n, "parentId")) nodeKeys.push("parentId");
+      if (
+        !exactKeys(n, nodeKeys) ||
+        n.known !== true ||
+        n.typeVersion !== 1 ||
+        typeof n.muted !== "boolean" ||
+        typeof n.collapsed !== "boolean" ||
+        typeof n.label !== "string" ||
+        !exactKeys(n.position, ["x", "y"]) || !Number.isFinite(n.position.x) || !Number.isFinite(n.position.y) ||
+        !exactKeys(n.size, ["x", "y"]) || !Number.isFinite(n.size.x) || !Number.isFinite(n.size.y) || n.size.x <= 0 || n.size.y <= 0 ||
+        (Object.hasOwn(n, "parentId") && !identifier(n.parentId)) ||
+        !object(n.extensions) || !finiteJson(n.extensions) ||
+        !Array.isArray(n.sockets) ||
+        !object(n.parameters)
+      )
+        fail("AUTHORING_NODE_INVALID", { nodeId: n.id });
+      const parameterKeys = Object.keys(definition.parameters);
+      if (
+        Object.keys(n.parameters).length !== parameterKeys.length ||
+        !parameterKeys.every((key) => Object.hasOwn(n.parameters, key))
+      )
+        fail("AUTHORING_PARAMETER_SET", { nodeId: n.id });
+      const parameters = Object.fromEntries(
+        parameterKeys.map((key) => [
+          key,
+          parameterValue(
+            n.parameters[key],
+            definition.parameters[key],
+            n.id,
+            key,
+          ),
+        ]),
+      );
+      const expected = [
+        ...Object.keys(descriptor.inputs),
+        ...Object.keys(descriptor.outputs),
+      ];
+      if (n.sockets.length !== expected.length)
+        fail("AUTHORING_SOCKET_SET", { nodeId: n.id });
+      for (const s of n.sockets) {
+        if (!object(s) || !expected.includes(s.key) || sockets.has(s.id))
+          fail("AUTHORING_SOCKET", { nodeId: n.id, socket: s?.key });
+        const input = descriptor.inputs[s.key],
+          socketDefinition = definition.sockets[s.key],
+          direction = input ? "input" : "output",
+          dataType = socketDefinition.type,
+          socketKeys = ["id", "key", "label", "direction", "dataType", "accepts", "maxIncomingLinks", ...(socketDefinition.value ? ["defaultValue"] : []), "visible"];
+        if (
+          !exactKeys(s, socketKeys) ||
+          s.id !== `${n.id}:${s.key}` ||
+          s.label !== socketDefinition.title ||
+          s.direction !== direction ||
+          s.dataType !== dataType ||
+          !Array.isArray(s.accepts) || s.accepts.length !== (direction === "input" ? socketTypes[dataType].acceptsFrom.length : 0) ||
+          !s.accepts.every((v, i) => v === (direction === "input" ? socketTypes[dataType].acceptsFrom[i] : undefined)) ||
+          (socketDefinition.value
+            ? !exactKeys(s.defaultValue, ["kind", "value"]) || !finiteJson(s.defaultValue.value)
+            : s.defaultValue !== undefined) ||
+          s.visible !== socketDefinition.visible ||
+          s.maxIncomingLinks !== socketDefinition.maxIncomingLinks
+        )
+          fail("AUTHORING_SOCKET", { nodeId: n.id, socket: s.key });
+        sockets.set(s.id, {
+          node: n.id,
+          key: s.key,
+          direction,
+          semanticType: input
+            ? input.accepted.types[0]
+            : descriptor.outputs[s.key].type,
+          authoringType: s.dataType,
+          maxIncomingLinks: s.maxIncomingLinks,
+        });
+      }
+      if (new Set(n.sockets.map((s) => s.key)).size !== expected.length)
+        fail("AUTHORING_SOCKET_SET", { nodeId: n.id });
+      nodes.set(n.id, {
+        ordinal,
+        value: {
+          id: n.id,
+          state: n.muted ? "muted" : "enabled",
+          executor: { key: n.typeId, version: 1 },
+          parameters,
+          inputs: {},
+        },
+      });
+    }
+    const incoming = new Map(),
+      linkIds = new Set(),
+      linkSources = new Map();
+    for (let ordinal = 0; ordinal < raw.links.length; ordinal++) {
+      const link = raw.links[ordinal];
+      if (
+        !object(link) ||
+        !identifier(link.id) ||
+        linkIds.has(link.id) ||
+        !exactKeys(link, ["id", "fromNodeId", "fromSocketId", "toNodeId", "toSocketId", "muted", "extensions"]) ||
+        typeof link.muted !== "boolean" || !object(link.extensions) || !finiteJson(link.extensions)
+      )
+        fail("AUTHORING_LINK", { linkId: link?.id });
+      linkIds.add(link.id);
+      const from = sockets.get(link.fromSocketId),
+        to = sockets.get(link.toSocketId);
+      if (
+        !from ||
+        !to ||
+        link.fromNodeId !== from.node ||
+        link.toNodeId !== to.node ||
+        from.direction !== "output" ||
+        to.direction !== "input" ||
+        (!link.muted && (incoming.get(link.toSocketId) ?? 0) >= to.maxIncomingLinks)
+      )
+        fail(
+          !link.muted && (incoming.get(link.toSocketId) ?? 0) >= (to?.maxIncomingLinks ?? Infinity)
+            ? "AUTHORING_LINK_INCOMING"
+            : "AUTHORING_LINK",
+          !link.muted && (incoming.get(link.toSocketId) ?? 0) >= (to?.maxIncomingLinks ?? Infinity)
+            ? { socketId: link.toSocketId }
+            : { linkId: link.id },
+        );
+      const accepted =
+        descriptors[nodes.get(to.node).value.executor.key].inputs[to.key]
+          .accepted.types;
+      const authoringAccepted = socketTypes[nodeDefinitions[nodes.get(to.node).value.executor.key].sockets[to.key].type].acceptsFrom;
+      if (!accepted.includes(from.semanticType) || !authoringAccepted.includes(from.authoringType))
+        fail("AUTHORING_LINK_TYPE", { linkId: link.id });
+      const linkSource = {
+        kind: "link",
+        linkId: link.id,
+        fromNodeId: link.fromNodeId,
+        fromSocketId: link.fromSocketId,
+        toNodeId: link.toNodeId,
+        toSocketId: link.toSocketId,
+        muted: link.muted,
+        nodeId: to.node,
+        input: to.key,
+        fromSocket: from.key,
+        toSocket: to.key,
+      };
+      linkSources.set(link.id, linkSource);
+      if (!link.muted) {
+        incoming.set(link.toSocketId, (incoming.get(link.toSocketId) ?? 0) + 1);
+        nodes.get(to.node).value.inputs[to.key] = {
+          node: from.node,
+          socket: from.key,
+        };
+      }
+    }
+    const ordered = [...nodes.values()].sort((a, b) =>
+      a.value.id < b.value.id
+        ? -1
+        : a.value.id > b.value.id
+          ? 1
+          : a.ordinal - b.ordinal,
+    );
+    for (let wireOrdinal = 0; wireOrdinal < ordered.length; wireOrdinal++) {
+      const item = ordered[wireOrdinal];
+      item.value.inputs = Object.fromEntries(
+        Object.keys(descriptors[item.value.executor.key].inputs)
+          .filter((key) => Object.hasOwn(item.value.inputs, key))
+          .map((key) => [key, item.value.inputs[key]]),
+      );
+      const base = `nodes[${wireOrdinal}]`;
+      const nodeSource = { kind: "node", nodeId: item.value.id };
+      paths[base] = nodeSource;
+      for (const field of ["id", "state", "executor", "executor.key", "executor.version"])
+        paths[`${base}.${field}`] = nodeSource;
+      paths[`${base}.parameters`] = nodeSource;
+      for (const key of Object.keys(item.value.parameters))
+        mapValuePaths(paths, `${base}.parameters.${key}`, { kind: "parameter", nodeId: item.value.id, parameter: key }, item.value.parameters[key]);
+      for (const key of Object.keys(descriptors[item.value.executor.key].inputs)) {
+        const link = raw.links.find((x) => !x.muted && x.toNodeId === item.value.id && sockets.get(x.toSocketId)?.key === key);
+        const source = linkSources.get(link?.id) ?? {
+          kind: "input",
+          nodeId: item.value.id,
+          input: key,
+          socketId: `${item.value.id}:${key}`,
+          unconnected: true,
+        };
+        paths[`${base}.inputs.${key}`] = source;
+        if (link) {
+          paths[`${base}.inputs.${key}.node`] = source;
+          paths[`${base}.inputs.${key}.socket`] = {
+            kind: "socket",
+            nodeId: link.fromNodeId,
+            socketId: link.fromSocketId,
+            socket: sockets.get(link.fromSocketId).key,
+            linkId: link.id,
+          };
+        }
+      }
+      paths[`${base}.inputs`] = nodeSource;
+    }
+    const ir = {
+      schemaVersion: 2,
+      graphId: GRAPH_ID,
+      revision,
+      nodes: ordered.map((item) => item.value),
+    };
+    const graphSource = { kind: "graph", graphId: GRAPH_ID };
+    for (const field of ["schemaVersion", "graphId", "revision", "nodes"])
+      paths[field] = graphSource;
+    deepFreeze(paths);
+    deepFreeze(ir);
+    sourceMaps.set(ir, paths);
+    return ir;
+  } catch (error) {
+    if (error instanceof AuthoringGraphError) throw error;
+    fail("AUTHORING_SHAPE");
+  }
+}
+export const adaptGraphSnapshot = adaptFxNodeSnapshot;
+
+/** Compatibility helper retained for V1 presets. */
+export function semanticProjectionToV1(p, revision = 1) {
+  const extent = {
+    kind: "surface_relative",
+    width: { numerator: 1, denominator: 1 },
+    height: { numerator: 1, denominator: 1 },
+    depthOrArrayLayers: 1,
+  };
+  return {
+    schemaVersion: 1,
+    graphId: p.graphId,
+    revision,
+    resources: [
+      {
+        id: "surface",
+        version: 0,
+        residency: { kind: "external", source: "surface_color" },
+        texture: {
+          dimension: "d2",
+          format: "surface",
+          extent,
+          mipLevelCount: 1,
+          sampleCount: 1,
+        },
+      },
+      {
+        id: "depth",
+        version: 0,
+        residency: { kind: "transient" },
+        texture: {
+          dimension: "d2",
+          format: "depth32_float",
+          extent,
+          mipLevelCount: 1,
+          sampleCount: 1,
+        },
+      },
+    ],
+    passes: [
+      {
+        id: "forward",
+        state: p.passState,
+        executor: { key: "scene_forward", version: 1 },
+        parameters: {},
+        reads: [],
+        writes: [
+          {
+            binding: "color",
+            resource: { id: "surface", version: 0 },
+            access: {
+              kind: "color_attachment",
+              location: 0,
+              load: { op: "clear", value: p.clearColor },
+              store: "store",
+            },
+          },
+          {
+            binding: "depth",
+            resource: { id: "depth", version: 0 },
+            access: {
+              kind: "depth_attachment",
+              load: { op: "clear", value: p.clearDepth },
+              store: "store",
+            },
+          },
+        ],
+      },
+    ],
+    outputs: [{ name: "present", resource: { id: "surface", version: 0 } }],
+  };
+}

@@ -12,7 +12,7 @@ export class RendererError extends Error {
 export class RendererClient {
   #bridge; #worker; #header; #slots; #buffer; #next = 1; #payload = 1;
   #pending = new Map(); #payloadPending = new Map(); #payloadActive = new Set(); #ready; #disposed = false;
-  #telemetry; #stopped = false;
+  #telemetry; #profile; #stopped = false;
   #graphQueue = []; #graphBusy = false;
   #bvh; #snapshotReader; #picking = true; #snapshotEpoch = 0; #pickNext = 1; #picks = new Map();
 
@@ -40,6 +40,7 @@ export class RendererClient {
 
   get ready() { return this.#ready; }
   get telemetry() { return this.#telemetry; }
+  get profile() { return this.#profile; }
 
   #refreshViews() {
     const buffer = this.#bridge.memory.buffer;
@@ -61,6 +62,9 @@ export class RendererClient {
     } else if (message?.type === "telemetry") {
       this.#telemetry = message;
       dispatchEvent(new CustomEvent("renderer-frame", { detail: message }));
+    } else if (message?.type === "profile-snapshot") {
+      this.#profile = message;
+      dispatchEvent(new CustomEvent("renderer-profile", { detail: message }));
     } else if (message?.type === "fatal") {
       console.error("renderer worker fatal", message.code, message.message);
       this.#fail(message.code || "WORKER_FATAL");

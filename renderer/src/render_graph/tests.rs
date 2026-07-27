@@ -213,12 +213,13 @@ fn registry_capacity() {
     );
 }
 #[test]
-fn registry_revision_replaces_in_place() {
-    let mut r = Registry::new(1);
+fn registry_revision_creates_immutable_handle() {
+    let mut r = Registry::new(2);
     let (a, _) = r.compile(&empty("g", 1)).unwrap();
     let (b, _) = r.compile(&empty("g", 2)).unwrap();
-    assert_eq!(a, b);
-    assert_eq!(r.get(a).unwrap().revision, 2);
+    assert_ne!(a, b);
+    assert_eq!(r.get(a).unwrap().revision, 1);
+    assert_eq!(r.get(b).unwrap().revision, 2);
 }
 #[test]
 fn registry_revision_conflict() {

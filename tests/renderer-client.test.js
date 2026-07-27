@@ -55,6 +55,12 @@ test("pending reply exists before ring publication", async () => {
   worker.reply({type:"reply",request:2,ok:true});
   await pending;
 });
+test("profile snapshots have a dedicated getter", () => {
+  const f=fixture(), snapshot={type:"profile-snapshot",available:true,epoch:3,passes:{forward:1.25}};
+  const dispatch=globalThis.dispatchEvent; globalThis.dispatchEvent=()=>true;
+  try { f.worker.reply(snapshot); assert.strictEqual(f.client.profile,snapshot); }
+  finally { globalThis.dispatchEvent=dispatch; f.client.dispose(); }
+});
 test("worker failures and dispose reject every pending operation", async () => {
   const f=fixture(), mesh=await imported(f); const {worker,client,bridge}=f;
   const a=mesh.setVisible(true), b=mesh.setVisible(false);

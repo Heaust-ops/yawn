@@ -3,6 +3,7 @@ use crate::render_data::handle::SlotState;
 
 const POSITIONS: [[f32; 3]; 3] = [[-1.0, 2.0, 3.0], [4.0, -2.0, 1.0], [0.0, 1.0, -3.0]];
 const NORMALS: [[f32; 3]; 3] = [[0.0, 1.0, 0.0]; 3];
+const TANGENTS: [[f32; 4]; 3] = [[1.0, 0.0, 0.0, 1.0]; 3];
 const UVS: [[f32; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
 const INDICES: [u32; 3] = [0, 1, 2];
 
@@ -10,9 +11,11 @@ fn info() -> MeshCreateInfo<'static> {
     MeshCreateInfo {
         positions: &POSITIONS,
         normals: &NORMALS,
+        tangents: &TANGENTS,
         uvs: &UVS,
         indices: &INDICES,
         pipeline: PipelineKey::new(7),
+        material: MaterialKey::new(11),
         flags: RenderFlags::from_bits_retain(2),
         default_instance_flags: RenderFlags::VISIBLE,
         default_transform: IDENTITY_MODEL_TRANSFORM,
@@ -83,6 +86,10 @@ fn default_instance_is_protected_and_flags_are_separate() {
     let created = data.create_mesh(info()).unwrap();
     assert!(data.instance(created.default_instance).unwrap().is_default);
     assert_eq!(data.mesh(created.mesh).unwrap().flags.bits(), 2);
+    assert_eq!(
+        data.mesh(created.mesh).unwrap().material,
+        MaterialKey::new(11)
+    );
     assert_eq!(
         data.instance(created.default_instance).unwrap().flags,
         RenderFlags::VISIBLE
@@ -239,6 +246,7 @@ fn streams_remain_coordinated_across_interior_delete_tail_delete_and_reuse() {
     data.destroy_mesh(second.mesh).unwrap();
     assert_eq!(data.streams().positions.len(), 3);
     assert_eq!(data.streams().normals.len(), 3);
+    assert_eq!(data.streams().tangents.len(), 3);
     assert_eq!(data.streams().uvs.len(), 3);
     assert_eq!(data.indices().len(), 3);
 }
@@ -288,6 +296,7 @@ fn aabb_supports_one_point_and_multiple_points() {
     let mut one = info();
     one.positions = &point;
     one.normals = &normal;
+    one.tangents = &[[1.0, 0.0, 0.0, 1.0]];
     one.uvs = &uv;
     one.indices = &index;
     let mut data = data();
@@ -325,6 +334,13 @@ fn malformed_geometry_matrix_is_rejected_without_consumption() {
         data.create_mesh(candidate).unwrap_err(),
         RenderDataError::MismatchedVertexStreams
     );
+    let short_tangents = &TANGENTS[..2];
+    let mut candidate = info();
+    candidate.tangents = short_tangents;
+    assert_eq!(
+        data.create_mesh(candidate).unwrap_err(),
+        RenderDataError::MismatchedVertexStreams
+    );
     let short_uvs = &UVS[..2];
     let mut candidate = info();
     candidate.uvs = short_uvs;
@@ -339,19 +355,22 @@ fn malformed_geometry_matrix_is_rejected_without_consumption() {
         RenderDataError::EmptyIndices
     );
 
-    for stream in 0..3 {
+    for stream in 0..4 {
         for bad in [f32::NAN, f32::INFINITY] {
             let mut positions = POSITIONS;
             let mut normals = NORMALS;
+            let mut tangents = TANGENTS;
             let mut uvs = UVS;
             match stream {
                 0 => positions[0][0] = bad,
                 1 => normals[0][0] = bad,
+                2 => tangents[0][0] = bad,
                 _ => uvs[0][0] = bad,
             }
             let mut candidate = info();
             candidate.positions = &positions;
             candidate.normals = &normals;
+            candidate.tangents = &tangents;
             candidate.uvs = &uvs;
             assert_eq!(
                 data.create_mesh(candidate).unwrap_err(),

@@ -109,12 +109,15 @@ impl MainWorker {
     pub async fn run_render_loop<T: crate::renderer::scene::Scene + 'static>(
         events_chan: Receiver<WindowEvent>,
         ring: &'static CommandRing,
+        profile: bool,
     ) {
         use crate::renderer::Renderer;
 
         let canvas = wait_for_canvas_transfer().await;
 
-        let renderer = Rc::new(RefCell::new(Renderer::<T>::new(canvas, events_chan).await));
+        let renderer = Rc::new(RefCell::new(
+            Renderer::<T>::new(canvas, events_chan, profile).await,
+        ));
         renderer.borrow_mut().command_ring = Some(ring);
         Renderer::run_render_loop(renderer);
     }

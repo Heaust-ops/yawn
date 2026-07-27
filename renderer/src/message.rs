@@ -1,6 +1,40 @@
 use core::fmt;
 use std::cell::BorrowMutError;
 use std::sync::mpsc::TryRecvError;
+use wasm_bindgen::JsCast;
+
+pub const RIGHT_BUTTON_MASK: u16 = 0x02;
+pub const MIDDLE_BUTTON_MASK: u16 = 0x04;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraDrag {
+    Orbit,
+    Pan,
+}
+
+pub fn camera_drag(buttons: u16) -> Option<CameraDrag> {
+    if buttons & MIDDLE_BUTTON_MASK != 0 {
+        Some(CameraDrag::Orbit)
+    } else if buttons & RIGHT_BUTTON_MASK != 0 {
+        Some(CameraDrag::Pan)
+    } else {
+        None
+    }
+}
+
+pub fn normalize_wheel_delta(delta_y: f64, delta_mode: u32, viewport_height: f64) -> Option<f32> {
+    if !delta_y.is_finite() || !viewport_height.is_finite() {
+        return None;
+    }
+    let delta = match delta_mode {
+        0 => delta_y,
+        1 => delta_y * 16.0,
+        2 => delta_y * viewport_height.max(1.0),
+        _ => return None,
+    };
+    let delta = delta as f32;
+    delta.is_finite().then_some(delta)
+}
 
 #[derive(Debug)]
 pub enum WindowEvent {
@@ -42,10 +76,11 @@ pub struct MouseMessage {
     pub movement_y: f64,
     pub offset_x: f64,
     pub offset_y: f64,
+    pub viewport_height: f64,
 }
 
 impl MouseMessage {
-    pub fn from_evt(event: web_sys::MouseEvent) -> Self {
+    pub fn from_evt(event: &web_sys::MouseEvent, viewport_height: f64) -> Self {
         let window = web_sys::window().unwrap();
         Self {
             scale_factor: window.device_pixel_ratio(),
@@ -57,33 +92,24 @@ impl MouseMessage {
             movement_y: event.movement_y() as f64,
             offset_x: event.offset_x() as f64,
             offset_y: event.offset_y() as f64,
+            viewport_height,
         }
+    }
+
+    pub fn from_pointer_evt(event: &web_sys::PointerEvent, viewport_height: f64) -> Self {
+        Self::from_evt(event.unchecked_ref(), viewport_height)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct WheelMessage {
-    pub scale_factor: f64,
-    pub delta_x: f64,
-    pub delta_y: f64,
-    pub delta_z: f64,
-    pub delta_mode: u32,
-    pub client_x: f64,
-    pub client_y: f64,
+    pub delta_y_pixels: f32,
 }
 
 impl WheelMessage {
-    pub fn from_evt(event: web_sys::WheelEvent) -> Self {
-        let window = web_sys::window().unwrap();
-        Self {
-            scale_factor: window.device_pixel_ratio(),
-            delta_x: event.delta_x(),
-            delta_y: event.delta_y(),
-            delta_z: event.delta_z(),
-            delta_mode: event.delta_mode(),
-            client_x: event.client_x() as f64,
-            client_y: event.client_y() as f64,
-        }
+    pub fn from_evt(event: &web_sys::WheelEvent, viewport_height: f64) -> Option<Self> {
+        normalize_wheel_delta(event.delta_y(), event.delta_mode(), viewport_height)
+            .map(|delta_y_pixels| Self { delta_y_pixels })
     }
 }
 
@@ -145,5 +171,34 @@ impl From<TryRecvError> for DrainEventError {
 impl From<BorrowMutError> for DrainEventError {
     fn from(err: BorrowMutError) -> Self {
         DrainEventError::BorrowError(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_delta_is_normalized_to_css_pixels() {
+        assert_eq!(normalize_wheel_delta(12.5, 0, 640.0), Some(12.5));
+        assert_eq!(normalize_wheel_delta(2.0, 1, 640.0), Some(32.0));
+        assert_eq!(normalize_wheel_delta(-1.0, 2, 640.0), Some(-640.0));
+        assert_eq!(normalize_wheel_delta(2.0, 2, 0.0), Some(2.0));
+        assert_eq!(normalize_wheel_delta(1.0, 3, 640.0), None);
+        assert_eq!(normalize_wheel_delta(f64::NAN, 0, 640.0), None);
+        assert_eq!(normalize_wheel_delta(f64::INFINITY, 0, 640.0), None);
+        assert_eq!(normalize_wheel_delta(1.0, 0, f64::NAN), None);
+    }
+
+    #[test]
+    fn camera_drag_prefers_orbit_when_both_buttons_are_down() {
+        assert_eq!(camera_drag(0), None);
+        assert_eq!(camera_drag(1), None);
+        assert_eq!(camera_drag(RIGHT_BUTTON_MASK), Some(CameraDrag::Pan));
+        assert_eq!(camera_drag(MIDDLE_BUTTON_MASK), Some(CameraDrag::Orbit));
+        assert_eq!(
+            camera_drag(RIGHT_BUTTON_MASK | MIDDLE_BUTTON_MASK),
+            Some(CameraDrag::Orbit)
+        );
     }
 }
