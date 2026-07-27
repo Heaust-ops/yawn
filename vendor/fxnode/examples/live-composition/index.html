@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>fxnode live composition</title>
+    <link rel="stylesheet" href="../shared/example.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Live composition migration</h1>
+      <p>
+        Updates a version 1 schema to version 2 and materializes a missing detail parameter. This demonstrates
+        composition, not graph execution or evaluation.
+      </p>
+      <button id="compose" type="button">Compose version 2</button>
+      <span id="status" role="status">Version 1 ready</span
+      ><canvas id="graph" width="1000" height="560" aria-label="Live composition node graph"></canvas>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

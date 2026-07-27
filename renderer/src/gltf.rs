@@ -1,216 +1,252 @@
+use std::collections::HashMap;
+
 use gltf::Gltf;
 use ultraviolet::{Mat4, Vec3};
-use wgpu::TextureFormat;
 
-use crate::renderer::scene::{mesh_vertex_layout, MeshBuilder};
+use crate::render_data::{
+    InstanceHandle, MeshCreateInfo, MeshHandle, ModelTransform, PipelineKey, RenderData,
+    RenderDataError, RenderFlags,
+};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
+pub struct InstalledScene {
+    pub meshes: Vec<MeshHandle>,
+    pub instances: Vec<InstanceHandle>,
+    pub bounds: Option<ModelBounds>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModelBounds {
     pub min: [f32; 3],
     pub max: [f32; 3],
 }
-
 impl ModelBounds {
-    fn new(min: [f32; 3], max: [f32; 3]) -> Self {
-        Self { min, max }
-    }
-
-    fn include_point(&mut self, point: [f32; 3]) {
+    fn include(&mut self, p: [f32; 3]) {
         for i in 0..3 {
-            self.min[i] = self.min[i].min(point[i]);
-            self.max[i] = self.max[i].max(point[i]);
+            self.min[i] = self.min[i].min(p[i]);
+            self.max[i] = self.max[i].max(p[i]);
         }
     }
+}
+
+fn focus_bounds(points: &[[f32; 3]]) -> Option<ModelBounds> {
+    let first = *points.first()?;
+    if points.len() < 200 {
+        let mut bounds = ModelBounds {
+            min: first,
+            max: first,
+        };
+        for point in &points[1..] {
+            bounds.include(*point);
+        }
+        return Some(bounds);
+    }
+
+    let trim = points.len() / 100;
+    let mut min = [0.0; 3];
+    let mut max = [0.0; 3];
+    for axis in 0..3 {
+        let mut values: Vec<_> = points.iter().map(|point| point[axis]).collect();
+        values.sort_by(f32::total_cmp);
+        min[axis] = values[trim];
+        max[axis] = values[values.len() - trim - 1];
+    }
+    Some(ModelBounds { min, max })
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
-    #[error("failed to fetch the model")]
-    Http(#[from] reqwest::Error),
-
     #[error("failed to decode bytes")]
     GltfParse(#[from] gltf::Error),
-
-    #[error("failed to load model")]
-    LoadError,
-
-    #[error("{0}")]
-    Other(String),
+    #[error("unsupported or malformed primitive: {0}")]
+    InvalidPrimitive(String),
+    #[error("failed to install imported scene")]
+    Install(#[from] RenderDataError),
 }
 
-fn convert_tex_coords(tex_coords: gltf::mesh::util::ReadTexCoords<'_>) -> Vec<[f32; 2]> {
-    use gltf::mesh::util::ReadTexCoords;
-
-    match tex_coords {
-        ReadTexCoords::F32(iter) => iter.collect(),
-        ReadTexCoords::U16(iter) => iter
-            .map(|[u, v]| [u as f32 / u16::MAX as f32, v as f32 / u16::MAX as f32])
-            .collect(),
-        ReadTexCoords::U8(iter) => iter
-            .map(|[u, v]| [u as f32 / u8::MAX as f32, v as f32 / u8::MAX as f32])
-            .collect(),
-    }
+#[derive(Clone, Debug)]
+pub struct ImportedGeometry {
+    pub key: (usize, usize),
+    pub double_sided: bool,
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+#[derive(Clone, Debug)]
+pub struct ImportedOccurrence {
+    pub key: (usize, usize),
+    pub transform: ModelTransform,
+}
+#[derive(Clone, Debug, Default)]
+pub struct ImportedScene {
+    pub geometries: Vec<ImportedGeometry>,
+    pub occurrences: Vec<ImportedOccurrence>,
 }
 
-fn convert_indices(indices: gltf::mesh::util::ReadIndices<'_>) -> Vec<u32> {
-    use gltf::mesh::util::ReadIndices;
-
-    match indices {
-        ReadIndices::U8(iter) => iter.map(|i| i as u32).collect(),
-        ReadIndices::U16(iter) => iter.map(|i| i as u32).collect(),
-        ReadIndices::U32(iter) => iter.collect(),
-    }
-}
-
-fn visit_node<'a>(
-    node: gltf::Node<'a>,
-    parent_transform: Mat4,
-    device: &wgpu::Device,
-    resources: &mut crate::renderer::GpuResources,
-    meshes: &mut Vec<crate::renderer::scene::Mesh>,
-    data_blob: &[u8],
-    pipeline_index: usize,
-    model_bounds: &mut Option<ModelBounds>,
-) {
-    let local_transform = Mat4::from(node.transform().matrix());
-    let world_transform = parent_transform * local_transform;
-    let normal_matrix = world_transform.inversed().transposed();
-
-    if let Some(mesh) = node.mesh() {
-        for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buffer| match buffer.source() {
-                gltf::buffer::Source::Bin => Some(&data_blob[..]),
-                _ => None,
-            });
-
-            let positions: Vec<[f32; 3]> = match reader.read_positions() {
-                Some(iter) => iter.collect(),
-                None => Vec::new(),
-            };
-
-            if positions.is_empty() {
-                continue;
-            }
-
-            let vertex_count = positions.len();
-
-            let default_normal_vec = normal_matrix.transform_vec3(Vec3::unit_y()).normalized();
-            let default_normal = [
-                default_normal_vec.x,
-                default_normal_vec.y,
-                default_normal_vec.z,
-            ];
-
-            let mut normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|iter| {
-                    iter.map(|normal| {
-                        let vec = Vec3::new(normal[0], normal[1], normal[2]);
-                        let transformed = normal_matrix.transform_vec3(vec).normalized();
-                        [transformed.x, transformed.y, transformed.z]
-                    })
-                    .collect()
-                })
-                .unwrap_or_else(|| vec![default_normal; vertex_count]);
-
-            if normals.len() != vertex_count {
-                normals.resize(vertex_count, default_normal);
-            }
-
-            let mut uvs: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map(convert_tex_coords)
-                .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
-
-            if uvs.len() != vertex_count {
-                uvs.resize(vertex_count, [0.0, 0.0]);
-            }
-
-            for position in &positions {
-                let vec = Vec3::new(position[0], position[1], position[2]);
-                let transformed = world_transform.transform_point3(vec);
-                let world_point = [transformed.x, transformed.y, transformed.z];
-                if let Some(bounds) = model_bounds.as_mut() {
-                    bounds.include_point(world_point);
-                } else {
-                    *model_bounds = Some(ModelBounds::new(world_point, world_point));
+pub fn decode_gltf(bytes: &[u8]) -> Result<ImportedScene, ImportError> {
+    let model = Gltf::from_slice(bytes)?;
+    let buffers = gltf::import_buffers(&model.document, None, model.blob.clone())?;
+    let mut result = ImportedScene::default();
+    let mut seen = HashMap::new();
+    fn visit(
+        node: gltf::Node<'_>,
+        parent: Mat4,
+        buffers: &[gltf::buffer::Data],
+        result: &mut ImportedScene,
+        seen: &mut HashMap<(usize, usize), ()>,
+    ) -> Result<(), ImportError> {
+        let world = parent * Mat4::from(node.transform().matrix());
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                    return Err(ImportError::InvalidPrimitive(
+                        "only triangle primitives are supported".into(),
+                    ));
                 }
+                let key = (mesh.index(), primitive.index());
+                if seen.insert(key, ()).is_none() {
+                    let reader = primitive
+                        .reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+                    let Some(read_positions) = reader.read_positions() else {
+                        continue;
+                    };
+                    let positions: Vec<_> = read_positions.collect();
+                    let count = positions.len();
+                    if count == 0 {
+                        continue;
+                    }
+                    let mut normals: Vec<_> = reader
+                        .read_normals()
+                        .map(|x| x.collect())
+                        .unwrap_or_default();
+                    normals.resize(count, [0., 1., 0.]);
+                    normals.truncate(count);
+                    let mut uvs: Vec<_> = reader
+                        .read_tex_coords(0)
+                        .map(|x| x.into_f32().collect())
+                        .unwrap_or_default();
+                    uvs.resize(count, [0., 0.]);
+                    uvs.truncate(count);
+                    let indices: Vec<u32> = if let Some(indices) = reader.read_indices() {
+                        indices.into_u32().collect()
+                    } else {
+                        let count = u32::try_from(count).map_err(|_| {
+                            ImportError::InvalidPrimitive("vertex count exceeds u32".into())
+                        })?;
+                        (0..count).collect()
+                    };
+                    if indices.is_empty() {
+                        continue;
+                    }
+                    result.geometries.push(ImportedGeometry {
+                        key,
+                        double_sided: primitive.material().double_sided(),
+                        positions,
+                        normals,
+                        uvs,
+                        indices,
+                    });
+                } else if !result.geometries.iter().any(|geometry| geometry.key == key) {
+                    continue;
+                }
+                result.occurrences.push(ImportedOccurrence {
+                    key,
+                    transform: world.into(),
+                });
             }
-
-            let indices: Vec<u32> = reader
-                .read_indices()
-                .map(convert_indices)
-                .unwrap_or_else(|| (0..vertex_count as u32).collect());
-
-            if indices.is_empty() {
-                continue;
-            }
-
-            let mesh = MeshBuilder::default()
-                .with_vertices(device, resources, &positions, &normals, &uvs)
-                .with_indices(device, resources, &indices)
-                .with_pipeline(pipeline_index)
-                .with_model_matrix(device, resources, world_transform)
-                .build();
-
-            meshes.push(mesh);
         }
+        for child in node.children() {
+            visit(child, world, buffers, result, seen)?
+        }
+        Ok(())
     }
-
-    for child in node.children() {
-        visit_node(
-            child,
-            world_transform,
-            device,
-            resources,
-            meshes,
-            data_blob,
-            pipeline_index,
-            model_bounds,
-        );
-    }
-}
-
-pub async fn load_gltf_model(
-    device: &wgpu::Device,
-    resources: &mut crate::renderer::GpuResources,
-    meshes: &mut Vec<crate::renderer::scene::Mesh>,
-    surface_format: TextureFormat,
-) -> Result<Option<ModelBounds>, ImportError> {
-    let glb_data = reqwest::get("http://localhost:8080/themanor.glb")
-        .await?
-        .bytes()
-        .await?;
-
-    let model = Gltf::from_slice(&glb_data)?;
-    let data_blob = model.blob.as_ref().ok_or(ImportError::LoadError)?;
-
-    let vertex_layout = mesh_vertex_layout();
-
-    let pipeline_index = resources.get_or_create_pipeline(
-        device,
-        "gltf_standard",
-        &vertex_layout,
-        include_str!("./gltf.wgsl"),
-        surface_format,
-    );
-
-    let mut model_bounds: Option<ModelBounds> = None;
-
     for scene in model.scenes() {
         for node in scene.nodes() {
-            visit_node(
-                node,
-                Mat4::identity(),
-                device,
-                resources,
-                meshes,
-                data_blob,
-                pipeline_index,
-                &mut model_bounds,
-            );
+            visit(node, Mat4::identity(), &buffers, &mut result, &mut seen)?
         }
     }
+    Ok(result)
+}
 
-    Ok(model_bounds)
+pub fn install_imported(
+    target: &mut RenderData,
+    imported: &ImportedScene,
+    pipelines: [PipelineKey; 2],
+) -> Result<InstalledScene, ImportError> {
+    let mut stage = target.replacement_stage()?;
+    let mut handles = HashMap::new();
+    let mut mesh_handles = Vec::with_capacity(imported.geometries.len());
+    let mut instance_handles = Vec::new();
+    let mut first = HashMap::new();
+    for occurrence in &imported.occurrences {
+        first.entry(occurrence.key).or_insert(occurrence.transform);
+    }
+    for geometry in &imported.geometries {
+        let transform = *first
+            .get(&geometry.key)
+            .ok_or_else(|| ImportError::InvalidPrimitive("geometry has no occurrence".into()))?;
+        let created = stage.create_mesh(MeshCreateInfo {
+            positions: &geometry.positions,
+            normals: &geometry.normals,
+            uvs: &geometry.uvs,
+            indices: &geometry.indices,
+            pipeline: pipelines[usize::from(geometry.double_sided)],
+            flags: RenderFlags::VISIBLE,
+            default_instance_flags: RenderFlags::VISIBLE,
+            default_transform: transform,
+        })?;
+        handles.insert(geometry.key, created.mesh);
+        mesh_handles.push(created.mesh);
+        instance_handles.push(created.default_instance);
+    }
+    let mut consumed = HashMap::new();
+    let mut bounds: Option<ModelBounds> = None;
+    let geometries: HashMap<_, _> = imported
+        .geometries
+        .iter()
+        .map(|geometry| (geometry.key, geometry))
+        .collect();
+    let mut focus_points = Vec::new();
+    for occurrence in &imported.occurrences {
+        let mesh = *handles
+            .get(&occurrence.key)
+            .ok_or_else(|| ImportError::InvalidPrimitive("occurrence has no geometry".into()))?;
+        if consumed.insert(occurrence.key, ()).is_some() {
+            instance_handles.push(stage.create_instance(
+                mesh,
+                occurrence.transform,
+                RenderFlags::VISIBLE,
+            )?);
+        }
+        let geometry = geometries
+            .get(&occurrence.key)
+            .expect("installed occurrence must have geometry");
+        let transform = Mat4::from(occurrence.transform);
+        focus_points.extend(geometry.positions.iter().map(|position| {
+            let point = transform.transform_point3(Vec3::from(*position));
+            [point.x, point.y, point.z]
+        }));
+        let local = stage.mesh(mesh).unwrap().aabb;
+        for x in [local.min[0], local.max[0]] {
+            for y in [local.min[1], local.max[1]] {
+                for z in [local.min[2], local.max[2]] {
+                    let p = Mat4::from(occurrence.transform).transform_point3(Vec3::new(x, y, z));
+                    let p = [p.x, p.y, p.z];
+                    if let Some(b) = bounds.as_mut() {
+                        b.include(p)
+                    } else {
+                        bounds = Some(ModelBounds { min: p, max: p })
+                    }
+                }
+            }
+        }
+    }
+    bounds = focus_bounds(&focus_points).or(bounds);
+    target.replace_with(stage)?;
+    Ok(InstalledScene {
+        meshes: mesh_handles,
+        instances: instance_handles,
+        bounds,
+    })
 }

@@ -6,15 +6,16 @@ use wasm_bindgen::prelude::*;
 use renderer::app_setup::WebApp;
 use renderer::camera::Camera;
 use renderer::message::WindowEvent;
+use renderer::render_data::{MeshCreateInfo, RenderData, RenderFlags};
 use renderer::renderer as gpu_renderer;
-use renderer::renderer::scene::{mesh_vertex_layout, FrameMetadata, Mesh, MeshBuilder};
+use renderer::renderer::gpu_scene::vertex_layouts;
+use renderer::renderer::scene::FrameMetadata;
 
 /// Simple vertex format.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     pos: [f32; 3],
-    color: [f32; 3],
 }
 
 pub struct EditorScene {
@@ -23,13 +24,13 @@ pub struct EditorScene {
     bind_group_layouts: [wgpu::BindGroupLayout; 2],
     frame_metadata: FrameMetadata,
     cam: Camera,
-    meshes: Vec<Mesh>,
 }
 
 impl renderer::renderer::scene::Scene for EditorScene {
     fn setup(
         renderer_context: &gpu_renderer::RendererContext,
         resources: &mut gpu_renderer::GpuResources,
+        render_data: &mut RenderData,
     ) -> Self {
         let dimension = ultraviolet::Vec2::new(
             renderer_context.surface_config.width as f32,
@@ -57,12 +58,12 @@ impl renderer::renderer::scene::Scene for EditorScene {
             bind_group_layouts,
             frame_metadata,
             cam: camera,
-            meshes: Vec::new(),
         };
 
         scene.create_default_scene(
             &renderer_context.device,
             resources,
+            render_data,
             renderer_context.surface_config.format,
         );
 
@@ -77,16 +78,12 @@ impl renderer::renderer::scene::Scene for EditorScene {
         Some(&mut self.cam)
     }
 
-    fn uniform_buffers(&self) -> Option<&[wgpu::Buffer]> {
-        Some(&self.uniform_buffers)
+    fn uniform_buffers(&self) -> Option<[&wgpu::Buffer; 2]> {
+        Some([&self.uniform_buffers[0], &self.uniform_buffers[1]])
     }
 
     fn bind_groups(&self) -> &[wgpu::BindGroup] {
         &self.bind_groups
-    }
-
-    fn meshes(&self) -> &[Mesh] {
-        &self.meshes
     }
 
     fn handle_mouse_click(&mut self, x: f32, y: f32) {
@@ -99,14 +96,6 @@ impl renderer::renderer::scene::Scene for EditorScene {
 
     fn handle_orbit(&mut self, delta_x: f32, delta_y: f32) {
         self.cam.orbit(delta_x, delta_y);
-    }
-
-    fn clear(&mut self) {
-        self.meshes.clear();
-    }
-
-    fn add_mesh(&mut self, mesh: Mesh) {
-        self.meshes.push(mesh);
     }
 
     fn set_camera_depth_range(&mut self, near: f32, far: f32) {
@@ -135,28 +124,22 @@ impl EditorScene {
         // First triangle of quad
         Vertex {
             pos: [-5.0, 0.0, -5.0],
-            color: [0.2, 0.8, 0.2], // Green
         },
         Vertex {
             pos: [5.0, 0.0, -5.0],
-            color: [0.2, 0.8, 0.2], // Green
         },
         Vertex {
             pos: [-5.0, 0.0, 5.0],
-            color: [0.2, 0.8, 0.2], // Green
         },
         // Second triangle of quad
         Vertex {
             pos: [5.0, 0.0, -5.0],
-            color: [0.2, 0.8, 0.2], // Green
         },
         Vertex {
             pos: [5.0, 0.0, 5.0],
-            color: [0.2, 0.8, 0.2], // Green
         },
         Vertex {
             pos: [-5.0, 0.0, 5.0],
-            color: [0.2, 0.8, 0.2], // Green
         },
     ];
     // Wind the ground plane so the upward-facing side is front-facing (CCW from
@@ -167,6 +150,7 @@ impl EditorScene {
         &mut self,
         device: &wgpu::Device,
         resources: &mut gpu_renderer::GpuResources,
+        render_data: &mut RenderData,
         surface_format: wgpu::TextureFormat,
     ) {
         let positions: Vec<[f32; 3]> = Self::VERTICES.iter().map(|v| v.pos).collect();
@@ -181,7 +165,7 @@ impl EditorScene {
             [0.0, 1.0],
         ];
 
-        let vertex_layout = mesh_vertex_layout();
+        let vertex_layout = vertex_layouts();
 
         let pipeline_index = resources.get_or_create_pipeline(
             device,
@@ -194,28 +178,52 @@ impl EditorScene {
         let scale_factor = 100.0;
         let scale_matrix = Mat4::from_scale(scale_factor);
 
-        let mesh = MeshBuilder::default()
-            .with_vertices(device, resources, &positions, &normals, uvs)
-            .with_indices(device, resources, Self::INDICES)
-            .with_pipeline(pipeline_index)
-            .with_model_matrix(device, resources, scale_matrix)
-            .build();
-
-        self.meshes.push(mesh);
+        let transform: [[f32; 4]; 4] = scale_matrix.into();
+        render_data
+            .create_mesh(MeshCreateInfo {
+                positions: &positions,
+                normals: &normals,
+                uvs,
+                indices: Self::INDICES,
+                pipeline: pipeline_index,
+                flags: RenderFlags::VISIBLE,
+                default_instance_flags: RenderFlags::VISIBLE,
+                default_transform: transform,
+            })
+            .expect("ground plane geometry is valid");
     }
 }
 
 /// Entrypoint for the level editor
 #[wasm_bindgen]
-pub fn main() {
+pub fn main() -> Result<RendererBridge, JsValue> {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     wasm_logger::init(wasm_logger::Config::default());
 
-    wasm_bindgen_futures::spawn_local(async {
-        let runtime = LevelEditor::setup_runtime().unwrap();
-        // Keep the runtime running and prevent drops
-        Box::leak(Box::new(runtime));
-    });
+    let runtime = LevelEditor::setup_runtime()?;
+    Ok(RendererBridge { runtime })
+}
+
+/// Opaque owner of the worker, event listeners, and pinned command ring.
+#[wasm_bindgen]
+pub struct RendererBridge {
+    runtime: renderer::app_setup::WebAppRuntime,
+}
+
+#[wasm_bindgen]
+impl RendererBridge {
+    #[wasm_bindgen(getter)]
+    pub fn worker(&self) -> web_sys::Worker {
+        web_sys::Worker::clone(&*self.runtime.worker())
+    }
+    #[wasm_bindgen(getter, js_name = ringPtr)]
+    pub fn ring_ptr(&self) -> u32 {
+        self.runtime.ring_ptr()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn memory(&self) -> JsValue {
+        wasm_bindgen::memory()
+    }
 }
 
 renderer::export_worker_entrypoint!();

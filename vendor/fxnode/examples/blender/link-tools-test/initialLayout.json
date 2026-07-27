@@ -1,0 +1,855 @@
+{
+  "graphId": "link-tools-test",
+  "catalogVersion": 4,
+  "nodes": [
+    {
+      "id": "chain-math",
+      "typeId": "fxnode.shader.math",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": 260,
+        "y": -100
+      },
+      "size": {
+        "x": 192,
+        "y": 148
+      },
+      "label": "Math",
+      "parameters": {
+        "operation": {
+          "kind": "string",
+          "value": "add"
+        },
+        "clamp": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "chain-math:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "chain-math:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "chain-math:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "chain-source",
+      "typeId": "fxnode.shader.value",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": -560,
+        "y": -100
+      },
+      "size": {
+        "x": 151,
+        "y": 100
+      },
+      "label": "Value",
+      "parameters": {
+        "value": {
+          "kind": "number",
+          "value": 0
+        }
+      },
+      "sockets": [
+        {
+          "id": "chain-source:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "math-a",
+      "typeId": "fxnode.shader.math",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": 180,
+        "y": 240
+      },
+      "size": {
+        "x": 192,
+        "y": 148
+      },
+      "label": "Math",
+      "parameters": {
+        "operation": {
+          "kind": "string",
+          "value": "add"
+        },
+        "clamp": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "math-a:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "math-a:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "math-a:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "math-b",
+      "typeId": "fxnode.shader.math",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": 180,
+        "y": 120
+      },
+      "size": {
+        "x": 192,
+        "y": 148
+      },
+      "label": "Math",
+      "parameters": {
+        "operation": {
+          "kind": "string",
+          "value": "add"
+        },
+        "clamp": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "math-b:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "math-b:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "math-b:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "math-c",
+      "typeId": "fxnode.shader.math",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": 180,
+        "y": 0
+      },
+      "size": {
+        "x": 192,
+        "y": 148
+      },
+      "label": "Math",
+      "parameters": {
+        "operation": {
+          "kind": "string",
+          "value": "add"
+        },
+        "clamp": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "math-c:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "math-c:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "math-c:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "noise",
+      "typeId": "fxnode.shader.noise-texture",
+      "typeVersion": 2,
+      "known": true,
+      "position": {
+        "x": 180,
+        "y": -230
+      },
+      "size": {
+        "x": 286,
+        "y": 292
+      },
+      "label": "Noise Texture",
+      "parameters": {
+        "dimensions": {
+          "kind": "string",
+          "value": "3d"
+        },
+        "noiseType": {
+          "kind": "string",
+          "value": "fbm"
+        },
+        "normalize": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "noise:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "noise:w",
+          "key": "w",
+          "label": "W",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise:scale",
+          "key": "scale",
+          "label": "Scale",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 5
+          }
+        },
+        {
+          "id": "noise:detail",
+          "key": "detail",
+          "label": "Detail",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "noise:roughness",
+          "key": "roughness",
+          "label": "Roughness",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "noise:lacunarity",
+          "key": "lacunarity",
+          "label": "Lacunarity",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "noise:offset",
+          "key": "offset",
+          "label": "Offset",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise:gain",
+          "key": "gain",
+          "label": "Gain",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "noise:distortion",
+          "key": "distortion",
+          "label": "Distortion",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "noise:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "reroute",
+      "typeId": "fxnode.common.reroute",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": 0,
+        "y": -100
+      },
+      "size": {
+        "x": 10,
+        "y": 10
+      },
+      "label": "Reroute",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "reroute:input",
+          "key": "input",
+          "label": "Input",
+          "direction": "input",
+          "dataType": "any",
+          "accepts": [
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "reroute:output",
+          "key": "output",
+          "label": "Output",
+          "direction": "output",
+          "dataType": "any",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "source-a",
+      "typeId": "fxnode.shader.value",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": -560,
+        "y": 240
+      },
+      "size": {
+        "x": 151,
+        "y": 100
+      },
+      "label": "Value",
+      "parameters": {
+        "value": {
+          "kind": "number",
+          "value": 0
+        }
+      },
+      "sockets": [
+        {
+          "id": "source-a:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "source-b",
+      "typeId": "fxnode.shader.value",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": -560,
+        "y": 120
+      },
+      "size": {
+        "x": 151,
+        "y": 100
+      },
+      "label": "Value",
+      "parameters": {
+        "value": {
+          "kind": "number",
+          "value": 0
+        }
+      },
+      "sockets": [
+        {
+          "id": "source-b:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "source-c",
+      "typeId": "fxnode.shader.value",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": -560,
+        "y": 0
+      },
+      "size": {
+        "x": 151,
+        "y": 100
+      },
+      "label": "Value",
+      "parameters": {
+        "value": {
+          "kind": "number",
+          "value": 0
+        }
+      },
+      "sockets": [
+        {
+          "id": "source-c:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "transform",
+      "typeId": "fxnode.geometry.transform-geometry",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": -300,
+        "y": -230
+      },
+      "size": {
+        "x": 340,
+        "y": 148
+      },
+      "label": "Transform Geometry",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "transform:geometry",
+          "key": "geometry",
+          "label": "Geometry",
+          "direction": "input",
+          "dataType": "geometry",
+          "accepts": [
+            "geometry",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "transform:translation",
+          "key": "translation",
+          "label": "Translation",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "transform:rotation",
+          "key": "rotation",
+          "label": "Rotation",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "transform:scale",
+          "key": "scale",
+          "label": "Scale",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "transform:result",
+          "key": "result",
+          "label": "Geometry",
+          "direction": "output",
+          "dataType": "geometry",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    }
+  ],
+  "links": [
+    {
+      "id": "chain-in",
+      "fromNodeId": "chain-source",
+      "fromSocketId": "chain-source:value",
+      "toNodeId": "reroute",
+      "toSocketId": "reroute:input",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "chain-out",
+      "fromNodeId": "reroute",
+      "fromSocketId": "reroute:output",
+      "toNodeId": "chain-math",
+      "toSocketId": "chain-math:a",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "parallel-a",
+      "fromNodeId": "source-a",
+      "fromSocketId": "source-a:value",
+      "toNodeId": "math-a",
+      "toSocketId": "math-a:a",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "parallel-b",
+      "fromNodeId": "source-b",
+      "fromSocketId": "source-b:value",
+      "toNodeId": "math-b",
+      "toSocketId": "math-b:a",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "parallel-c",
+      "fromNodeId": "source-c",
+      "fromSocketId": "source-c:value",
+      "toNodeId": "math-c",
+      "toSocketId": "math-c:a",
+      "muted": false,
+      "extensions": {}
+    }
+  ],
+  "metadata": {}
+}

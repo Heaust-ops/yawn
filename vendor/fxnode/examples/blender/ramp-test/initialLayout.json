@@ -1,0 +1,128 @@
+{
+  "graphId": "ramp-test",
+  "catalogVersion": 4,
+  "nodes": [
+    {
+      "id": "frame",
+      "typeId": "fxnode.common.frame",
+      "typeVersion": 1,
+      "known": true,
+      "position": {
+        "x": -300,
+        "y": 250
+      },
+      "size": {
+        "x": 380,
+        "y": 310
+      },
+      "label": "Frame",
+      "parameters": {},
+      "sockets": [],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {}
+    },
+    {
+      "id": "ramp",
+      "typeId": "fxnode.shader.color-ramp",
+      "typeVersion": 2,
+      "known": true,
+      "position": {
+        "x": 40,
+        "y": -40
+      },
+      "size": {
+        "x": 320,
+        "y": 292
+      },
+      "label": "Color Ramp",
+      "parameters": {
+        "ramp": {
+          "kind": "json",
+          "value": {
+            "colorMode": "rgb",
+            "interpolation": "linear",
+            "hueInterpolation": "near",
+            "stops": [
+              {
+                "id": "red",
+                "position": 0.1,
+                "color": [
+                  1,
+                  0,
+                  0,
+                  1
+                ]
+              },
+              {
+                "id": "green",
+                "position": 0.35,
+                "color": [
+                  0,
+                  1,
+                  0,
+                  0.8
+                ]
+              },
+              {
+                "id": "blue",
+                "position": 0.9,
+                "color": [
+                  0,
+                  0,
+                  1,
+                  0.6
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "sockets": [
+        {
+          "id": "ramp:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "ramp:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "ramp:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "parentId": "frame"
+    }
+  ],
+  "links": [],
+  "metadata": {}
+}

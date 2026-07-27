@@ -1,0 +1,30 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts", "src/headless.ts", "src/widgets/color-ramp.ts"],
+  "entryPointStrategy": "resolve",
+  "alwaysCreateEntryPointModule": true,
+  "plugin": ["typedoc-plugin-markdown", "typedoc-vitepress-theme"],
+  "out": "docs/reference/generated",
+  "docsRoot": "docs",
+  "router": "member",
+  "readme": "none",
+  "disableGit": true,
+  "sourceLinkTemplate": "https://github.com/Heaust-ops/fxnode/blob/main/src/{path}#L{line}",
+  "intentionallyNotExported": ["ReferenceCheck"],
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeExternals": true,
+  "cleanOutputDir": true,
+  "categorizeByGroup": true,
+  "categoryOrder": ["Classes", "Interfaces", "Type Aliases", "Functions", "Variables", "*"],
+  "navigation": { "includeCategories": true, "includeGroups": true },
+  "sidebar": { "pretty": true },
+  "validation": {
+    "invalidLink": true,
+    "notDocumented": false,
+    "rewrittenLink": true,
+    "notExported": true
+  },
+  "treatWarningsAsErrors": true
+}

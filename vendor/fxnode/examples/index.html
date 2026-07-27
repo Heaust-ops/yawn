@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>fxnode examples</title>
+    <link rel="stylesheet" href="./gallery.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div>
+        <span class="eyebrow">Interactive TypeScript examples</span>
+        <h1>Build node editors with <em>fxnode</em></h1>
+        <p>
+          Explore composable nodes, live worker-owned state, independent views, and a Blender-inspired editor. Every
+          example runs locally in your browser.
+        </p>
+      </div>
+      <div class="architecture" aria-label="Architecture summary">
+        <span>Main thread host</span><i>→</i><span>Worker authority</span><i>→</i><span>Shared atlas</span>
+      </div>
+    </header>
+
+    <main>
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">Start here</span>
+          <h2>Standalone applications</h2>
+        </div>
+        <p>Open any card to run it.</p>
+      </div>
+      <nav class="gallery" aria-label="Featured examples">
+        <a href="./minimal/">
+          <img src="./assets/minimal.png" alt="Minimal node example" />
+          <span class="tag">Fundamentals</span><strong>Minimal</strong>
+          <p>Compose a socket and value node from scratch.</p>
+        </a>
+        <a href="./color-balance/">
+          <img src="./assets/color-balance.png" alt="Color Balance example" />
+          <span class="tag">Custom controls</span><strong>Color Balance</strong>
+          <p>Oklab grading wheels, controls, and persistence.</p>
+        </a>
+        <a href="./live-composition/">
+          <img src="./assets/live-composition.png" alt="Live composition example" />
+          <span class="tag">Runtime API</span><strong>Live composition</strong>
+          <p>Version and migrate definitions while the editor is running.</p>
+        </a>
+        <a href="./multi-view/">
+          <img src="./assets/multi-view.png" alt="Multi-view example" />
+          <span class="tag">Shared graph</span><strong>Multi-view</strong>
+          <p>Two cameras and selections backed by one worker and graph.</p>
+        </a>
+        <a class="featured" href="./blender/">
+          <span class="tag">Full application</span><strong>Blender-inspired catalog</strong>
+          <p>Explore the complete interactive node editor and its host-owned add menu.</p>
+          <span class="open">Launch editor <b>→</b></span>
+        </a>
+      </nav>
+
+      <section class="labs">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">Component lab</span>
+            <h2>Focused test scenes</h2>
+          </div>
+          <p>Useful for inspecting specific interactions and controls.</p>
+        </div>
+        <nav aria-label="Focused examples">
+          <a href="./blender/all-supported/"><strong>All supported nodes</strong><span>Complete catalog</span></a>
+          <a href="./blender/parity/"><strong>Parity scene</strong><span>Image and grading nodes</span></a>
+          <a href="./blender/control-test/"><strong>Control test</strong><span>Input editing</span></a>
+          <a href="./blender/ramp-test/"><strong>Color Ramp test</strong><span>Stops and interpolation</span></a>
+          <a href="./blender/link-tools-test/"><strong>Link tools</strong><span>Knife, mute, and reroute</span></a>
+        </nav>
+      </section>
+    </main>
+
+    <footer>fxnode keeps graph authority in a worker. Application code owns DOM presentation and lifecycle.</footer>
+  </body>
+</html>

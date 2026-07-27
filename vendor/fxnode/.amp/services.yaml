@@ -1,0 +1,6 @@
+services:
+  examples:
+    command: npm run examples -- --port "$PORT"
+    portal:
+      title: fxnode examples
+      description: Browse the interactive examples gallery and focused Blender-inspired test scenes.

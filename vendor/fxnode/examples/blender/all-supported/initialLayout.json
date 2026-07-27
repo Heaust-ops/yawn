@@ -1,0 +1,1832 @@
+{
+  "graphId": "all-supported",
+  "catalogVersion": 4,
+  "nodes": [
+    {
+      "id": "all-fxnode-common-frame",
+      "typeId": "fxnode.common.frame",
+      "typeVersion": 1,
+      "position": {
+        "x": 40,
+        "y": 0
+      },
+      "size": {
+        "x": 300,
+        "y": 100
+      },
+      "label": "Frame",
+      "parameters": {},
+      "sockets": [],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-common-group-input",
+      "typeId": "fxnode.common.group-input",
+      "typeVersion": 1,
+      "position": {
+        "x": 520,
+        "y": 0
+      },
+      "size": {
+        "x": 180,
+        "y": 100
+      },
+      "label": "Group Input",
+      "parameters": {
+        "interfaceName": {
+          "kind": "string",
+          "value": "Socket"
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-common-group-input:output",
+          "key": "output",
+          "label": "Interface",
+          "direction": "output",
+          "dataType": "any",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-common-group-output",
+      "typeId": "fxnode.common.group-output",
+      "typeVersion": 1,
+      "position": {
+        "x": 760,
+        "y": 0
+      },
+      "size": {
+        "x": 180,
+        "y": 100
+      },
+      "label": "Group Output",
+      "parameters": {
+        "interfaceName": {
+          "kind": "string",
+          "value": "Socket"
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-common-group-output:input",
+          "key": "input",
+          "label": "Interface",
+          "direction": "input",
+          "dataType": "any",
+          "accepts": [
+            "any"
+          ],
+          "maxIncomingLinks": 9007199254740991,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-common-reroute",
+      "typeId": "fxnode.common.reroute",
+      "typeVersion": 1,
+      "position": {
+        "x": 280,
+        "y": 0
+      },
+      "size": {
+        "x": 140,
+        "y": 100
+      },
+      "label": "Reroute",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-common-reroute:input",
+          "key": "input",
+          "label": "Input",
+          "direction": "input",
+          "dataType": "any",
+          "accepts": [
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-common-reroute:output",
+          "key": "output",
+          "label": "Output",
+          "direction": "output",
+          "dataType": "any",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-compositor-color-balance",
+      "typeId": "fxnode.compositor.color-balance",
+      "typeVersion": 1,
+      "position": {
+        "x": 280,
+        "y": -840
+      },
+      "size": {
+        "x": 400,
+        "y": 100
+      },
+      "label": "Color Balance",
+      "parameters": {
+        "mode": {
+          "kind": "string",
+          "value": "Lift/Gamma/Gain"
+        },
+        "lift": {
+          "kind": "number",
+          "value": 0
+        },
+        "liftColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "gamma": {
+          "kind": "number",
+          "value": 1
+        },
+        "gammaColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "gain": {
+          "kind": "number",
+          "value": 1
+        },
+        "gainColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "offset": {
+          "kind": "number",
+          "value": 0
+        },
+        "offsetColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "power": {
+          "kind": "number",
+          "value": 1
+        },
+        "powerColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "slope": {
+          "kind": "number",
+          "value": 1
+        },
+        "slopeColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "inputTemperature": {
+          "kind": "number",
+          "value": 6500
+        },
+        "inputTint": {
+          "kind": "number",
+          "value": 0
+        },
+        "inputColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        "outputTemperature": {
+          "kind": "number",
+          "value": 6500
+        },
+        "outputTint": {
+          "kind": "number",
+          "value": 0
+        },
+        "outputColor": {
+          "kind": "color",
+          "value": [
+            1,
+            1,
+            1,
+            1
+          ]
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-compositor-color-balance:image",
+          "key": "image",
+          "label": "Image",
+          "direction": "input",
+          "dataType": "color",
+          "accepts": [
+            "color",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "color",
+            "value": [
+              0.8,
+              0.8,
+              0.8,
+              1
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-compositor-color-balance:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "all-fxnode-compositor-color-balance:result",
+          "key": "result",
+          "label": "Image",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-compositor-image",
+      "typeId": "fxnode.compositor.image",
+      "typeVersion": 1,
+      "position": {
+        "x": 40,
+        "y": -840
+      },
+      "size": {
+        "x": 240,
+        "y": 100
+      },
+      "label": "Image",
+      "parameters": {
+        "image": {
+          "kind": "string",
+          "value": ""
+        },
+        "source": {
+          "kind": "string",
+          "value": "File"
+        },
+        "frames": {
+          "kind": "number",
+          "value": 1
+        },
+        "startFrame": {
+          "kind": "number",
+          "value": 1
+        },
+        "offset": {
+          "kind": "number",
+          "value": 0
+        },
+        "cyclic": {
+          "kind": "boolean",
+          "value": false
+        },
+        "autoRefresh": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-compositor-image:image",
+          "key": "image",
+          "label": "Image",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-compositor-image:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-compositor-image:z",
+          "key": "z",
+          "label": "Z",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-geometry-join-geometry",
+      "typeId": "fxnode.geometry.join-geometry",
+      "typeVersion": 1,
+      "position": {
+        "x": 1000,
+        "y": -560
+      },
+      "size": {
+        "x": 180,
+        "y": 100
+      },
+      "label": "Join Geometry",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-geometry-join-geometry:geometry",
+          "key": "geometry",
+          "label": "Geometry",
+          "direction": "input",
+          "dataType": "geometry",
+          "accepts": [
+            "geometry",
+            "any"
+          ],
+          "maxIncomingLinks": 9007199254740991,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-geometry-join-geometry:result",
+          "key": "result",
+          "label": "Geometry",
+          "direction": "output",
+          "dataType": "geometry",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-geometry-mesh-cube",
+      "typeId": "fxnode.geometry.mesh-cube",
+      "typeVersion": 1,
+      "position": {
+        "x": 280,
+        "y": -560
+      },
+      "size": {
+        "x": 190,
+        "y": 100
+      },
+      "label": "Mesh Cube",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-geometry-mesh-cube:size",
+          "key": "size",
+          "label": "Size",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-mesh-cube:vertices-x",
+          "key": "vertices-x",
+          "label": "Vertices X",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-mesh-cube:vertices-y",
+          "key": "vertices-y",
+          "label": "Vertices Y",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-mesh-cube:vertices-z",
+          "key": "vertices-z",
+          "label": "Vertices Z",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-mesh-cube:mesh",
+          "key": "mesh",
+          "label": "Mesh",
+          "direction": "output",
+          "dataType": "geometry",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-geometry-position",
+      "typeId": "fxnode.geometry.position",
+      "typeVersion": 1,
+      "position": {
+        "x": 40,
+        "y": -560
+      },
+      "size": {
+        "x": 140,
+        "y": 100
+      },
+      "label": "Position",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-geometry-position:position",
+          "key": "position",
+          "label": "Position",
+          "direction": "output",
+          "dataType": "vector",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-geometry-set-position",
+      "typeId": "fxnode.geometry.set-position",
+      "typeVersion": 1,
+      "position": {
+        "x": 520,
+        "y": -560
+      },
+      "size": {
+        "x": 190,
+        "y": 100
+      },
+      "label": "Set Position",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-geometry-set-position:geometry",
+          "key": "geometry",
+          "label": "Geometry",
+          "direction": "input",
+          "dataType": "geometry",
+          "accepts": [
+            "geometry",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-geometry-set-position:position",
+          "key": "position",
+          "label": "Position",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-set-position:offset",
+          "key": "offset",
+          "label": "Offset",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-set-position:result",
+          "key": "result",
+          "label": "Geometry",
+          "direction": "output",
+          "dataType": "geometry",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-geometry-transform-geometry",
+      "typeId": "fxnode.geometry.transform-geometry",
+      "typeVersion": 1,
+      "position": {
+        "x": 760,
+        "y": -560
+      },
+      "size": {
+        "x": 210,
+        "y": 100
+      },
+      "label": "Transform Geometry",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-geometry-transform-geometry:geometry",
+          "key": "geometry",
+          "label": "Geometry",
+          "direction": "input",
+          "dataType": "geometry",
+          "accepts": [
+            "geometry",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-geometry-transform-geometry:translation",
+          "key": "translation",
+          "label": "Translation",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-transform-geometry:rotation",
+          "key": "rotation",
+          "label": "Rotation",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-transform-geometry:scale",
+          "key": "scale",
+          "label": "Scale",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-geometry-transform-geometry:result",
+          "key": "result",
+          "label": "Geometry",
+          "direction": "output",
+          "dataType": "geometry",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-color",
+      "typeId": "fxnode.shader.color",
+      "typeVersion": 1,
+      "position": {
+        "x": 280,
+        "y": -280
+      },
+      "size": {
+        "x": 140,
+        "y": 100
+      },
+      "label": "Color",
+      "parameters": {
+        "color": {
+          "kind": "color",
+          "value": [
+            0.8,
+            0.8,
+            0.8,
+            1
+          ]
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-color:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-color-ramp",
+      "typeId": "fxnode.shader.color-ramp",
+      "typeVersion": 2,
+      "position": {
+        "x": 1240,
+        "y": -280
+      },
+      "size": {
+        "x": 320,
+        "y": 100
+      },
+      "label": "Color Ramp",
+      "parameters": {
+        "ramp": {
+          "kind": "json",
+          "value": {
+            "colorMode": "hsv",
+            "interpolation": "ease",
+            "hueInterpolation": "far",
+            "stops": [
+              {
+                "id": "black",
+                "position": 0,
+                "color": [
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              },
+              {
+                "id": "accent",
+                "position": 0.38,
+                "color": [
+                  0.05,
+                  0.35,
+                  1,
+                  1
+                ]
+              },
+              {
+                "id": "white",
+                "position": 1,
+                "color": [
+                  1,
+                  1,
+                  1,
+                  1
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-color-ramp:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "all-fxnode-shader-color-ramp:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-color-ramp:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-image-texture",
+      "typeId": "fxnode.shader.image-texture",
+      "typeVersion": 1,
+      "position": {
+        "x": 1960,
+        "y": -280
+      },
+      "size": {
+        "x": 280,
+        "y": 100
+      },
+      "label": "Image Texture",
+      "parameters": {
+        "image": {
+          "kind": "string",
+          "value": ""
+        },
+        "interpolation": {
+          "kind": "string",
+          "value": "Linear"
+        },
+        "projection": {
+          "kind": "string",
+          "value": "Flat"
+        },
+        "blend": {
+          "kind": "number",
+          "value": 0
+        },
+        "extension": {
+          "kind": "string",
+          "value": "Repeat"
+        },
+        "colorSpace": {
+          "kind": "string",
+          "value": "sRGB"
+        },
+        "alphaMode": {
+          "kind": "string",
+          "value": "Straight"
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-image-texture:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-image-texture:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-image-texture:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-material-output",
+      "typeId": "fxnode.shader.material-output",
+      "typeVersion": 1,
+      "position": {
+        "x": 2440,
+        "y": -280
+      },
+      "size": {
+        "x": 190,
+        "y": 100
+      },
+      "label": "Material Output",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-material-output:surface",
+          "key": "surface",
+          "label": "Surface",
+          "direction": "input",
+          "dataType": "shader",
+          "accepts": [
+            "shader",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-material-output:volume",
+          "key": "volume",
+          "label": "Volume",
+          "direction": "input",
+          "dataType": "shader",
+          "accepts": [
+            "shader",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-material-output:displacement",
+          "key": "displacement",
+          "label": "Displacement",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-math",
+      "typeId": "fxnode.shader.math",
+      "typeVersion": 1,
+      "position": {
+        "x": 520,
+        "y": -280
+      },
+      "size": {
+        "x": 180,
+        "y": 100
+      },
+      "label": "Math",
+      "parameters": {
+        "operation": {
+          "kind": "string",
+          "value": "add"
+        },
+        "clamp": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-math:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "all-fxnode-shader-math:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "all-fxnode-shader-math:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-mix",
+      "typeId": "fxnode.shader.mix",
+      "typeVersion": 1,
+      "position": {
+        "x": 1000,
+        "y": -280
+      },
+      "size": {
+        "x": 190,
+        "y": 100
+      },
+      "label": "Mix",
+      "parameters": {
+        "blend": {
+          "kind": "string",
+          "value": "mix"
+        },
+        "clamp": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-mix:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "all-fxnode-shader-mix:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "color",
+          "accepts": [
+            "color",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "color",
+            "value": [
+              0.8,
+              0.8,
+              0.8,
+              1
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-mix:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "color",
+          "accepts": [
+            "color",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "color",
+            "value": [
+              0.8,
+              0.8,
+              0.8,
+              1
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-mix:result",
+          "key": "result",
+          "label": "Result",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-noise-texture",
+      "typeId": "fxnode.shader.noise-texture",
+      "typeVersion": 2,
+      "position": {
+        "x": 1720,
+        "y": -280
+      },
+      "size": {
+        "x": 200,
+        "y": 100
+      },
+      "label": "Noise Texture",
+      "parameters": {
+        "dimensions": {
+          "kind": "string",
+          "value": "4d"
+        },
+        "noiseType": {
+          "kind": "string",
+          "value": "hybrid-multifractal"
+        },
+        "normalize": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-noise-texture:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:w",
+          "key": "w",
+          "label": "W",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:scale",
+          "key": "scale",
+          "label": "Scale",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 5
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:detail",
+          "key": "detail",
+          "label": "Detail",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:roughness",
+          "key": "roughness",
+          "label": "Roughness",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:lacunarity",
+          "key": "lacunarity",
+          "label": "Lacunarity",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:offset",
+          "key": "offset",
+          "label": "Offset",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:gain",
+          "key": "gain",
+          "label": "Gain",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:distortion",
+          "key": "distortion",
+          "label": "Distortion",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-noise-texture:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-principled-bsdf",
+      "typeId": "fxnode.shader.principled-bsdf",
+      "typeVersion": 1,
+      "position": {
+        "x": 2200,
+        "y": -280
+      },
+      "size": {
+        "x": 220,
+        "y": 100
+      },
+      "label": "Principled BSDF",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-principled-bsdf:base-color",
+          "key": "base-color",
+          "label": "Base Color",
+          "direction": "input",
+          "dataType": "color",
+          "accepts": [
+            "color",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "color",
+            "value": [
+              0.8,
+              0.8,
+              0.8,
+              1
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-principled-bsdf:metallic",
+          "key": "metallic",
+          "label": "Metallic",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "all-fxnode-shader-principled-bsdf:roughness",
+          "key": "roughness",
+          "label": "Roughness",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "all-fxnode-shader-principled-bsdf:ior",
+          "key": "ior",
+          "label": "IOR",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1.5
+          }
+        },
+        {
+          "id": "all-fxnode-shader-principled-bsdf:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": [
+            "float",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "all-fxnode-shader-principled-bsdf:normal",
+          "key": "normal",
+          "label": "Normal",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-principled-bsdf:bsdf",
+          "key": "bsdf",
+          "label": "BSDF",
+          "direction": "output",
+          "dataType": "shader",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-texture-coordinate",
+      "typeId": "fxnode.shader.texture-coordinate",
+      "typeVersion": 1,
+      "position": {
+        "x": 1480,
+        "y": -280
+      },
+      "size": {
+        "x": 190,
+        "y": 100
+      },
+      "label": "Texture Coordinate",
+      "parameters": {},
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-texture-coordinate:generated",
+          "key": "generated",
+          "label": "Generated",
+          "direction": "output",
+          "dataType": "vector",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-texture-coordinate:normal",
+          "key": "normal",
+          "label": "Normal",
+          "direction": "output",
+          "dataType": "vector",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-texture-coordinate:uv",
+          "key": "uv",
+          "label": "UV",
+          "direction": "output",
+          "dataType": "vector",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-texture-coordinate:object",
+          "key": "object",
+          "label": "Object",
+          "direction": "output",
+          "dataType": "vector",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-value",
+      "typeId": "fxnode.shader.value",
+      "typeVersion": 1,
+      "position": {
+        "x": 40,
+        "y": -280
+      },
+      "size": {
+        "x": 140,
+        "y": 100
+      },
+      "label": "Value",
+      "parameters": {
+        "value": {
+          "kind": "number",
+          "value": 0
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-value:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "all-fxnode-shader-vector-math",
+      "typeId": "fxnode.shader.vector-math",
+      "typeVersion": 1,
+      "position": {
+        "x": 760,
+        "y": -280
+      },
+      "size": {
+        "x": 190,
+        "y": 100
+      },
+      "label": "Vector Math",
+      "parameters": {
+        "operation": {
+          "kind": "string",
+          "value": "add"
+        }
+      },
+      "sockets": [
+        {
+          "id": "all-fxnode-shader-vector-math:a",
+          "key": "a",
+          "label": "A",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-vector-math:b",
+          "key": "b",
+          "label": "B",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": [
+            "vector",
+            "any"
+          ],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "all-fxnode-shader-vector-math:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "output",
+          "dataType": "vector",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "all-fxnode-shader-vector-math:value",
+          "key": "value",
+          "label": "Value",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    }
+  ],
+  "links": [
+    {
+      "id": "all-link-cube",
+      "fromNodeId": "all-fxnode-geometry-mesh-cube",
+      "fromSocketId": "all-fxnode-geometry-mesh-cube:mesh",
+      "toNodeId": "all-fxnode-geometry-set-position",
+      "toSocketId": "all-fxnode-geometry-set-position:geometry",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "all-link-position",
+      "fromNodeId": "all-fxnode-geometry-position",
+      "fromSocketId": "all-fxnode-geometry-position:position",
+      "toNodeId": "all-fxnode-geometry-set-position",
+      "toSocketId": "all-fxnode-geometry-set-position:position",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "all-link-set",
+      "fromNodeId": "all-fxnode-geometry-set-position",
+      "fromSocketId": "all-fxnode-geometry-set-position:result",
+      "toNodeId": "all-fxnode-geometry-join-geometry",
+      "toSocketId": "all-fxnode-geometry-join-geometry:geometry",
+      "muted": false,
+      "extensions": {}
+    },
+    {
+      "id": "all-link-transform",
+      "fromNodeId": "all-fxnode-geometry-transform-geometry",
+      "fromSocketId": "all-fxnode-geometry-transform-geometry:result",
+      "toNodeId": "all-fxnode-geometry-join-geometry",
+      "toSocketId": "all-fxnode-geometry-join-geometry:geometry",
+      "muted": false,
+      "extensions": {}
+    }
+  ],
+  "metadata": {}
+}

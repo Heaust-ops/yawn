@@ -1,6 +1,6 @@
 use core::fmt;
-use std::sync::mpsc::TryRecvError;
 use std::cell::BorrowMutError;
+use std::sync::mpsc::TryRecvError;
 
 #[derive(Debug)]
 pub enum WindowEvent {

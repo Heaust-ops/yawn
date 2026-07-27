@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <script type="importmap">
+      { "imports": { "@lib/": "/src/" } }
+    </script>
+  </head>
+  <body>
+    <canvas id="application-a" width="360" height="220" style="width: 360px; height: 220px"></canvas>
+    <canvas id="application-b" width="360" height="220" style="width: 360px; height: 220px"></canvas>
+    <template id="add-node-menu-template">
+      <div data-fxnode-add-menu style="position: fixed; visibility: hidden">
+        <section role="dialog" aria-label="Add node">
+          <input data-fxnode-menu-search type="search" role="combobox" aria-label="Search nodes" />
+          <div data-fxnode-menu-results role="listbox">
+            <section data-fxnode-menu-group role="group">
+              <h2 data-fxnode-menu-heading>Test</h2>
+              <button data-fxnode-menu-option data-type-id="alpha-node" type="button" role="option">Alpha Node</button>
+            </section>
+            <div data-fxnode-menu-empty role="status" hidden>No nodes found</div>
+          </div>
+        </section>
+      </div>
+    </template>
+    <script type="module" src="./worker-composition.ts"></script>
+  </body>
+</html>

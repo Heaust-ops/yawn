@@ -1,0 +1,16 @@
+node_modules/
+dist/
+docs/reference/generated/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+*.blend
+*.blend1
+.DS_Store
+test-results/
+playwright-report/
+blob-report/
+.env
+.env.*
+!.env.example
+.amp/portals/
+.amp/resume-services.log

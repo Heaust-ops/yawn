@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[fxnode setup] installing locked npm dependencies"
+npm ci
+
+echo "[fxnode setup] installing Playwright browsers and Linux dependencies"
+npx playwright install --with-deps chromium firefox
+
+echo "[fxnode setup] checking the TypeScript environment"
+npm run typecheck -- --pretty false
+
+echo "[fxnode setup] ensuring declared orb services"
+amp orb services ensure
+
+echo "[fxnode setup] complete; see .agents/ORB_WORKFLOW.md for development and verification guidance"

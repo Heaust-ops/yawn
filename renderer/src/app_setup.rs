@@ -3,11 +3,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-#[cfg(target_arch = "wasm32")]
-use web_sys::AddEventListenerOptions;
-#[cfg(target_arch = "wasm32")]
-use wgpu::Error;
-
+use crate::command_ring::CommandRing;
 use crate::message::WindowEvent;
 #[cfg(target_arch = "wasm32")]
 use crate::platform::web;
@@ -15,6 +11,8 @@ use crate::platform::web;
 use crate::platform::web::worker::MainWorker;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
+#[cfg(target_arch = "wasm32")]
+use web_sys::AddEventListenerOptions;
 
 /// Helper struct to store event listener closures
 #[cfg(target_arch = "wasm32")]
@@ -41,16 +39,20 @@ impl EventListeners {
 
 /// Setup default window event listeners that forward events to the worker thread
 #[cfg(target_arch = "wasm32")]
-pub fn setup_event_listeners(worker_chan: &Sender<WindowEvent>) -> Result<EventListeners, JsValue> {
+pub fn setup_event_listeners(
+    worker_chan: &Sender<WindowEvent>,
+    canvas: &web_sys::HtmlCanvasElement,
+) -> Result<EventListeners, JsValue> {
     let window = web_sys::window().unwrap();
     let resize_worker_chan = worker_chan.clone();
+    let resize_canvas = canvas.clone();
 
     let resize_listener: Closure<dyn FnMut()> = Closure::new(move || {
         use crate::message::ResizeMessage;
 
         let window = web_sys::window().unwrap();
-        let width = window.inner_width().ok().unwrap().as_f64().unwrap();
-        let height = window.inner_height().ok().unwrap().as_f64().unwrap();
+        let width = f64::from(resize_canvas.client_width().max(1));
+        let height = f64::from(resize_canvas.client_height().max(1));
 
         resize_worker_chan
             .send(WindowEvent::Resize(ResizeMessage {
@@ -155,29 +157,41 @@ pub struct WebAppRuntime {
     worker: MainWorker,
     worker_chan: Sender<WindowEvent>,
     _event_listeners: EventListeners,
+    ring: Box<CommandRing>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl WebAppRuntime {
     /// Initialize the web worker, canvas ownership, and event listeners.
-    pub fn new<T: crate::renderer::scene::Scene + 'static>(worker_name: &str, canvas_selector: &str) -> Result<Self, JsValue> {
+    pub fn new<T: crate::renderer::scene::Scene + 'static>(
+        worker_name: &str,
+        canvas_selector: &str,
+    ) -> Result<Self, JsValue> {
         let (sender, receiver) = mpsc::channel::<WindowEvent>();
 
         let canvas = web::get_canvas_element(canvas_selector);
-        let worker = MainWorker::spawn(worker_name, 1, move || {
+        let window = web_sys::window().unwrap();
+        let dpr = window.device_pixel_ratio();
+        canvas.set_width((canvas.client_width() as f64 * dpr).round() as u32);
+        canvas.set_height((canvas.client_height() as f64 * dpr).round() as u32);
+        let ring = CommandRing::new();
+        let ring_ptr = ring.ptr();
+        let worker = MainWorker::spawn(worker_name, 1, ring_ptr, move || {
             spawn_local(async move {
-                MainWorker::run_render_loop::<T>(receiver).await;
+                let ring = unsafe { &*(ring_ptr as *const CommandRing) };
+                MainWorker::run_render_loop::<T>(receiver, ring).await;
             });
         })?;
 
         worker.transfer_ownership(&canvas);
 
-        let event_listeners = setup_event_listeners(&sender)?;
+        let event_listeners = setup_event_listeners(&sender, &canvas)?;
 
         Ok(Self {
             worker,
             worker_chan: sender,
             _event_listeners: event_listeners,
+            ring,
         })
     }
 
@@ -189,6 +203,9 @@ impl WebAppRuntime {
     /// Access the spawned worker reference.
     pub fn worker(&self) -> &MainWorker {
         &self.worker
+    }
+    pub fn ring_ptr(&self) -> u32 {
+        self.ring.ptr()
     }
 }
 
@@ -212,10 +229,8 @@ pub trait WebApp {
 
     /// Perform the default WASM initialization routine.
     fn setup_runtime() -> Result<WebAppRuntime, JsValue> {
-        let mut runtime = WebAppRuntime::new::<Self::Scene>(
-            Self::worker_name(),
-            Self::canvas_selector(),
-        )?;
+        let mut runtime =
+            WebAppRuntime::new::<Self::Scene>(Self::worker_name(), Self::canvas_selector())?;
         Self::on_runtime_initialized(&mut runtime);
         Ok(runtime)
     }

@@ -19,6 +19,7 @@
     "build-release": "run-s clean wasm-release bundle-release",
     "build-renderer": "run-s clean wasm-renderer-dev bundle-dev",
     "build-renderer-release": "run-s clean wasm-renderer-release bundle-release",
+    "test:js": "node --test tests/*.test.js",
     "start": "vite preview",
     "clean": "rimraf --glob dist **/pkg",
     "clean-all": "rimraf --glob dist **/pkg target node_modules"

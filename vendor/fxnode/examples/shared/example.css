@@ -1,0 +1,38 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, sans-serif;
+  background: #101216;
+  color: #f1f3f5;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  width: 1000px;
+  margin: 24px auto;
+}
+h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+}
+p {
+  margin: 0 0 14px;
+  color: #adb5bd;
+  line-height: 1.45;
+}
+canvas {
+  display: block;
+  width: 1000px;
+  height: 560px;
+  background: #1d1f23;
+}
+button {
+  margin: 0 0 14px;
+  padding: 8px 14px;
+}
+#status {
+  color: #ffd8a8;
+}

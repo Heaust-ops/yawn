@@ -1,0 +1,16 @@
+node_modules/
+dist/
+docs/reference/generated/
+test-results/
+playwright-report/
+blob-report/
+.amp/
+
+# Canonical generated data is formatted by its generator and byte-checked.
+examples/blender/initialLayout.json
+examples/blender/**/initialLayout.json
+
+# Binary and captured reference assets.
+**/*.png
+**/*.blend
+**/*.blend1

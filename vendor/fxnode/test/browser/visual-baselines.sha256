@@ -1,0 +1,9 @@
+bddbb2638889d825407600a55ddd427a04fa26cf624a718dde13bb3429e8b3aa  test/browser/all-supported.spec.ts-snapshots/all-supported-linux.png
+66021d791bacd650a5c0d983d0a2c5ba377aba23c598dd022de7fc18f9ad7f68  test/browser/parity.visual.spec.ts-snapshots/parity-image-grading-linux.png
+6d24bc2f6783a4bbad5d416b72442c02e0b05260700fb06d6aaaa1e61aff53dc  test/browser/parity.visual.spec.ts-snapshots/parity-ramp-noise-linux.png
+acd64dbf5847551a9403517be7c7f94ca6c7691fc14c641b82b687ce7b16a919  test/browser/parity.visual.spec.ts-snapshots/parity-structural-linux.png
+b22233380b3509b79769cc1dd9dca809360e097c337c258638871867f4442673  test/browser/visual.spec.ts-snapshots/color-picker-linux.png
+db27823fafd21ef361dfa12e13d9424972e111d13babfc4fee53614bfdde37e4  test/browser/visual.spec.ts-snapshots/numeric-editing-linux.png
+83a60b97d9dd423e614d52e0427e3a17515f92ec94a467cd9bd3fe1723157fc5  test/browser/visual.spec.ts-snapshots/numeric-fields-linux.png
+5e578055b7ade004c9252ca785491dd39211b92ceb68d6eb8a37421e1c2b30fd  test/browser/visual.spec.ts-snapshots/phase-4-example-linux.png
+0ba342da7237709e47ee607726fc131f5dcdbb84650aed5d6ac3e2d1ced8b727  test/browser/visual.spec.ts-snapshots/zoomed-out-lod-linux.png

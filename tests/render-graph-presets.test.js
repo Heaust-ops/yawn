@@ -1,0 +1,4 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { ember, midnight, renderGraphPresets } from "../static/render-graph/presets.js";
+test("Phase 8 presets are unique activatable V1 scene-forward graphs",()=>{assert.deepEqual(Object.keys(renderGraphPresets),["midnight","ember"]);assert.deepEqual([midnight.graphId,ember.graphId],["preset_midnight","preset_ember"]);assert.notDeepEqual(midnight.passes[0].writes[0].access.load.value,ember.passes[0].writes[0].access.load.value);for(const graph of [midnight,ember]){assert.equal(graph.schemaVersion,1);assert.equal(graph.revision,1);assert.equal(graph.passes.length,1);assert.equal(graph.passes[0].state,"enabled");assert.deepEqual(graph.passes[0].executor,{key:"scene_forward",version:1});assert.equal(graph.outputs[0].name,"present");}});

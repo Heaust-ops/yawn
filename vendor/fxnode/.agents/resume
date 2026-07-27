@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p .amp
+echo "[fxnode resume] ensuring declared orb services"
+amp orb services ensure >.amp/resume-services.log 2>&1
+echo "[fxnode resume] ready"

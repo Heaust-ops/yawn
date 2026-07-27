@@ -1,0 +1,315 @@
+<!doctype html>
+<script type="importmap">
+  { "imports": { "@lib/": "/src/" } }
+</script>
+<canvas id="primary" tabindex="0" style="width: 320px; height: 180px"></canvas><canvas id="mirror"></canvas
+><canvas id="copy"></canvas>
+<template id="add-node-menu-template">
+  <div data-fxnode-add-menu style="position: fixed; z-index: 2147483647; visibility: hidden">
+    <style>
+      [data-fxnode-add-menu] * {
+        box-sizing: border-box;
+      }
+      [data-fxnode-add-menu] [hidden] {
+        display: none !important;
+      }
+      .fxnode-add-dialog {
+        width: 286px;
+        max-height: min(520px, calc(100vh - 16px));
+        display: flex;
+        flex-direction: column;
+        padding: 8px;
+        background: #25282d;
+        color: #e5e5e5;
+        border: 1px solid #111216;
+        border-radius: 7px;
+        box-shadow: 0 12px 32px #000a;
+        font:
+          12px/1.3 system-ui,
+          sans-serif;
+      }
+      .fxnode-add-title {
+        font-weight: 650;
+        margin: 1px 2px 7px;
+      }
+      .fxnode-add-search {
+        width: 100%;
+        border: 1px solid #111216;
+        border-radius: 4px;
+        background: #181a1e;
+        color: #fff;
+        padding: 7px 8px;
+        outline: none;
+      }
+      .fxnode-add-search:focus {
+        border-color: #ed5700;
+      }
+      .fxnode-add-results {
+        overflow: auto;
+        margin-top: 7px;
+        min-height: 40px;
+      }
+      .fxnode-add-group {
+        margin: 4px 0 7px;
+      }
+      .fxnode-add-heading {
+        padding: 3px 7px;
+        color: #a5a8ad;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      .fxnode-add-option {
+        display: block;
+        width: 100%;
+        padding: 6px 8px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: #e5e5e5;
+        text-align: left;
+        font: inherit;
+        cursor: default;
+      }
+      .fxnode-add-option:hover,
+      .fxnode-add-option.active {
+        background: #ed5700;
+        color: #fff;
+      }
+      .fxnode-add-empty {
+        padding: 14px 8px;
+        color: #a5a8ad;
+        text-align: center;
+      }
+    </style>
+    <section class="fxnode-add-dialog" role="dialog" aria-label="Add node">
+      <div class="fxnode-add-title">Add Node</div>
+      <input
+        data-fxnode-menu-search
+        class="fxnode-add-search"
+        type="search"
+        role="combobox"
+        aria-label="Search nodes"
+        aria-autocomplete="list"
+        aria-controls="fxnode-node-results"
+        autocomplete="off"
+        placeholder="Search…"
+      />
+      <div data-fxnode-menu-results class="fxnode-add-results" id="fxnode-node-results" role="listbox">
+        <section data-fxnode-menu-group class="fxnode-add-group" role="group" aria-label="Common">
+          <div data-fxnode-menu-heading class="fxnode-add-heading">Common</div>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.common.frame"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Frame
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.common.reroute"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Reroute
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.common.group-input"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Group Input
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.common.group-output"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Group Output
+          </button>
+        </section>
+        <section data-fxnode-menu-group class="fxnode-add-group" role="group" aria-label="Shader">
+          <div data-fxnode-menu-heading class="fxnode-add-heading">Shader</div>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.value"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Value
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.color"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Color
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.math"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Math
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.vector-math"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Vector Math
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.mix"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Mix
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.color-ramp"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Color Ramp
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.texture-coordinate"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Texture Coordinate
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.noise-texture"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Noise Texture
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.image-texture"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Image Texture
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.principled-bsdf"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Principled BSDF
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.shader.material-output"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Material Output
+          </button>
+        </section>
+        <section data-fxnode-menu-group class="fxnode-add-group" role="group" aria-label="Geometry">
+          <div data-fxnode-menu-heading class="fxnode-add-heading">Geometry</div>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.geometry.position"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Position
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.geometry.mesh-cube"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Mesh Cube
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.geometry.set-position"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Set Position
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.geometry.transform-geometry"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Transform Geometry
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.geometry.join-geometry"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Join Geometry
+          </button>
+        </section>
+        <section data-fxnode-menu-group class="fxnode-add-group" role="group" aria-label="Compositor">
+          <div data-fxnode-menu-heading class="fxnode-add-heading">Compositor</div>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.compositor.image"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Image
+          </button>
+          <button
+            data-fxnode-menu-option
+            data-type-id="fxnode.compositor.color-balance"
+            class="fxnode-add-option"
+            type="button"
+            role="option"
+          >
+            Color Balance
+          </button>
+        </section>
+        <div data-fxnode-menu-empty class="fxnode-add-empty" role="status" hidden>No nodes found</div>
+      </div>
+    </section>
+  </div>
+</template>
+<script type="module" src="./fixture.ts"></script>

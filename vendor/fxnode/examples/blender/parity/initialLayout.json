@@ -1,0 +1,754 @@
+{
+  "graphId": "parity",
+  "catalogVersion": 4,
+  "nodes": [
+    {
+      "id": "color-ramp",
+      "typeId": "fxnode.shader.color-ramp",
+      "typeVersion": 2,
+      "position": {
+        "x": 350,
+        "y": 180
+      },
+      "size": {
+        "x": 320,
+        "y": 292
+      },
+      "label": "Color Ramp",
+      "parameters": {
+        "ramp": {
+          "kind": "json",
+          "value": {
+            "colorMode": "rgb",
+            "interpolation": "linear",
+            "hueInterpolation": "near",
+            "stops": [
+              {
+                "id": "stop-0",
+                "position": 0,
+                "color": [0, 0, 0, 1]
+              },
+              {
+                "id": "stop-1",
+                "position": 1,
+                "color": [1, 1, 1, 1]
+              }
+            ]
+          }
+        }
+      },
+      "sockets": [
+        {
+          "id": "color-ramp:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "color-ramp:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "color-ramp:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "compositor-image",
+      "typeId": "fxnode.compositor.image",
+      "typeVersion": 1,
+      "position": {
+        "x": -340,
+        "y": -260
+      },
+      "size": {
+        "x": 176,
+        "y": 220
+      },
+      "label": "Image",
+      "parameters": {
+        "image": {
+          "kind": "string",
+          "value": ""
+        },
+        "source": {
+          "kind": "string",
+          "value": "File"
+        },
+        "frames": {
+          "kind": "number",
+          "value": 1
+        },
+        "startFrame": {
+          "kind": "number",
+          "value": 1
+        },
+        "offset": {
+          "kind": "number",
+          "value": 0
+        },
+        "cyclic": {
+          "kind": "boolean",
+          "value": false
+        },
+        "autoRefresh": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "compositor-image:image",
+          "key": "image",
+          "label": "Image",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "compositor-image:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "compositor-image:z",
+          "key": "z",
+          "label": "Z",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "image-texture",
+      "typeId": "fxnode.shader.image-texture",
+      "typeVersion": 1,
+      "position": {
+        "x": -520,
+        "y": 180
+      },
+      "size": {
+        "x": 257,
+        "y": 316
+      },
+      "label": "Image Texture",
+      "parameters": {
+        "image": {
+          "kind": "string",
+          "value": ""
+        },
+        "interpolation": {
+          "kind": "string",
+          "value": "Linear"
+        },
+        "projection": {
+          "kind": "string",
+          "value": "Flat"
+        },
+        "blend": {
+          "kind": "number",
+          "value": 0
+        },
+        "extension": {
+          "kind": "string",
+          "value": "Repeat"
+        },
+        "colorSpace": {
+          "kind": "string",
+          "value": "sRGB"
+        },
+        "alphaMode": {
+          "kind": "string",
+          "value": "Straight"
+        }
+      },
+      "sockets": [
+        {
+          "id": "image-texture:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": ["vector", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [0, 0, 0]
+          }
+        },
+        {
+          "id": "image-texture:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "image-texture:alpha",
+          "key": "alpha",
+          "label": "Alpha",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "master",
+      "typeId": "fxnode.compositor.color-balance",
+      "typeVersion": 1,
+      "position": {
+        "x": 20,
+        "y": -260
+      },
+      "size": {
+        "x": 400,
+        "y": 292
+      },
+      "label": "Master Color Grading",
+      "parameters": {
+        "mode": {
+          "kind": "string",
+          "value": "Lift/Gamma/Gain"
+        },
+        "lift": {
+          "kind": "number",
+          "value": 0
+        },
+        "liftColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "gamma": {
+          "kind": "number",
+          "value": 1
+        },
+        "gammaColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "gain": {
+          "kind": "number",
+          "value": 1
+        },
+        "gainColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "offset": {
+          "kind": "number",
+          "value": 0
+        },
+        "offsetColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "power": {
+          "kind": "number",
+          "value": 1
+        },
+        "powerColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "slope": {
+          "kind": "number",
+          "value": 1
+        },
+        "slopeColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "inputTemperature": {
+          "kind": "number",
+          "value": 6500
+        },
+        "inputTint": {
+          "kind": "number",
+          "value": 0
+        },
+        "inputColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        },
+        "outputTemperature": {
+          "kind": "number",
+          "value": 6500
+        },
+        "outputTint": {
+          "kind": "number",
+          "value": 0
+        },
+        "outputColor": {
+          "kind": "color",
+          "value": [1, 1, 1, 1]
+        }
+      },
+      "sockets": [
+        {
+          "id": "master:image",
+          "key": "image",
+          "label": "Image",
+          "direction": "input",
+          "dataType": "color",
+          "accepts": ["color", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "color",
+            "value": [0.8, 0.8, 0.8, 1]
+          }
+        },
+        {
+          "id": "master:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "master:result",
+          "key": "result",
+          "label": "Image",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "noise-3d",
+      "typeId": "fxnode.shader.noise-texture",
+      "typeVersion": 2,
+      "position": {
+        "x": -220,
+        "y": 180
+      },
+      "size": {
+        "x": 286,
+        "y": 292
+      },
+      "label": "Noise Texture",
+      "parameters": {
+        "dimensions": {
+          "kind": "string",
+          "value": "3d"
+        },
+        "noiseType": {
+          "kind": "string",
+          "value": "fbm"
+        },
+        "normalize": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "noise-3d:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": ["vector", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [0, 0, 0]
+          }
+        },
+        {
+          "id": "noise-3d:w",
+          "key": "w",
+          "label": "W",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise-3d:scale",
+          "key": "scale",
+          "label": "Scale",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 5
+          }
+        },
+        {
+          "id": "noise-3d:detail",
+          "key": "detail",
+          "label": "Detail",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "noise-3d:roughness",
+          "key": "roughness",
+          "label": "Roughness",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "noise-3d:lacunarity",
+          "key": "lacunarity",
+          "label": "Lacunarity",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "noise-3d:offset",
+          "key": "offset",
+          "label": "Offset",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise-3d:gain",
+          "key": "gain",
+          "label": "Gain",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "noise-3d:distortion",
+          "key": "distortion",
+          "label": "Distortion",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise-3d:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "noise-3d:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    },
+    {
+      "id": "noise-4d",
+      "typeId": "fxnode.shader.noise-texture",
+      "typeVersion": 2,
+      "position": {
+        "x": 60,
+        "y": 180
+      },
+      "size": {
+        "x": 286,
+        "y": 292
+      },
+      "label": "Noise Texture",
+      "parameters": {
+        "dimensions": {
+          "kind": "string",
+          "value": "4d"
+        },
+        "noiseType": {
+          "kind": "string",
+          "value": "fbm"
+        },
+        "normalize": {
+          "kind": "boolean",
+          "value": false
+        }
+      },
+      "sockets": [
+        {
+          "id": "noise-4d:vector",
+          "key": "vector",
+          "label": "Vector",
+          "direction": "input",
+          "dataType": "vector",
+          "accepts": ["vector", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "vector",
+            "value": [0, 0, 0]
+          }
+        },
+        {
+          "id": "noise-4d:w",
+          "key": "w",
+          "label": "W",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise-4d:scale",
+          "key": "scale",
+          "label": "Scale",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 5
+          }
+        },
+        {
+          "id": "noise-4d:detail",
+          "key": "detail",
+          "label": "Detail",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "noise-4d:roughness",
+          "key": "roughness",
+          "label": "Roughness",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0.5
+          }
+        },
+        {
+          "id": "noise-4d:lacunarity",
+          "key": "lacunarity",
+          "label": "Lacunarity",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 2
+          }
+        },
+        {
+          "id": "noise-4d:offset",
+          "key": "offset",
+          "label": "Offset",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise-4d:gain",
+          "key": "gain",
+          "label": "Gain",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 1
+          }
+        },
+        {
+          "id": "noise-4d:distortion",
+          "key": "distortion",
+          "label": "Distortion",
+          "direction": "input",
+          "dataType": "float",
+          "accepts": ["float", "any"],
+          "maxIncomingLinks": 1,
+          "visible": true,
+          "defaultValue": {
+            "kind": "number",
+            "value": 0
+          }
+        },
+        {
+          "id": "noise-4d:factor",
+          "key": "factor",
+          "label": "Factor",
+          "direction": "output",
+          "dataType": "float",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        },
+        {
+          "id": "noise-4d:color",
+          "key": "color",
+          "label": "Color",
+          "direction": "output",
+          "dataType": "color",
+          "accepts": [],
+          "maxIncomingLinks": 0,
+          "visible": true
+        }
+      ],
+      "muted": false,
+      "collapsed": false,
+      "extensions": {},
+      "known": true
+    }
+  ],
+  "links": [
+    {
+      "id": "compositor-grade",
+      "fromNodeId": "compositor-image",
+      "fromSocketId": "compositor-image:image",
+      "toNodeId": "master",
+      "toSocketId": "master:image",
+      "muted": false,
+      "extensions": {}
+    }
+  ],
+  "metadata": {}
+}

@@ -18,6 +18,9 @@ struct VertexInput {
     @location(4) model_col1: vec4<f32>,
     @location(5) model_col2: vec4<f32>,
     @location(6) model_col3: vec4<f32>,
+    @location(7) normal_col0: vec4<f32>,
+    @location(8) normal_col1: vec4<f32>,
+    @location(9) normal_col2: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -39,7 +42,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let world_position = model * vec4<f32>(in.pos, 1.0);
     out.clip_position = view_proj * world_position;
     out.world_pos = world_position.xyz;
-    out.normal = normalize(in.normal);
+    let normal_matrix = mat3x3<f32>(in.normal_col0.xyz, in.normal_col1.xyz, in.normal_col2.xyz);
+    out.normal = normalize(normal_matrix * in.normal);
     return out;
 }
 

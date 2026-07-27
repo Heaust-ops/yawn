@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>fxnode multi-view example</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>One graph, two views</h1>
+          <p>Selection and camera are local to each canvas; graph edits render in both.</p>
+        </div>
+        <div id="toolbar" role="toolbar" aria-label="Active view tools">
+          <label
+            >Node
+            <select id="node-type">
+              <option value="fxnode.shader.value">Value</option>
+              <option value="fxnode.shader.color">Color</option>
+              <option value="fxnode.shader.math">Math</option>
+              <option value="fxnode.shader.noise-texture">Noise Texture</option>
+            </select></label
+          >
+          <button data-action="add">Add</button>
+          <button data-action="delete" disabled>Delete</button>
+          <button data-action="mute" aria-pressed="false" disabled>Mute</button>
+          <output id="toolbar-status" aria-live="polite"></output>
+        </div>
+      </header>
+      <section class="views">
+        <article class="active">
+          <h2>Material detail</h2>
+          <canvas id="view-a"></canvas>
+        </article>
+        <article>
+          <h2>Output overview</h2>
+          <canvas id="view-b"></canvas>
+        </article>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
