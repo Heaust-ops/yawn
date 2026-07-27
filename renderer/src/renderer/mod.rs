@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::mpsc::Receiver};
+use std::{cell::RefCell, rc::Rc, sync::mpsc::Receiver};
 
 use futures::channel::oneshot;
 use log::info;
@@ -24,24 +24,15 @@ pub mod scene;
 pub mod scene_frame;
 
 pub use pipeline_library::PipelineLibrary;
-pub type GpuResources = PipelineLibrary;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-struct ActiveCompiledV1 {
-    id: crate::render_graph::CompiledGraphId,
-    graph: crate::render_graph::CompiledGraph,
-    _textures: Vec<wgpu::Texture>,
-    views: Vec<wgpu::TextureView>,
-    class_bases: Vec<usize>,
-}
-
-struct GpuTextureSlotV2 {
+struct GpuTextureSlot {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
-enum PreparedExecutionV2 {
+enum PreparedExecution {
     FrustumCull,
     MeshQuery,
     LegacyForward {
@@ -57,50 +48,37 @@ enum PreparedExecutionV2 {
     Present,
 }
 
-struct ActiveCompiledV2 {
+struct ActiveCompiledGraph {
     id: crate::render_graph::CompiledGraphId,
-    graph: crate::render_graph::CompiledGraphV2,
-    runtime: crate::render_graph::RuntimePlanV2,
-    textures: Vec<Vec<GpuTextureSlotV2>>,
-    executions: Vec<PreparedExecutionV2>,
+    graph: crate::render_graph::CompiledGraph,
+    runtime: crate::render_graph::RuntimePlan,
+    textures: Vec<Vec<GpuTextureSlot>>,
+    executions: Vec<PreparedExecution>,
     _fullscreen_layout: wgpu::BindGroupLayout,
-}
-
-enum ActiveCompiledGraph {
-    V1(ActiveCompiledV1),
-    V2(ActiveCompiledV2),
 }
 
 #[derive(Clone, Copy)]
 enum UploadGraph {
     Immediate,
-    V1,
-    V2(crate::render_graph::MeshQueryRuntimeKeyV2),
+    Compiled(crate::render_graph::MeshQueryRuntimeKey),
 }
 
 fn classify_upload_graph(graph: &ActiveCompiledGraph) -> UploadGraph {
-    match graph {
-        ActiveCompiledGraph::V1(_) => UploadGraph::V1,
-        ActiveCompiledGraph::V2(active) => UploadGraph::V2(active.runtime.allocations.query),
-    }
+    UploadGraph::Compiled(graph.runtime.allocations.query)
 }
 
 fn upload_query_for_render(
     pending: Option<UploadGraph>,
     active: Option<UploadGraph>,
-) -> Option<crate::render_graph::MeshQueryRuntimeKeyV2> {
-    match pending {
-        Some(UploadGraph::V2(query)) => Some(query),
-        Some(UploadGraph::V1 | UploadGraph::Immediate) => None,
-        None => match active {
-            Some(UploadGraph::V2(query)) => Some(query),
-            _ => None,
-        },
+) -> Option<crate::render_graph::MeshQueryRuntimeKey> {
+    match pending.or(active) {
+        Some(UploadGraph::Compiled(query)) => Some(query),
+        Some(UploadGraph::Immediate) | None => None,
     }
 }
 
 fn resolve_culling_frustum(
-    query: crate::render_graph::MeshQueryRuntimeKeyV2,
+    query: crate::render_graph::MeshQueryRuntimeKey,
     read: impl FnOnce() -> Option<Result<[[f32; 4]; 6], crate::camera::FrustumError>>,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
     if query.frustum_culled == crate::render_graph::TriStatePredicate::Any {
@@ -122,7 +100,7 @@ fn resolve_culling_frustum(
 fn update_validate_write_scene<S: scene::Scene>(
     scene: &mut S,
     queue: &wgpu::Queue,
-    query: Option<crate::render_graph::MeshQueryRuntimeKeyV2>,
+    query: Option<crate::render_graph::MeshQueryRuntimeKey>,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
     scene.update_cpu();
     let planes = match query {
@@ -134,46 +112,23 @@ fn update_validate_write_scene<S: scene::Scene>(
 }
 impl ActiveCompiledGraph {
     fn id(&self) -> crate::render_graph::CompiledGraphId {
-        match self {
-            Self::V1(a) => a.id,
-            Self::V2(a) => a.id,
-        }
+        self.id
     }
     fn graph_id(&self) -> &str {
-        match self {
-            Self::V1(a) => &a.graph.graph_id,
-            Self::V2(a) => &a.graph.graph_id,
-        }
+        &self.graph.graph_id
     }
     fn revision(&self) -> u32 {
-        match self {
-            Self::V1(a) => a.graph.revision,
-            Self::V2(a) => a.graph.revision,
-        }
+        self.graph.revision
     }
     fn schema_version(&self) -> u32 {
-        match self {
-            Self::V1(_) => 1,
-            Self::V2(_) => 2,
-        }
+        self.graph.schema_version
     }
     fn execution_count(&self) -> usize {
-        match self {
-            Self::V1(a) => a.graph.passes.len(),
-            Self::V2(a) => a.graph.executions.len(),
-        }
+        self.graph.executions.len()
     }
     fn texture_slot_count(&self) -> usize {
-        match self {
-            Self::V1(a) => a.views.len(),
-            Self::V2(a) => a.textures.iter().map(Vec::len).sum(),
-        }
+        self.textures.iter().map(Vec::len).sum()
     }
-}
-
-struct PooledTransient {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
 }
 
 enum SwitchTarget {
@@ -210,7 +165,7 @@ fn resolve_switch_request(
             let id = crate::render_graph::CompiledGraphId { slot, generation };
             // Resolve the registry entry here, before any GPU preparation or pending
             // state mutation. Registry::get is also the Phase 4 activation gate.
-            registry.get_registered(id)?;
+            registry.get(id)?;
             Ok(ResolvedSwitchRequest::Compiled(id))
         }
         _ => Err(crate::render_graph::GraphError::new(
@@ -225,7 +180,7 @@ mod switch_request_tests {
     use super::*;
 
     fn query(visible: crate::render_graph::TriStatePredicate) -> UploadGraph {
-        UploadGraph::V2(crate::render_graph::MeshQueryRuntimeKeyV2 {
+        UploadGraph::Compiled(crate::render_graph::MeshQueryRuntimeKey {
             visible,
             frustum_culled: crate::render_graph::TriStatePredicate::Any,
         })
@@ -241,7 +196,7 @@ mod switch_request_tests {
             Some(RequiredFalse)
         );
         assert_eq!(
-            selected(Some(UploadGraph::V1), Some(query(RequiredTrue))),
+            selected(Some(UploadGraph::Immediate), Some(query(RequiredTrue))),
             None
         );
         assert_eq!(
@@ -252,7 +207,7 @@ mod switch_request_tests {
             selected(None, Some(query(RequiredTrue))),
             Some(RequiredTrue)
         );
-        assert_eq!(selected(None, Some(UploadGraph::V1)), None);
+        assert_eq!(selected(None, Some(UploadGraph::Immediate)), None);
         assert_eq!(selected(None, None), None);
         assert_eq!(selected(Some(query(Any)), None), Some(Any));
     }
@@ -260,7 +215,7 @@ mod switch_request_tests {
     #[test]
     fn frustum_preflight_skips_any_and_distinguishes_missing_from_invalid() {
         use crate::render_graph::TriStatePredicate::{Any, RequiredFalse, RequiredTrue};
-        let query = |frustum_culled| crate::render_graph::MeshQueryRuntimeKeyV2 {
+        let query = |frustum_culled| crate::render_graph::MeshQueryRuntimeKey {
             visible: RequiredTrue,
             frustum_culled,
         };
@@ -288,42 +243,37 @@ mod switch_request_tests {
     }
 
     #[test]
-    fn v2_resolves_at_command_boundary_before_gpu_work() {
+    fn resolves_at_command_boundary_before_gpu_work() {
         let mut registry = crate::render_graph::Registry::default();
-        let bytes = br#"{"schemaVersion":2,"graphId":"switch_v2","revision":1,"nodes":[]}"#;
+        let bytes = br#"{"schemaVersion":2,"graphId":"switch","revision":1,"nodes":[]}"#;
         let (id, _) = registry.compile(bytes).unwrap();
-        let active = "existing_v1";
+        let active = "existing_graph";
         let pending: Option<&str> = None;
         assert_eq!(
             resolve_switch_request(&registry, false, 1, id.slot, id.generation).unwrap(),
             ResolvedSwitchRequest::Compiled(id)
         );
-        assert_eq!(active, "existing_v1");
+        assert_eq!(active, "existing_graph");
         assert_eq!(pending, None);
         assert!(registry.contains(id));
 
         let pending_error = resolve_switch_request(&registry, true, 1, id.slot, id.generation)
             .expect_err("an existing pending request must win");
         assert_eq!(pending_error.code, "GRAPH_SWITCH_PENDING");
-        assert_eq!(active, "existing_v1");
+        assert_eq!(active, "existing_graph");
         assert_eq!(pending, None);
 
-        let invalid_replacement = br#"{"schemaVersion":2,"graphId":"switch_v2","revision":2,"nodes":[],"unexpected":true}"#;
+        let invalid_replacement =
+            br#"{"schemaVersion":2,"graphId":"switch","revision":2,"nodes":[],"unexpected":true}"#;
         assert_eq!(
             registry.compile(invalid_replacement).unwrap_err().code,
             "GRAPH_JSON_INVALID"
         );
-        let crate::render_graph::RegisteredGraph::V2(stored) = registry.get_registered(id).unwrap()
-        else {
-            panic!("the original V2 graph must remain registered")
-        };
+        let stored = registry.get(id).unwrap();
         assert_eq!(stored.revision, 1);
 
         registry.drop_graph(id).unwrap();
-        assert_eq!(
-            registry.get_registered(id).unwrap_err().code,
-            "STALE_GRAPH_ID"
-        );
+        assert_eq!(registry.get(id).unwrap_err().code, "STALE_GRAPH_ID");
     }
 
     #[test]
@@ -332,30 +282,18 @@ mod switch_request_tests {
         let (id, _) = registry
             .compile(br#"{"schemaVersion":2,"graphId":"resize","revision":1,"nodes":[]}"#)
             .unwrap();
-        let crate::render_graph::RegisteredGraph::V2(revision_one) =
-            registry.get_registered(id).unwrap().clone()
-        else {
-            panic!("expected V2 graph")
-        };
-        let in_flight = InFlightV2Preparation {
+        let revision_one = registry.get(id).unwrap().clone();
+        let in_flight = InFlightPreparation {
             token: 1,
             id,
-            purpose: V2PreparationPurpose::Resize,
+            purpose: PreparationPurpose::Resize,
             graph: revision_one,
         };
         let (revision_two_id, _) = registry
             .compile(br#"{"schemaVersion":2,"graphId":"resize","revision":2,"nodes":[]}"#)
             .unwrap();
-        let crate::render_graph::RegisteredGraph::V2(original) =
-            registry.get_registered(id).unwrap()
-        else {
-            panic!("expected V2 graph")
-        };
-        let crate::render_graph::RegisteredGraph::V2(revision_two) =
-            registry.get_registered(revision_two_id).unwrap()
-        else {
-            panic!("expected V2 graph")
-        };
+        let original = registry.get(id).unwrap();
+        let revision_two = registry.get(revision_two_id).unwrap();
         assert_eq!(in_flight.graph.revision, 1);
         assert_eq!(original.revision, 1);
         assert_eq!(revision_two.revision, 2);
@@ -369,22 +307,22 @@ struct PendingSwitch {
 }
 
 #[derive(Clone, Copy)]
-enum V2PreparationPurpose {
+enum PreparationPurpose {
     Switch { request: u32 },
     Resize,
 }
 
-struct InFlightV2Preparation {
+struct InFlightPreparation {
     token: u64,
     id: crate::render_graph::CompiledGraphId,
-    purpose: V2PreparationPurpose,
-    graph: crate::render_graph::CompiledGraphV2,
+    purpose: PreparationPurpose,
+    graph: crate::render_graph::CompiledGraph,
 }
 
-struct V2PreparationCompletion {
+struct PreparationCompletion {
     token: u64,
-    purpose: V2PreparationPurpose,
-    candidate: Result<ActiveCompiledV2, crate::render_graph::GraphError>,
+    purpose: PreparationPurpose,
+    candidate: Result<ActiveCompiledGraph, crate::render_graph::GraphError>,
     validation_error: Option<String>,
     out_of_memory_error: Option<String>,
 }
@@ -439,160 +377,6 @@ fn render_data_error_code(error: &crate::render_data::RenderDataError) -> &'stat
     }
 }
 
-/*pub struct GpuResources {
-    // Core resources
-    pipelines: Vec<wgpu::RenderPipeline>,
-
-    // Layout management
-    pipeline_layouts: Vec<wgpu::PipelineLayout>,
-    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-
-    // Simple name-based pipeline lookup
-    pipeline_registry: HashMap<String, PipelineKey>,
-}
-
-impl GpuResources {
-    pub fn new() -> Self {
-        Self {
-            pipelines: Vec::new(),
-            pipeline_layouts: Vec::new(),
-            bind_group_layouts: Vec::new(),
-            pipeline_registry: HashMap::new(),
-        }
-    }
-
-    pub fn create_pipeline(
-        &mut self,
-        device: &wgpu::Device,
-        name: &str,
-        vertex_layout: &[wgpu::VertexBufferLayout],
-        shader_source: &str,
-        surface_format: wgpu::TextureFormat,
-    ) -> Result<PipelineKey, String> {
-        if self.pipeline_registry.contains_key(name) {
-            return Err(format!("Pipeline '{}' already exists", name));
-        }
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(name),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-        });
-
-        let layout = self.get_or_create_pipeline_layout(device, name);
-
-        // Determine entry points based on pipeline name
-        let (vertex_entry, fragment_entry) = match name {
-            "triangle_colored" => ("v_main", "f_main"),
-            _ => ("vs_main", "fs_main"),
-        };
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(name),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some(vertex_entry),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: vertex_layout,
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: if name == "gltf_standard_double_sided" {
-                    None
-                } else {
-                    Some(wgpu::Face::Back)
-                },
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some(fragment_entry),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-            cache: None,
-        });
-
-        let index = self.pipelines.len();
-        self.pipelines.push(pipeline);
-        let key = PipelineKey::new(index as u32);
-        self.pipeline_registry.insert(name.to_string(), key);
-        Ok(key)
-    }
-
-    pub fn find_pipeline(&self, name: &str) -> Option<PipelineKey> {
-        self.pipeline_registry.get(name).copied()
-    }
-
-    pub fn get_or_create_pipeline(
-        &mut self,
-        device: &wgpu::Device,
-        name: &str,
-        vertex_layout: &[wgpu::VertexBufferLayout],
-        shader_source: &str,
-        surface_format: wgpu::TextureFormat,
-    ) -> PipelineKey {
-        if let Some(index) = self.find_pipeline(name) {
-            return index;
-        }
-
-        self.create_pipeline(device, name, vertex_layout, shader_source, surface_format)
-            .expect(&format!("Failed to create pipeline '{}'", name))
-    }
-
-    pub fn get_pipeline(&self, key: PipelineKey) -> &wgpu::RenderPipeline {
-        &self.pipelines[key.get() as usize]
-    }
-
-    pub fn set_bind_group_layouts(&mut self, layouts: &[wgpu::BindGroupLayout; 2]) {
-        self.bind_group_layouts = layouts.to_vec();
-    }
-
-    fn get_or_create_pipeline_layout(
-        &mut self,
-        device: &wgpu::Device,
-        label: &str,
-    ) -> wgpu::PipelineLayout {
-        if self.pipeline_layouts.is_empty() {
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &self.bind_group_layouts.iter().collect::<Vec<_>>(),
-                push_constant_ranges: &[],
-            });
-            self.pipeline_layouts.push(layout);
-        }
-        self.pipeline_layouts[0].clone()
-    }
-}
-
-impl Default for GpuResources {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-*/
-
 pub struct RendererContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -606,7 +390,7 @@ pub struct Renderer<T: scene::Scene> {
     canvas: web_sys::OffscreenCanvas,
     events_chan: Receiver<WindowEvent>,
     context: RendererContext,
-    resources: GpuResources,
+    resources: PipelineLibrary,
     scene: T,
     render_data: RenderData,
     snapshot: crate::shared_snapshot::SharedSnapshot,
@@ -621,10 +405,9 @@ pub struct Renderer<T: scene::Scene> {
     graph_registry: crate::render_graph::Registry,
     active_compiled: Option<ActiveCompiledGraph>,
     pending_switch: Option<PendingSwitch>,
-    in_flight_v2: Option<InFlightV2Preparation>,
-    next_v2_preparation_token: u64,
-    v2_preparation_completions: Rc<RefCell<Vec<V2PreparationCompletion>>>,
-    transient_pool: HashMap<crate::render_graph::RuntimeTextureKey, Vec<PooledTransient>>,
+    in_flight: Option<InFlightPreparation>,
+    next_preparation_token: u64,
+    preparation_completions: Rc<RefCell<Vec<PreparationCompletion>>>,
     halted: bool,
     profiler: profiler::Profiler,
 }
@@ -692,7 +475,7 @@ impl<T: Scene + 'static> Renderer<T> {
                         ))
                     } else if self.pending_switch.as_ref().is_some_and(
                         |p| matches!(&p.target, SwitchTarget::Compiled(a) if a.id() == id),
-                    ) || self.in_flight_v2.as_ref().is_some_and(|p| p.id == id)
+                    ) || self.in_flight.as_ref().is_some_and(|p| p.id == id)
                     {
                         Err(crate::render_graph::GraphError::new(
                             "GRAPH_SWITCH_PENDING",
@@ -709,7 +492,7 @@ impl<T: Scene + 'static> Renderer<T> {
             } else if opcode == 9 {
                 let outcome = resolve_switch_request(
                     &self.graph_registry,
-                    self.pending_switch.is_some() || self.in_flight_v2.is_some(),
+                    self.pending_switch.is_some() || self.in_flight.is_some(),
                     words[2],
                     words[3],
                     words[4],
@@ -723,24 +506,12 @@ impl<T: Scene + 'static> Renderer<T> {
                         Ok(())
                     }
                     ResolvedSwitchRequest::Compiled(id) => {
-                        match self.graph_registry.get_registered(id)?.clone() {
-                            crate::render_graph::RegisteredGraph::V1(graph) => {
-                                self.prepare_compiled_snapshot(id, graph).map(|active| {
-                                    self.pending_switch = Some(PendingSwitch {
-                                        request,
-                                        target: SwitchTarget::Compiled(ActiveCompiledGraph::V1(
-                                            active,
-                                        )),
-                                    })
-                                })
-                            }
-                            crate::render_graph::RegisteredGraph::V2(graph) => self
-                                .begin_compiled_v2_preparation(
-                                    id,
-                                    graph,
-                                    V2PreparationPurpose::Switch { request },
-                                ),
-                        }
+                        let graph = self.graph_registry.get(id)?.clone();
+                        self.begin_compiled_preparation(
+                            id,
+                            graph,
+                            PreparationPurpose::Switch { request },
+                        )
                     }
                 });
                 if let Err(error) = outcome {
@@ -911,7 +682,7 @@ impl<T: Scene + 'static> Renderer<T> {
     }
 
     fn ensure_gltf_pipelines(
-        resources: &mut GpuResources,
+        resources: &mut PipelineLibrary,
         context: &RendererContext,
     ) -> [crate::render_data::PipelineKey; 2] {
         let layout = gpu_scene::vertex_layouts();
@@ -932,110 +703,13 @@ impl<T: Scene + 'static> Renderer<T> {
         [culled, double_sided]
     }
 
-    fn prepare_compiled_snapshot(
-        &mut self,
-        id: crate::render_graph::CompiledGraphId,
-        graph: crate::render_graph::CompiledGraph,
-    ) -> Result<ActiveCompiledV1, crate::render_graph::GraphError> {
-        crate::render_graph::validate_activatable(&graph)?;
-        let surface = [
-            self.context.surface_config.width,
-            self.context.surface_config.height,
-        ];
-        let classes: Vec<_> = graph
-            .allocation_classes
-            .iter()
-            .map(|class| (class.key.clone(), class.slot_count))
-            .collect();
-        let offsets = crate::render_graph::class_offsets(&classes, surface)?;
-        let mut textures = Vec::new();
-        let mut views = Vec::new();
-        let mut class_bases = Vec::new();
-        for (class, offset) in graph.allocation_classes.iter().zip(offsets) {
-            class_bases.push(views.len());
-            let key = crate::render_graph::runtime_texture_key(&class.key, surface)?;
-            let required = offset.checked_add(class.slot_count).ok_or_else(|| {
-                crate::render_graph::GraphError::new(
-                    "GRAPH_RESOURCE_LIMIT",
-                    "transient slot count overflow",
-                )
-            })? as usize;
-            let bucket = self.transient_pool.entry(key.clone()).or_default();
-            while bucket.len() < required {
-                let usage = key
-                    .usage
-                    .iter()
-                    .fold(wgpu::TextureUsages::empty(), |usage, item| {
-                        usage
-                            | match item {
-                                crate::render_graph::TextureUsage::Sampled => {
-                                    wgpu::TextureUsages::TEXTURE_BINDING
-                                }
-                                crate::render_graph::TextureUsage::Storage => {
-                                    wgpu::TextureUsages::STORAGE_BINDING
-                                }
-                                crate::render_graph::TextureUsage::CopySrc => {
-                                    wgpu::TextureUsages::COPY_SRC
-                                }
-                                crate::render_graph::TextureUsage::CopyDst => {
-                                    wgpu::TextureUsages::COPY_DST
-                                }
-                                crate::render_graph::TextureUsage::ColorAttachment
-                                | crate::render_graph::TextureUsage::DepthAttachment => {
-                                    wgpu::TextureUsages::RENDER_ATTACHMENT
-                                }
-                            }
-                    });
-                let format = match key.format {
-                    crate::render_graph::Format::Depth32Float => wgpu::TextureFormat::Depth32Float,
-                    _ => {
-                        return Err(crate::render_graph::GraphError::new(
-                            "GRAPH_EXECUTION_UNSUPPORTED",
-                            "unsupported transient texture format",
-                        ))
-                    }
-                };
-                let texture = self
-                    .context
-                    .device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some("render graph transient"),
-                        size: wgpu::Extent3d {
-                            width: key.extent.width,
-                            height: key.extent.height,
-                            depth_or_array_layers: key.extent.depth_or_array_layers,
-                        },
-                        mip_level_count: key.mip_level_count,
-                        sample_count: key.sample_count,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        usage,
-                        view_formats: &[],
-                    });
-                let view = texture.create_view(&Default::default());
-                bucket.push(PooledTransient { texture, view });
-            }
-            for slot in offset as usize..required {
-                textures.push(bucket[slot].texture.clone());
-                views.push(bucket[slot].view.clone());
-            }
-        }
-        Ok(ActiveCompiledV1 {
-            id,
-            graph,
-            _textures: textures,
-            views,
-            class_bases,
-        })
-    }
-
-    fn plan_compiled_v2(
+    fn plan_compiled(
         &self,
-        graph: &crate::render_graph::CompiledGraphV2,
-    ) -> Result<crate::render_graph::RuntimePlanV2, crate::render_graph::GraphError> {
-        crate::render_graph::prepare_runtime_plan_v2(
+        graph: &crate::render_graph::CompiledGraph,
+    ) -> Result<crate::render_graph::RuntimePlan, crate::render_graph::GraphError> {
+        crate::render_graph::prepare_runtime_plan(
             graph,
-            crate::render_graph::RuntimeSurfaceContractV2 {
+            crate::render_graph::RuntimeSurfaceContract {
                 format: self.context.surface_config.format,
                 width: self.context.surface_config.width,
                 height: self.context.surface_config.height,
@@ -1046,12 +720,12 @@ impl<T: Scene + 'static> Renderer<T> {
         )
     }
 
-    fn create_compiled_v2_candidate(
+    fn create_compiled_candidate(
         &mut self,
         id: crate::render_graph::CompiledGraphId,
-        graph: crate::render_graph::CompiledGraphV2,
-        runtime: crate::render_graph::RuntimePlanV2,
-    ) -> Result<ActiveCompiledV2, crate::render_graph::GraphError> {
+        graph: crate::render_graph::CompiledGraph,
+        runtime: crate::render_graph::RuntimePlan,
+    ) -> Result<ActiveCompiledGraph, crate::render_graph::GraphError> {
         use crate::render_graph::*;
         let fail = |message| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", message);
         let mut textures = Vec::with_capacity(runtime.allocations.classes.len());
@@ -1063,7 +737,7 @@ impl<T: Scene + 'static> Renderer<T> {
                     .context
                     .device
                     .create_texture(&wgpu::TextureDescriptor {
-                        label: Some("V2 graph texture"),
+                        label: Some(" graph texture"),
                         size: wgpu::Extent3d {
                             width: d.extent.width,
                             height: d.extent.height,
@@ -1077,7 +751,7 @@ impl<T: Scene + 'static> Renderer<T> {
                         view_formats: &d.view_formats,
                     });
                 let view = texture.create_view(&Default::default());
-                gpu_class.push(GpuTextureSlotV2 {
+                gpu_class.push(GpuTextureSlot {
                     _texture: texture,
                     view,
                 });
@@ -1102,7 +776,7 @@ impl<T: Scene + 'static> Renderer<T> {
             self.context
                 .device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("V2 fullscreen texture"),
+                    label: Some(" fullscreen texture"),
                     entries: &[
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
@@ -1146,7 +820,7 @@ impl<T: Scene + 'static> Renderer<T> {
             self.context
                 .device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("V2 fullscreen"),
+                    label: Some(" fullscreen"),
                     bind_group_layouts: &[&fullscreen_layout],
                     push_constant_ranges: &[],
                 });
@@ -1154,14 +828,14 @@ impl<T: Scene + 'static> Renderer<T> {
             .context
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("V2 fullscreen"),
+                label: Some(" fullscreen"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("fullscreen_copy.wgsl").into()),
             });
         let sampler = self
             .context
             .device
             .create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("V2 post linear clamp"),
+                label: Some(" post linear clamp"),
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
@@ -1169,15 +843,15 @@ impl<T: Scene + 'static> Renderer<T> {
         let mut executions = Vec::new();
         for (index, execution) in graph.executions.iter().enumerate() {
             match execution.executor.key.as_str() {
-                "frustum_cull" => executions.push(PreparedExecutionV2::FrustumCull),
-                "mesh_query" => executions.push(PreparedExecutionV2::MeshQuery),
-                "present" => executions.push(PreparedExecutionV2::Present),
+                "frustum_cull" => executions.push(PreparedExecution::FrustumCull),
+                "mesh_query" => executions.push(PreparedExecution::MeshQuery),
+                "present" => executions.push(PreparedExecution::Present),
                 "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur"
                 | "bloom_composite" | "luminance_edge" => {
                     let sampled: Vec<_> = execution
                         .accesses
                         .iter()
-                        .filter(|a| matches!(a.mode, AccessModeV2::SampledTexture))
+                        .filter(|a| matches!(a.mode, AccessMode::SampledTexture))
                         .map(|a| a.resource)
                         .collect();
                     let source = *sampled
@@ -1185,19 +859,19 @@ impl<T: Scene + 'static> Renderer<T> {
                         .ok_or_else(|| fail("fullscreen source missing"))?;
                     let second = *sampled.get(1).unwrap_or(&source);
                     let values: [f32; 8] = match execution.parameters {
-                        NormalizedParametersV2::ToneMap { exposure } => {
+                        NormalizedParameters::ToneMap { exposure } => {
                             [exposure, 0., 0., 0., 0., 0., 0., 0.]
                         }
-                        NormalizedParametersV2::BloomExtract { threshold, knee } => {
+                        NormalizedParameters::BloomExtract { threshold, knee } => {
                             [threshold, knee, 0., 0., 0., 0., 0., 0.]
                         }
-                        NormalizedParametersV2::BloomBlur { direction, radius } => {
+                        NormalizedParameters::BloomBlur { direction, radius } => {
                             [direction[0], direction[1], radius, 0., 0., 0., 0., 0.]
                         }
-                        NormalizedParametersV2::BloomComposite { intensity } => {
+                        NormalizedParameters::BloomComposite { intensity } => {
                             [intensity, 0., 0., 0., 0., 0., 0., 0.]
                         }
-                        NormalizedParametersV2::LuminanceEdge { strength } => {
+                        NormalizedParameters::LuminanceEdge { strength } => {
                             [strength, 0., 0., 0., 0., 0., 0., 0.]
                         }
                         _ => [0.; 8],
@@ -1207,11 +881,11 @@ impl<T: Scene + 'static> Renderer<T> {
                         self.context
                             .device
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("V2 post parameters"),
+                                label: Some(" post parameters"),
                                 contents: bytemuck::cast_slice(&values),
                                 usage: wgpu::BufferUsages::UNIFORM,
                             });
-                    let ExecutionKindV2::Render {
+                    let ExecutionKind::Render {
                         color_attachments, ..
                     } = &execution.kind
                     else {
@@ -1221,7 +895,7 @@ impl<T: Scene + 'static> Renderer<T> {
                         .first()
                         .ok_or_else(|| fail("fullscreen target missing"))?
                         .resource;
-                    let target_format = if graph.resources.get(target as usize).is_some_and(|r| matches!(r.plan, ResourcePlanV2::Texture { family, .. } if family == runtime.allocations.surface_family)) { runtime.surface.format } else { let a=runtime.allocations.resource_allocations[target as usize].ok_or_else(|| fail("fullscreen target allocation missing"))?; runtime.allocations.classes[a.class as usize].slots[a.slot as usize].descriptor.format };
+                    let target_format = if graph.resources.get(target as usize).is_some_and(|r| matches!(r.plan, ResourcePlan::Texture { family, .. } if family == runtime.allocations.surface_family)) { runtime.surface.format } else { let a=runtime.allocations.resource_allocations[target as usize].ok_or_else(|| fail("fullscreen target allocation missing"))?; runtime.allocations.classes[a.class as usize].slots[a.slot as usize].descriptor.format };
                     let entry = match execution.executor.key.as_str() {
                         "fullscreen_copy" => "fs_copy",
                         "tone_map" => "fs_tone_map",
@@ -1233,7 +907,7 @@ impl<T: Scene + 'static> Renderer<T> {
                     };
                     let pipeline = self.context.device.create_render_pipeline(
                         &wgpu::RenderPipelineDescriptor {
-                            label: Some("V2 post pipeline"),
+                            label: Some(" post pipeline"),
                             layout: Some(&pipeline_layout),
                             vertex: wgpu::VertexState {
                                 module: &shader,
@@ -1262,7 +936,7 @@ impl<T: Scene + 'static> Renderer<T> {
                         self.context
                             .device
                             .create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("V2 fullscreen source"),
+                                label: Some(" fullscreen source"),
                                 layout: &fullscreen_layout,
                                 entries: &[
                                     wgpu::BindGroupEntry {
@@ -1287,7 +961,7 @@ impl<T: Scene + 'static> Renderer<T> {
                                     },
                                 ],
                             });
-                    executions.push(PreparedExecutionV2::Fullscreen {
+                    executions.push(PreparedExecution::Fullscreen {
                         execution: index,
                         bind_group,
                         pipeline,
@@ -1295,7 +969,7 @@ impl<T: Scene + 'static> Renderer<T> {
                     });
                 }
                 "legacy_forward" => {
-                    let ExecutionKindV2::Render {
+                    let ExecutionKind::Render {
                         color_attachments,
                         depth_stencil,
                     } = &execution.kind
@@ -1311,8 +985,8 @@ impl<T: Scene + 'static> Renderer<T> {
                         .is_some_and(|resource| {
                             matches!(
                                 resource.plan,
-                                ResourcePlanV2::SurfaceTarget { family }
-                                    | ResourcePlanV2::Texture { family, .. }
+                                ResourcePlan::SurfaceTarget { family }
+                                    | ResourcePlan::Texture { family, .. }
                                     if family == runtime.allocations.surface_family
                             )
                         });
@@ -1358,7 +1032,7 @@ impl<T: Scene + 'static> Renderer<T> {
                         .iter()
                         .filter_map(|i| graph.resources.get(i.resource as usize))
                         .find_map(|r| {
-                            if let ResourcePlanV2::DepthStencilConfig { config } = r.plan {
+                            if let ResourcePlan::DepthStencilConfig { config } = r.plan {
                                 Some(config)
                             } else {
                                 None
@@ -1366,14 +1040,14 @@ impl<T: Scene + 'static> Renderer<T> {
                         })
                         .ok_or_else(|| fail("depth config missing"))?;
                     let compare = match config.depth_compare {
-                        CompareFunctionV2::Never => wgpu::CompareFunction::Never,
-                        CompareFunctionV2::Less => wgpu::CompareFunction::Less,
-                        CompareFunctionV2::LessEqual => wgpu::CompareFunction::LessEqual,
-                        CompareFunctionV2::Greater => wgpu::CompareFunction::Greater,
-                        CompareFunctionV2::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
-                        CompareFunctionV2::Equal => wgpu::CompareFunction::Equal,
-                        CompareFunctionV2::NotEqual => wgpu::CompareFunction::NotEqual,
-                        CompareFunctionV2::Always => wgpu::CompareFunction::Always,
+                        CompareFunction::Never => wgpu::CompareFunction::Never,
+                        CompareFunction::Less => wgpu::CompareFunction::Less,
+                        CompareFunction::LessEqual => wgpu::CompareFunction::LessEqual,
+                        CompareFunction::Greater => wgpu::CompareFunction::Greater,
+                        CompareFunction::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+                        CompareFunction::Equal => wgpu::CompareFunction::Equal,
+                        CompareFunction::NotEqual => wgpu::CompareFunction::NotEqual,
+                        CompareFunction::Always => wgpu::CompareFunction::Always,
                     };
                     let mut variants = Vec::new();
                     let bases: Vec<_> = self.resources.pipeline_keys().collect();
@@ -1391,7 +1065,7 @@ impl<T: Scene + 'static> Renderer<T> {
                             .map_err(|e| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", e))?;
                         variants.push((base, variant));
                     }
-                    executions.push(PreparedExecutionV2::LegacyForward {
+                    executions.push(PreparedExecution::LegacyForward {
                         execution: index,
                         variants,
                     });
@@ -1399,7 +1073,7 @@ impl<T: Scene + 'static> Renderer<T> {
                 _ => return Err(fail("unsupported prepared execution")),
             }
         }
-        Ok(ActiveCompiledV2 {
+        Ok(ActiveCompiledGraph {
             id,
             graph,
             runtime,
@@ -1409,40 +1083,40 @@ impl<T: Scene + 'static> Renderer<T> {
         })
     }
 
-    fn begin_compiled_v2_preparation(
+    fn begin_compiled_preparation(
         &mut self,
         id: crate::render_graph::CompiledGraphId,
-        graph: crate::render_graph::CompiledGraphV2,
-        purpose: V2PreparationPurpose,
+        graph: crate::render_graph::CompiledGraph,
+        purpose: PreparationPurpose,
     ) -> Result<(), crate::render_graph::GraphError> {
-        let runtime = self.plan_compiled_v2(&graph)?;
+        let runtime = self.plan_compiled(&graph)?;
         // Candidate construction allocates GPU resources, so the live scene preflight
         // belongs here: this is the earliest boundary with both the runtime query and
         // scene access, and precedes GPU work and all pending/in-flight mutation.
         resolve_culling_frustum(runtime.allocations.query, || self.scene.frustum_planes())?;
         let restart_graph = graph.clone();
-        self.next_v2_preparation_token = self.next_v2_preparation_token.wrapping_add(1).max(1);
-        let token = self.next_v2_preparation_token;
+        self.next_preparation_token = self.next_preparation_token.wrapping_add(1).max(1);
+        let token = self.next_preparation_token;
         self.context
             .device
             .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.context
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
-        let candidate = self.create_compiled_v2_candidate(id, graph, runtime);
+        let candidate = self.create_compiled_candidate(id, graph, runtime);
         let validation = self.context.device.pop_error_scope();
         let out_of_memory = self.context.device.pop_error_scope();
-        self.in_flight_v2 = Some(InFlightV2Preparation {
+        self.in_flight = Some(InFlightPreparation {
             token,
             id,
             purpose,
             graph: restart_graph,
         });
-        let completions = self.v2_preparation_completions.clone();
+        let completions = self.preparation_completions.clone();
         spawn_local(async move {
             let validation_error = validation.await.map(|error| error.to_string());
             let out_of_memory_error = out_of_memory.await.map(|error| error.to_string());
-            completions.borrow_mut().push(V2PreparationCompletion {
+            completions.borrow_mut().push(PreparationCompletion {
                 token,
                 purpose,
                 candidate,
@@ -1453,16 +1127,16 @@ impl<T: Scene + 'static> Renderer<T> {
         Ok(())
     }
 
-    fn drain_v2_preparation_completions(&mut self) {
-        let completions = std::mem::take(&mut *self.v2_preparation_completions.borrow_mut());
+    fn drain_preparation_completions(&mut self) {
+        let completions = std::mem::take(&mut *self.preparation_completions.borrow_mut());
         for completion in completions {
-            let Some(in_flight) = self.in_flight_v2.as_ref() else {
+            let Some(in_flight) = self.in_flight.as_ref() else {
                 continue;
             };
             if in_flight.token != completion.token {
                 continue;
             }
-            self.in_flight_v2 = None;
+            self.in_flight = None;
             let result = if let Some(message) = completion.out_of_memory_error {
                 Err(crate::render_graph::GraphError::new(
                     "GRAPH_RESOURCE_LIMIT",
@@ -1477,19 +1151,19 @@ impl<T: Scene + 'static> Renderer<T> {
                 completion.candidate
             };
             match (completion.purpose, result) {
-                (V2PreparationPurpose::Switch { request }, Ok(candidate)) => {
+                (PreparationPurpose::Switch { request }, Ok(candidate)) => {
                     self.pending_switch = Some(PendingSwitch {
                         request,
-                        target: SwitchTarget::Compiled(ActiveCompiledGraph::V2(candidate)),
+                        target: SwitchTarget::Compiled(candidate),
                     });
                 }
-                (V2PreparationPurpose::Switch { request }, Err(error)) => {
+                (PreparationPurpose::Switch { request }, Err(error)) => {
                     self.reply(request, Err(error.into()));
                 }
-                (V2PreparationPurpose::Resize, Ok(candidate)) => {
-                    self.active_compiled = Some(ActiveCompiledGraph::V2(candidate));
+                (PreparationPurpose::Resize, Ok(candidate)) => {
+                    self.active_compiled = Some(candidate);
                 }
-                (V2PreparationPurpose::Resize, Err(error)) => {
+                (PreparationPurpose::Resize, Err(error)) => {
                     log::error!(
                         "compiled graph resize preparation failed: {}",
                         error.message
@@ -1585,7 +1259,7 @@ impl<T: Scene + 'static> Renderer<T> {
 
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &surface_config);
 
-        let mut resources = GpuResources::new();
+        let mut resources = PipelineLibrary::new();
         let context = RendererContext {
             surface,
             device,
@@ -1621,10 +1295,9 @@ impl<T: Scene + 'static> Renderer<T> {
             graph_registry: Default::default(),
             active_compiled: None,
             pending_switch: None,
-            in_flight_v2: None,
-            next_v2_preparation_token: 0,
-            v2_preparation_completions: Default::default(),
-            transient_pool: HashMap::new(),
+            in_flight: None,
+            next_preparation_token: 0,
+            preparation_completions: Default::default(),
             halted: false,
             profiler,
         }
@@ -1634,7 +1307,7 @@ impl<T: Scene + 'static> Renderer<T> {
         if self.halted {
             return;
         }
-        self.drain_v2_preparation_completions();
+        self.drain_preparation_completions();
         if self
             .gpu_error
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -1745,41 +1418,22 @@ impl<T: Scene + 'static> Renderer<T> {
         };
         let mut profile_frame = self.profiler.begin(|| match rendering_compiled {
             None => "immediate".to_owned(),
-            Some(ActiveCompiledGraph::V1(active)) => format!(
-                "v1:{}:{}:{}:{}",
-                active.graph.graph_id, active.graph.revision, active.id.slot, active.id.generation
-            ),
-            Some(ActiveCompiledGraph::V2(active)) => format!(
-                "v2:{}:{}:{}:{}",
+            Some(active) => format!(
+                "graph:{}:{}:{}:{}",
                 active.graph.graph_id, active.graph.revision, active.id.slot, active.id.generation
             ),
         });
         let encode_result = if let Some(active) = rendering_compiled {
-            match active {
-                ActiveCompiledGraph::V1(active) => {
-                    executors::encode_compiled_v1(
-                        &mut encoder,
-                        &texture_view,
-                        active,
-                        &self.scene,
-                        &self.gpu_scene,
-                        &self.resources,
-                        &self.materials,
-                        profile_frame.as_mut(),
-                    );
-                    Ok(())
-                }
-                ActiveCompiledGraph::V2(active) => executors::encode_compiled_v2(
-                    &mut encoder,
-                    &texture_view,
-                    active,
-                    &self.scene,
-                    &self.gpu_scene,
-                    &self.resources,
-                    &self.materials,
-                    profile_frame.as_mut(),
-                ),
-            }
+            executors::encode_compiled(
+                &mut encoder,
+                &texture_view,
+                active,
+                &self.scene,
+                &self.gpu_scene,
+                &self.resources,
+                &self.materials,
+                profile_frame.as_mut(),
+            )
         } else {
             executors::encode_immediate(
                 &mut encoder,
@@ -1886,13 +1540,6 @@ impl<T: Scene + 'static> Renderer<T> {
                 active.map(|a| a.revision()).unwrap_or(0).into(),
             ),
             (
-                "graphPasses",
-                active
-                    .map(|a| a.execution_count() as u32)
-                    .unwrap_or(0)
-                    .into(),
-            ),
-            (
                 "graphExecutions",
                 active
                     .map(|a| a.execution_count() as u32)
@@ -1905,10 +1552,6 @@ impl<T: Scene + 'static> Renderer<T> {
                     .map(|a| a.texture_slot_count() as u32)
                     .unwrap_or(0)
                     .into(),
-            ),
-            (
-                "transientPoolTextures",
-                (self.transient_pool.values().map(Vec::len).sum::<usize>() as u32).into(),
             ),
             (
                 "gpuError",
@@ -2134,7 +1777,6 @@ impl<T: Scene + 'static> Renderer<T> {
             self.recreate_depth_texture();
             // The executable subset uses surface-relative transients exclusively.
             // Dropping old buckets prevents stale-size reuse and bounds resize growth.
-            self.transient_pool.clear();
             if let Some(pending) = self.pending_switch.take() {
                 self.reply(
                     pending.request,
@@ -2146,10 +1788,10 @@ impl<T: Scene + 'static> Renderer<T> {
                 );
             }
             let interrupted_resize =
-                self.in_flight_v2
+                self.in_flight
                     .take()
                     .and_then(|preparation| match preparation.purpose {
-                        V2PreparationPurpose::Switch { request } => {
+                        PreparationPurpose::Switch { request } => {
                             self.reply(
                                 request,
                                 Err(crate::render_graph::GraphError::new(
@@ -2160,37 +1802,25 @@ impl<T: Scene + 'static> Renderer<T> {
                             );
                             None
                         }
-                        V2PreparationPurpose::Resize => Some((preparation.id, preparation.graph)),
+                        PreparationPurpose::Resize => Some((preparation.id, preparation.graph)),
                     });
-            let mut restarted_v2 = false;
+            let mut restarted = false;
             if let Some(old) = self.active_compiled.take() {
                 let id = old.id();
                 // Keep immediate resources live and fall back for this frame if recreation fails.
-                match old {
-                    ActiveCompiledGraph::V1(a) => self
-                        .prepare_compiled_snapshot(id, a.graph)
-                        .map(ActiveCompiledGraph::V1)
-                        .map(|active| self.active_compiled = Some(active)),
-                    ActiveCompiledGraph::V2(a) => {
-                        restarted_v2 = true;
-                        self.begin_compiled_v2_preparation(
-                            id,
-                            a.graph,
-                            V2PreparationPurpose::Resize,
+                restarted = true;
+                self.begin_compiled_preparation(id, old.graph, PreparationPurpose::Resize)
+                    .unwrap_or_else(|error| {
+                        log::error!(
+                            "compiled graph resize preparation failed: {}",
+                            error.message
                         )
-                    }
-                }
-                .unwrap_or_else(|error| {
-                    log::error!(
-                        "compiled graph resize preparation failed: {}",
-                        error.message
-                    )
-                });
+                    });
             }
-            if !restarted_v2 {
+            if !restarted {
                 if let Some((id, graph)) = interrupted_resize {
                     if let Err(error) =
-                        self.begin_compiled_v2_preparation(id, graph, V2PreparationPurpose::Resize)
+                        self.begin_compiled_preparation(id, graph, PreparationPurpose::Resize)
                     {
                         log::error!(
                             "compiled graph resize preparation failed: {}",

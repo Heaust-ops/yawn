@@ -71,7 +71,6 @@ function publish(telemetry) {
     activeCompiledGraph: telemetry.activeCompiledGraph,
     activeCompiledRevision: telemetry.activeCompiledRevision,
     activeCompiledSchemaVersion: telemetry.activeCompiledSchemaVersion,
-    graphPasses: telemetry.graphPasses,
     graphExecutions: telemetry.graphExecutions,
     graphTextureSlots: telemetry.graphTextureSlots,
     draws: telemetry.draws,

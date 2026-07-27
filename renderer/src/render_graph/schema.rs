@@ -1,64 +1,58 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct GraphV1 {
+pub struct Graph {
     pub schema_version: u32,
     pub graph_id: String,
     pub revision: u32,
-    pub resources: Vec<Resource>,
-    pub passes: Vec<Pass>,
-    pub outputs: Vec<Output>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ResourceRef {
-    pub id: String,
-    pub version: u32,
+    pub nodes: Vec<Node>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Resource {
+#[serde(deny_unknown_fields)]
+pub struct Node {
     pub id: String,
-    pub version: u32,
-    pub residency: Residency,
-    pub texture: TextureDescriptor,
+    pub state: NodeState,
+    pub executor: ExecutorRef,
+    pub parameters: serde_json::Value,
+    pub inputs: BTreeMap<String, NodeOutputRef>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeState {
+    Enabled,
+    Muted,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Residency {
-    External { source: ExternalSource },
-    Transient,
-}
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalSource {
-    SurfaceColor,
+#[serde(deny_unknown_fields)]
+pub struct ExecutorRef {
+    pub key: String,
+    pub version: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct TextureDescriptor {
-    pub dimension: Dimension,
-    pub format: Format,
-    pub extent: Extent,
-    pub mip_level_count: u32,
-    pub sample_count: u32,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct NodeOutputRef {
+    pub node: String,
+    pub socket: String,
 }
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Dimension {
+pub enum TextureDimension {
     D1,
     D2,
     D3,
 }
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Format {
-    Surface,
+pub enum TextureFormat {
     Rgba8Unorm,
     Rgba8UnormSrgb,
     Bgra8Unorm,
@@ -67,15 +61,10 @@ pub enum Format {
     R32Float,
     Depth32Float,
 }
-impl Format {
-    pub(crate) fn depth(self) -> bool {
-        self == Self::Depth32Float
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Extent {
+pub enum TextureExtent {
     Absolute {
         width: u32,
         height: u32,
@@ -96,93 +85,75 @@ pub struct Ratio {
     pub denominator: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Pass {
-    pub id: String,
-    pub state: PassState,
-    pub executor: ExecutorRef,
-    pub parameters: serde_json::Value,
-    pub reads: Vec<ReadBinding>,
-    pub writes: Vec<WriteBinding>,
-}
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PassState {
-    Enabled,
-    Muted,
-}
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutorRef {
-    pub key: String,
-    pub version: u32,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadBinding {
-    pub binding: String,
-    pub resource: ResourceRef,
-    pub access: ReadAccess,
-}
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum ReadAccess {
-    Sampled,
-    Storage,
-    CopySrc,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WriteBinding {
-    pub binding: String,
-    pub resource: ResourceRef,
-    pub access: WriteAccess,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WriteAccess {
-    Storage,
-    CopyDst,
-    ColorAttachment {
-        location: u32,
-        load: ColorLoad,
-        store: StoreOp,
-    },
-    DepthAttachment {
-        load: DepthLoad,
-        store: StoreOp,
-    },
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ColorLoad {
-    Clear { value: [f64; 4] },
-    Load,
-}
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DepthLoad {
-    Clear { value: f32 },
-    Load,
-}
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StoreOp {
-    Store,
-    Discard,
-}
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Output {
-    pub name: String,
-    pub resource: ResourceRef,
+pub enum TextureResidency {
+    Transient,
+    Persistent,
+    History,
+    Readback,
 }
 
-pub(crate) fn identifier(s: &str) -> bool {
-    s.as_bytes()
-        .first()
-        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
-        && s.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'/' | b'-'))
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TextureDescriptor {
+    pub dimension: TextureDimension,
+    pub format: TextureFormat,
+    pub extent: TextureExtent,
+    pub mip_level_count: u32,
+    pub sample_count: u32,
+    #[serde(default)]
+    pub view_formats: Vec<TextureFormat>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TriStatePredicate {
+    Any,
+    RequiredTrue,
+    RequiredFalse,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct MeshFilter {
+    pub flag: MeshFlag,
+    pub predicate: TriStatePredicate,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum MeshFlag {
+    IsVisible,
+    IsFrustumCulled,
+}
+
+impl MeshFlag {
+    pub const ORDERED: [Self; 2] = [Self::IsVisible, Self::IsFrustumCulled];
+
+    pub const fn input_socket(self) -> &'static str {
+        match self {
+            Self::IsVisible => "isVisible",
+            Self::IsFrustumCulled => "isFrustumCulled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+pub(crate) fn identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }

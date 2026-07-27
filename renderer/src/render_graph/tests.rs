@@ -1,703 +1,1655 @@
+use std::collections::BTreeSet;
+
 use super::*;
+use serde_json::{json, Value};
 
-struct TestExecutors;
-struct TestExecutor {
-    observable: bool,
+fn input(node: &str, socket: &str) -> Value {
+    json!({"node":node,"socket":socket})
 }
-
-static TEST_EXECUTOR: TestExecutor = TestExecutor { observable: false };
-static OBSERVABLE_EXECUTOR: TestExecutor = TestExecutor { observable: true };
-
-impl ExecutorRegistry for TestExecutors {
-    fn resolve(&self, executor: &ExecutorRef) -> ExecutorResolution<'_> {
-        if executor.version != 1 {
-            return ExecutorResolution::UnsupportedVersion;
-        }
-        match executor.key.as_str() {
-            "test" => ExecutorResolution::Found(&TEST_EXECUTOR),
-            "observable" => ExecutorResolution::Found(&OBSERVABLE_EXECUTOR),
-            _ => ExecutorResolution::UnknownKey,
-        }
-    }
+fn node(id: &str, key: &str, parameters: Value, inputs: Value) -> Value {
+    json!({"id":id,"state":"enabled","executor":{"key":key,"version":1},"parameters":parameters,"inputs":inputs})
 }
-
-impl ExecutorContract for TestExecutor {
-    fn inherently_observable(&self) -> bool {
-        self.observable
-    }
-
-    fn normalize_parameters(
-        &self,
-        parameters: &serde_json::Value,
-    ) -> Result<NormalizedParameters, String> {
-        if parameters == &serde_json::json!({}) {
-            Ok(NormalizedParameters::SceneForward)
-        } else {
-            Err("test parameters must be empty".into())
-        }
-    }
-
-    fn validate_bindings(
-        &self,
-        _pass: &Pass,
-        _resources: &std::collections::HashMap<ResourceRef, &Resource>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
+fn texture(format: &str, residency: &str) -> Value {
+    json!({"texture":{"dimension":"d2","format":format,"extent":{"kind":"surface_relative","width":{"numerator":1,"denominator":1},"height":{"numerator":1,"denominator":1},"depthOrArrayLayers":1},"mipLevelCount":1,"sampleCount":1,"viewFormats":[]},"residency":residency})
 }
-
-fn compile_json(value: serde_json::Value) -> Result<CompiledGraph, GraphError> {
-    compile_with(&serde_json::to_vec(&value).unwrap(), &TestExecutors)
+fn full_cull_graph() -> Value {
+    json!({"schemaVersion":2,"graphId":"full","revision":1,"nodes":[
+        node("surface","surface_target",json!({}),json!({})),
+        node("depth","texture_spec",texture("depth32_float","transient"),json!({})),
+        node("scene","scene_table",json!({}),json!({})),
+        node("aabbs","local_aabb_buffer",json!({}),json!({"scene":input("scene","scene")})),
+        node("frustum","camera_frustum",json!({}),json!({})),
+        node("visible","visibility_flags",json!({}),json!({"scene":input("scene","scene")})),
+        node("cull","frustum_cull",json!({}),json!({"scene":input("scene","scene"),"localAabbs":input("aabbs","localAabbs"),"frustum":input("frustum","frustum")})),
+        node("query","mesh_query",json!({"filters":[{"flag":"isFrustumCulled","predicate":"required_false"},{"flag":"isVisible","predicate":"required_true"}]}),json!({"scene":input("scene","scene"),"isVisible":input("visible","flags"),"isFrustumCulled":input("cull","flags")})),
+        node("depth_config","depth_stencil_config",json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0}),json!({})),
+        node("forward","legacy_forward",json!({"clearColor":[0,0,0,1]}),json!({"scene":input("scene","scene"),"draws":input("query","draws"),"colorTarget":input("surface","surface"),"depthTarget":input("depth","spec"),"depthStencil":input("depth_config","config")})),
+        node("present","present",json!({}),json!({"surface":input("forward","color")}))
+    ]})
 }
-
-fn texture(format: &str) -> serde_json::Value {
-    serde_json::json!({
-        "dimension": "d2",
-        "format": format,
-        "extent": {"kind":"absolute", "width":16, "height":16, "depthOrArrayLayers":1},
-        "mipLevelCount": 1,
-        "sampleCount": 1
-    })
+fn forward(id: &str, color: Value, depth: Value) -> Value {
+    node(
+        id,
+        "legacy_forward",
+        json!({"clearColor":[0,0,0,1]}),
+        json!({
+            "scene":input("scene","scene"),
+            "draws":input("query","draws"),
+            "colorTarget":color,
+            "depthTarget":depth,
+            "depthStencil":input("depth_config","config")
+        }),
+    )
 }
-
-fn transient(id: &str, format: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": id,
-        "version": 0,
-        "residency": {"kind":"transient"},
-        "texture": texture(format)
-    })
+fn render_support_nodes() -> Vec<Value> {
+    vec![
+        node("scene", "scene_table", json!({}), json!({})),
+        node(
+            "visible",
+            "visibility_flags",
+            json!({}),
+            json!({"scene":input("scene","scene")}),
+        ),
+        node(
+            "query",
+            "mesh_query",
+            json!({"filters":[
+                {"flag":"isVisible","predicate":"required_true"},
+                {"flag":"isFrustumCulled","predicate":"any"}
+            ]}),
+            json!({"scene":input("scene","scene"),"isVisible":input("visible","flags")}),
+        ),
+        node(
+            "depth_config",
+            "depth_stencil_config",
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0}),
+            json!({}),
+        ),
+    ]
 }
-
-fn pass(
-    id: &str,
-    executor: &str,
-    reads: serde_json::Value,
-    writes: serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": id,
-        "state": "enabled",
-        "executor": {"key":executor, "version":1},
-        "parameters": {},
-        "reads": reads,
-        "writes": writes
-    })
+fn graph(nodes: Vec<Value>) -> Value {
+    json!({"schemaVersion":2,"graphId":"hazards","revision":1,"nodes":nodes})
 }
-
-fn resource_ref(id: &str) -> serde_json::Value {
-    serde_json::json!({"id":id, "version":0})
+fn hdr_copy_graph() -> Value {
+    let mut nodes = vec![
+        node("surface", "surface_target", json!({}), json!({})),
+        node(
+            "hdr",
+            "texture_spec",
+            texture("rgba16_float", "transient"),
+            json!({}),
+        ),
+        depth_spec("depth", "transient"),
+    ];
+    nodes.extend(render_support_nodes());
+    nodes.extend([
+        forward("forward", input("hdr", "spec"), input("depth", "spec")),
+        node(
+            "copy",
+            "fullscreen_copy",
+            json!({}),
+            json!({"source":input("forward","color"),"colorTarget":input("surface","surface")}),
+        ),
+        node(
+            "present",
+            "present",
+            json!({}),
+            json!({"surface":input("copy","color")}),
+        ),
+    ]);
+    graph(nodes)
 }
-
-fn sampled(binding: &str, id: &str) -> serde_json::Value {
-    serde_json::json!({"binding":binding, "resource":resource_ref(id), "access":"sampled"})
+fn cyclic_forwards() -> Vec<Value> {
+    vec![
+        forward("A", input("B", "color"), input("B", "depth")),
+        forward("B", input("A", "color"), input("A", "depth")),
+    ]
 }
-
-fn copy_write(binding: &str, id: &str) -> serde_json::Value {
-    serde_json::json!({"binding":binding, "resource":resource_ref(id), "access":{"kind":"copy_dst"}})
-}
-
-fn color_write(binding: &str, id: &str, location: u32) -> serde_json::Value {
-    serde_json::json!({
-        "binding":binding,
-        "resource":resource_ref(id),
-        "access":{
-            "kind":"color_attachment",
-            "location":location,
-            "load":{"op":"clear", "value":[0.0, 0.0, 0.0, 1.0]},
-            "store":"store"
-        }
-    })
-}
-
-fn color_load(binding: &str, id: &str, location: u32) -> serde_json::Value {
-    serde_json::json!({
-        "binding":binding,
-        "resource":resource_ref(id),
-        "access":{
-            "kind":"color_attachment",
-            "location":location,
-            "load":{"op":"load"},
-            "store":"store"
-        }
-    })
-}
-
-fn graph(
-    resources: serde_json::Value,
-    passes: serde_json::Value,
-    outputs: serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
-        "schemaVersion":1,
-        "graphId":"test_graph",
-        "revision":1,
-        "resources":resources,
-        "passes":passes,
-        "outputs":outputs
-    })
-}
-
-fn empty(id: &str, revision: u32) -> Vec<u8> {
-    format!(r#"{{"schemaVersion":1,"graphId":"{id}","revision":{revision},"resources":[],"passes":[],"outputs":[]}}"#).into_bytes()
-}
-fn error(bytes: &[u8]) -> &'static str {
-    parse_and_compile(bytes).unwrap_err().code
+fn compile_graph(v: Value) -> CompiledGraph {
+    super::compile(serde_json::from_value(v).unwrap()).unwrap()
 }
 
 #[test]
-fn size_precedes_encoding() {
+fn fullscreen_copy_hdr_graph_lowers_versions_accesses_and_usage() {
+    let p = compile_graph(hdr_copy_graph());
     assert_eq!(
-        error(&vec![0xff; MAX_JSON_BYTES + 1]),
-        "GRAPH_PAYLOAD_TOO_LARGE"
-    );
-}
-#[test]
-fn encoding_precedes_schema() {
-    assert_eq!(error(&[0xff]), "GRAPH_ENCODING_INVALID");
-}
-#[test]
-fn malformed_json() {
-    assert_eq!(error(b"{"), "GRAPH_JSON_INVALID");
-}
-#[test]
-fn missing_schema_probe() {
-    assert_eq!(error(b"{}"), "GRAPH_SCHEMA_UNSUPPORTED");
-}
-#[test]
-fn unsupported_schema_probe() {
-    assert_eq!(error(br#"{"schemaVersion":2}"#), "GRAPH_SCHEMA_UNSUPPORTED");
-}
-#[test]
-fn strict_unknown_field() {
-    assert_eq!(error(br#"{"schemaVersion":1,"graphId":"g","revision":1,"resources":[],"passes":[],"outputs":[],"extra":0}"#), "GRAPH_JSON_INVALID");
-}
-#[test]
-fn identifier_first_character() {
-    assert_eq!(error(&empty("1bad", 1)), "GRAPH_INVALID_ID");
-}
-#[test]
-fn underscore_identifier() {
-    assert_eq!(parse_and_compile(&empty("_ok", 1)).unwrap().graph_id, "_ok");
-}
-#[test]
-fn revision_required() {
-    assert_eq!(error(&empty("g", 0)), "GRAPH_INVALID_ID");
-}
-
-#[test]
-fn resource_version_zero_and_wire_names() {
-    let json = br#"{"schemaVersion":1,"graphId":"g","revision":1,"resources":[{"id":"r","version":0,"residency":{"kind":"transient"},"texture":{"dimension":"d2","format":"rgba8_unorm","extent":{"kind":"absolute","width":1,"height":1,"depthOrArrayLayers":1},"mipLevelCount":1,"sampleCount":1}}],"passes":[],"outputs":[]}"#;
-    assert_eq!(parse_and_compile(json).unwrap().culled_resource_count, 1);
-}
-#[test]
-fn old_mip_wire_rejected() {
-    let mut s = String::from_utf8(empty("g", 1)).unwrap();
-    s=s.replace("\"resources\":[]", "\"resources\":[{\"id\":\"r\",\"version\":0,\"residency\":{\"kind\":\"transient\"},\"texture\":{\"dimension\":\"d2\",\"format\":\"rgba8_unorm\",\"extent\":{\"kind\":\"absolute\",\"width\":1,\"height\":1,\"depthOrArrayLayers\":1},\"mipLevels\":1,\"sampleCount\":1}}]");
-    assert_eq!(error(s.as_bytes()), "GRAPH_JSON_INVALID");
-}
-
-#[test]
-fn registry_transaction_on_parse_failure() {
-    let mut r = Registry::new(1);
-    assert!(r.compile(b"{").is_err());
-    assert!(r.compile(&empty("g", 1)).is_ok());
-}
-#[test]
-fn registry_capacity() {
-    let mut r = Registry::new(1);
-    r.compile(&empty("a", 1)).unwrap();
-    assert_eq!(
-        r.compile(&empty("b", 1)).unwrap_err().code,
-        "GRAPH_REGISTRY_FULL"
-    );
-}
-#[test]
-fn registry_revision_creates_immutable_handle() {
-    let mut r = Registry::new(2);
-    let (a, _) = r.compile(&empty("g", 1)).unwrap();
-    let (b, _) = r.compile(&empty("g", 2)).unwrap();
-    assert_ne!(a, b);
-    assert_eq!(r.get(a).unwrap().revision, 1);
-    assert_eq!(r.get(b).unwrap().revision, 2);
-}
-#[test]
-fn registry_revision_conflict() {
-    let mut r = Registry::new(1);
-    r.compile(&empty("g", 2)).unwrap();
-    assert_eq!(
-        r.compile(&empty("g", 2)).unwrap_err().code,
-        "GRAPH_REVISION_CONFLICT"
-    );
-}
-#[test]
-fn registry_drop_and_stale() {
-    let mut r = Registry::new(1);
-    let (id, _) = r.compile(&empty("g", 1)).unwrap();
-    r.drop_graph(id).unwrap();
-    assert_eq!(r.get(id).unwrap_err().code, "STALE_GRAPH_ID");
-    assert_eq!(r.drop_graph(id).unwrap_err().code, "STALE_GRAPH_ID");
-}
-#[test]
-fn registry_reuse_increments_generation() {
-    let mut r = Registry::new(1);
-    let (a, _) = r.compile(&empty("a", 1)).unwrap();
-    r.drop_graph(a).unwrap();
-    let (b, _) = r.compile(&empty("b", 1)).unwrap();
-    assert_eq!(a.slot, b.slot);
-    assert_eq!(a.generation + 1, b.generation);
-}
-#[test]
-fn graph_error_details_always_have_message() {
-    let e = parse_and_compile(b"{}").unwrap_err();
-    assert!(e.details["message"].is_string());
-}
-
-#[test]
-fn zero_surface_ratio_is_rejected_without_panicking() {
-    for field in ["width", "height"] {
-        let mut resource = transient("r", "rgba8_unorm");
-        resource["texture"]["extent"] = serde_json::json!({
-            "kind":"surface_relative",
-            "width":{"numerator":1,"denominator":1},
-            "height":{"numerator":1,"denominator":1},
-            "depthOrArrayLayers":1
-        });
-        resource["texture"]["extent"][field] = serde_json::json!({"numerator":0,"denominator":0});
-        let error = compile_json(graph(
-            serde_json::json!([resource]),
-            serde_json::json!([]),
-            serde_json::json!([]),
-        ))
-        .unwrap_err();
-        assert_eq!(error.code, "GRAPH_ILLEGAL_ACCESS");
-    }
-}
-
-#[test]
-fn depth_texture_accepts_copy_destination_access() {
-    let compiled = compile_json(graph(
-        serde_json::json!([transient("depth", "depth32_float")]),
-        serde_json::json!([pass(
-            "write_depth",
-            "observable",
-            serde_json::json!([]),
-            serde_json::json!([copy_write("destination", "depth")])
-        )]),
-        serde_json::json!([]),
-    ))
-    .unwrap();
-    assert_eq!(compiled.passes.len(), 1);
-}
-
-#[test]
-fn unknown_resources_precede_executor_and_parameter_errors() {
-    let mut invalid = pass(
-        "bad",
-        "missing_executor",
-        serde_json::json!([sampled("input", "missing_resource")]),
-        serde_json::json!([]),
-    );
-    invalid["parameters"] = serde_json::json!({"also":"invalid"});
-    let error = compile_json(graph(
-        serde_json::json!([]),
-        serde_json::json!([invalid]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_UNKNOWN_RESOURCE");
-}
-
-#[test]
-fn executor_contract_normalizes_parameters_and_reports_invalid_parameters() {
-    let valid = compile_json(graph(
-        serde_json::json!([transient("r", "rgba8_unorm")]),
-        serde_json::json!([pass(
-            "p",
-            "observable",
-            serde_json::json!([]),
-            serde_json::json!([copy_write("out", "r")])
-        )]),
-        serde_json::json!([]),
-    ))
-    .unwrap();
-    assert_eq!(
-        valid.passes[0].parameters,
-        NormalizedParameters::SceneForward
-    );
-
-    let mut invalid = pass(
-        "p",
-        "observable",
-        serde_json::json!([]),
-        serde_json::json!([copy_write("out", "r")]),
-    );
-    invalid["parameters"] = serde_json::json!({"unexpected":true});
-    let error = compile_json(graph(
-        serde_json::json!([transient("r", "rgba8_unorm")]),
-        serde_json::json!([invalid]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_PARAMETERS_INVALID");
-}
-
-#[test]
-fn culls_dead_branches_and_orders_live_dependencies_deterministically() {
-    let compiled = compile_json(graph(
-        serde_json::json!([
-            transient("middle", "rgba8_unorm"),
-            transient("output", "rgba8_unorm"),
-            transient("dead", "rgba8_unorm")
-        ]),
-        serde_json::json!([
-            pass(
-                "consumer",
-                "test",
-                serde_json::json!([sampled("input", "middle")]),
-                serde_json::json!([copy_write("out", "output")])
-            ),
-            pass(
-                "producer",
-                "test",
-                serde_json::json!([]),
-                serde_json::json!([copy_write("out", "middle")])
-            ),
-            pass(
-                "dead",
-                "test",
-                serde_json::json!([]),
-                serde_json::json!([copy_write("out", "dead")])
-            )
-        ]),
-        serde_json::json!([{"name":"present", "resource":resource_ref("output")}]),
-    ))
-    .unwrap();
-    assert_eq!(
-        compiled
-            .passes
+        p.executions
             .iter()
-            .map(|p| p.id.as_str())
+            .map(|execution| execution.id.as_str())
             .collect::<Vec<_>>(),
-        ["producer", "consumer"]
+        ["query", "forward", "copy", "present"]
     );
-    assert_eq!(compiled.culled_pass_count, 1);
-    assert_eq!(compiled.culled_resource_count, 1);
-}
-
-#[test]
-fn output_extends_inclusive_lifetime_to_graph_boundary() {
-    let compiled = compile_json(graph(
-        serde_json::json!([transient("out", "rgba8_unorm")]),
-        serde_json::json!([pass(
-            "write",
-            "test",
-            serde_json::json!([]),
-            serde_json::json!([copy_write("out", "out")])
-        )]),
-        serde_json::json!([{"name":"present", "resource":resource_ref("out")}]),
-    ))
-    .unwrap();
-    assert_eq!(compiled.resources[0].lifetime.first_use, 0);
-    assert_eq!(compiled.resources[0].lifetime.last_use, 1);
-}
-
-#[test]
-fn transient_slots_reuse_only_for_non_overlapping_compatible_lifetimes() {
-    let compiled = compile_json(graph(
-        serde_json::json!([
-            transient("first", "rgba8_unorm"),
-            transient("second", "rgba8_unorm"),
-            transient("incompatible", "rgba16_float")
-        ]),
-        serde_json::json!([
-            pass(
-                "a",
-                "observable",
-                serde_json::json!([]),
-                serde_json::json!([copy_write("out", "first")])
-            ),
-            pass(
-                "b",
-                "observable",
-                serde_json::json!([]),
-                serde_json::json!([copy_write("out", "second")])
-            ),
-            pass(
-                "c",
-                "observable",
-                serde_json::json!([]),
-                serde_json::json!([copy_write("out", "incompatible")])
-            )
-        ]),
-        serde_json::json!([]),
-    ))
-    .unwrap();
-    let allocations: Vec<_> = compiled
+    for (node, socket) in [
+        ("forward", "color"),
+        ("forward", "depth"),
+        ("copy", "color"),
+    ] {
+        assert!(matches!(
+            resource_by_origin(&p, node, socket).plan,
+            ResourcePlan::Texture { version: 0, .. }
+        ));
+    }
+    let copy = execution(&p, "copy");
+    let source = resource_by_origin(&p, "forward", "color");
+    let color = resource_by_origin(&p, "copy", "color");
+    assert!(copy.accesses.iter().any(|access| access.resource
+        == p.resources
+            .iter()
+            .position(|resource| std::ptr::eq(resource, source))
+            .unwrap() as u32
+        && access.mode == AccessMode::SampledTexture));
+    let color_id = p
         .resources
         .iter()
-        .map(|resource| resource.allocation.unwrap())
-        .collect();
-    assert_eq!(allocations[0], allocations[1]);
-    assert_ne!(allocations[0].class, allocations[2].class);
-    assert_eq!(compiled.allocation_classes.len(), 2);
-}
-
-#[test]
-fn cycle_details_survive_a_non_cycle_dfs_branch() {
-    let result = compile_json(graph(
-        serde_json::json!([
-            transient("ab", "rgba8_unorm"),
-            transient("bc", "rgba8_unorm"),
-            transient("ca", "rgba8_unorm"),
-            transient("branch", "rgba8_unorm")
-        ]),
-        serde_json::json!([
-            pass(
-                "a",
-                "observable",
-                serde_json::json!([sampled("ca", "ca")]),
-                serde_json::json!([copy_write("ab", "ab"), copy_write("branch", "branch")])
-            ),
-            pass(
-                "branch",
-                "observable",
-                serde_json::json!([sampled("input", "branch")]),
-                serde_json::json!([])
-            ),
-            pass(
-                "b",
-                "observable",
-                serde_json::json!([sampled("ab", "ab")]),
-                serde_json::json!([copy_write("bc", "bc")])
-            ),
-            pass(
-                "c",
-                "observable",
-                serde_json::json!([sampled("bc", "bc")]),
-                serde_json::json!([copy_write("ca", "ca")])
-            )
-        ]),
-        serde_json::json!([]),
+        .position(|resource| std::ptr::eq(resource, color))
+        .unwrap() as u32;
+    assert!(matches!(
+        &copy.kind,
+        ExecutionKind::Render { color_attachments, depth_stencil: None }
+            if color_attachments[0].resource == color_id
+                && color_attachments[0].load == NormalizedColorLoad::Clear { value: [0.0; 4] }
     ));
-    let error = result.unwrap_err();
-    assert_eq!(error.code, "GRAPH_CYCLE");
-    assert_eq!(error.details["kind"], "cycle");
-    let edges = error.details["edges"].as_array().unwrap();
-    assert_eq!(edges.len(), 3);
-    assert!(edges.iter().all(|edge| edge["from"] != "branch"));
+    assert!(copy.accesses.iter().any(|access| matches!(
+        access.mode,
+        AccessMode::ColorAttachment {
+            full_overwrite: true,
+            ..
+        }
+    ) && access.resource == color_id));
+    let hdr = family_by_source(&p, "hdr");
+    assert_eq!(
+        hdr.usage.iter().copied().collect::<BTreeSet<_>>(),
+        [TextureUsage::Sampled, TextureUsage::ColorAttachment]
+            .into_iter()
+            .collect()
+    );
+    let surface = p
+        .texture_families
+        .iter()
+        .find(|family| matches!(family.source, TextureFamilySource::ImportedSurface { .. }))
+        .unwrap();
+    assert_eq!(surface.versions[0].resource, color_id);
 }
 
 #[test]
-fn duplicate_external_source_is_an_identity_error_before_descriptor_validation() {
-    let external = |id: &str, texture: serde_json::Value| {
-        serde_json::json!({
-            "id":id,
-            "version":0,
-            "residency":{"kind":"external", "source":"surface_color"},
-            "texture":texture
-        })
-    };
-    let surface = serde_json::json!({
-        "dimension":"d2",
-        "format":"surface",
-        "extent":{
-            "kind":"surface_relative",
-            "width":{"numerator":1,"denominator":1},
-            "height":{"numerator":1,"denominator":1},
-            "depthOrArrayLayers":1
-        },
-        "mipLevelCount":1,
-        "sampleCount":1
-    });
-    let error = compile_json(graph(
-        serde_json::json!([
-            external("first", surface),
-            external("second", texture("rgba8_unorm"))
-        ]),
-        serde_json::json!([]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_DUPLICATE_ID");
+fn fullscreen_copy_parameters_are_exactly_empty() {
+    let mut g = hdr_copy_graph();
+    g["nodes"][8]["parameters"] = json!({"obsolete":true});
+    assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
+    assert_eq!(CONTRACTS.len(), 17);
 }
 
 #[test]
-fn duplicate_writer_precedes_illegal_access_on_the_second_writer() {
-    let illegal_depth_color = color_write("bad", "depth", 0);
-    let error = compile_json(graph(
-        serde_json::json!([transient("depth", "depth32_float")]),
-        serde_json::json!([
-            pass(
-                "first",
-                "observable",
-                serde_json::json!([]),
-                serde_json::json!([copy_write("out", "depth")])
-            ),
-            pass(
-                "second",
-                "observable",
-                serde_json::json!([]),
-                serde_json::json!([illegal_depth_color])
-            )
-        ]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
+fn fullscreen_copy_rejects_same_source_and_target_family() {
+    let mut g = hdr_copy_graph();
+    g["nodes"][8]["inputs"]["colorTarget"] = input("forward", "color");
+    let error = compile_error(g);
+    assert_eq!(error.code, "GRAPH_SAME_PASS_HAZARD");
+    assert_eq!(error.details["path"], "nodes[8].inputs");
+}
+
+#[test]
+fn duplicate_texture_writer_reports_second_color_target() {
+    let mut nodes = vec![node("surface", "surface_target", json!({}), json!({}))];
+    nodes.extend(render_support_nodes());
+    nodes.extend([
+        node(
+            "depth_a",
+            "texture_spec",
+            texture("depth32_float", "transient"),
+            json!({}),
+        ),
+        node(
+            "depth_b",
+            "texture_spec",
+            texture("depth32_float", "transient"),
+            json!({}),
+        ),
+        forward("F0", input("surface", "surface"), input("depth_a", "spec")),
+        node(
+            "P0",
+            "present",
+            json!({}),
+            json!({"surface":input("F0","color")}),
+        ),
+        forward("F1", input("surface", "surface"), input("depth_b", "spec")),
+        node(
+            "P1",
+            "present",
+            json!({}),
+            json!({"surface":input("F1","color")}),
+        ),
+    ]);
+    let error = compile_error(graph(nodes));
     assert_eq!(error.code, "GRAPH_DUPLICATE_WRITER");
+    assert_eq!(error.details["path"], "nodes[9].inputs.colorTarget");
 }
 
 #[test]
-fn rejects_device_invalid_dimensions_and_mismatched_attachments() {
-    let mut d1 = transient("d1", "rgba8_unorm");
-    d1["texture"]["dimension"] = serde_json::json!("d1");
-    assert_eq!(
-        compile_json(graph(
-            serde_json::json!([d1]),
-            serde_json::json!([]),
-            serde_json::json!([])
-        ))
-        .unwrap_err()
-        .code,
-        "GRAPH_ILLEGAL_ACCESS"
-    );
-
-    let mut depth_d3 = transient("depth", "depth32_float");
-    depth_d3["texture"]["dimension"] = serde_json::json!("d3");
-    assert_eq!(
-        compile_json(graph(
-            serde_json::json!([depth_d3]),
-            serde_json::json!([]),
-            serde_json::json!([])
-        ))
-        .unwrap_err()
-        .code,
-        "GRAPH_ILLEGAL_ACCESS"
-    );
-
-    let first = transient("first", "rgba8_unorm");
-    let mut second = transient("second", "rgba8_unorm");
-    second["texture"]["extent"]["width"] = serde_json::json!(32);
-    let error = compile_json(graph(
-        serde_json::json!([first, second]),
-        serde_json::json!([pass(
-            "attachments",
-            "observable",
-            serde_json::json!([]),
-            serde_json::json!([
-                color_write("first", "first", 0),
-                color_write("second", "second", 1)
-            ])
-        )]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_ILLEGAL_ACCESS");
+fn same_output_bound_to_both_attachments_is_a_same_pass_hazard() {
+    let mut nodes = vec![node(
+        "target",
+        "texture_spec",
+        texture("rgba8_unorm", "transient"),
+        json!({}),
+    )];
+    nodes.extend(render_support_nodes());
+    nodes.extend([
+        forward("F", input("target", "spec"), input("target", "spec")),
+        node(
+            "P",
+            "present",
+            json!({}),
+            json!({"surface":input("F","color")}),
+        ),
+    ]);
+    let error = compile_error(graph(nodes));
+    assert_eq!(error.code, "GRAPH_SAME_PASS_HAZARD");
+    assert_eq!(error.details["path"], "nodes[5].inputs");
 }
 
 #[test]
-fn cycle_tie_breaks_parallel_edges_by_original_resource_index() {
-    let error = compile_json(graph(
-        serde_json::json!([
-            transient("z_declared_first", "rgba8_unorm"),
-            transient("a_declared_second", "rgba8_unorm"),
-            transient("back", "rgba8_unorm")
-        ]),
-        serde_json::json!([
-            pass(
-                "a",
-                "observable",
-                serde_json::json!([sampled("back", "back")]),
-                serde_json::json!([
-                    copy_write("first", "z_declared_first"),
-                    copy_write("second", "a_declared_second")
-                ])
-            ),
-            pass(
-                "b",
-                "observable",
-                serde_json::json!([
-                    sampled("first", "z_declared_first"),
-                    sampled("second", "a_declared_second")
-                ]),
-                serde_json::json!([copy_write("back", "back")])
-            )
-        ]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
+fn unordered_old_texture_version_read_is_rejected_before_scheduling() {
+    let mut nodes = vec![
+        node("surface", "surface_target", json!({}), json!({})),
+        node(
+            "depth_0",
+            "texture_spec",
+            texture("depth32_float", "transient"),
+            json!({}),
+        ),
+        node(
+            "depth_1",
+            "texture_spec",
+            texture("depth32_float", "transient"),
+            json!({}),
+        ),
+    ];
+    nodes.extend(render_support_nodes());
+    nodes.extend([
+        forward("F0", input("surface", "surface"), input("depth_0", "spec")),
+        forward("F1", input("F0", "color"), input("depth_1", "spec")),
+        node(
+            "P0",
+            "present",
+            json!({}),
+            json!({"surface":input("F0","color")}),
+        ),
+        node(
+            "P1",
+            "present",
+            json!({}),
+            json!({"surface":input("F1","color")}),
+        ),
+    ]);
+    let error = compile_error(graph(nodes));
+    assert_eq!(error.code, "GRAPH_RESOURCE_VERSION_INVALID");
+    assert_eq!(error.details["path"], "nodes[9].inputs.surface");
+}
+
+#[test]
+fn duplicate_successors_defer_old_version_reachability() {
+    let mut nodes = vec![
+        node("surface", "surface_target", json!({}), json!({})),
+        depth_spec("depth_0", "transient"),
+        depth_spec("depth_1", "transient"),
+        depth_spec("depth_2", "transient"),
+    ];
+    nodes.extend(render_support_nodes());
+    nodes.extend([
+        forward("F0", input("surface", "surface"), input("depth_0", "spec")),
+        forward("F1", input("F0", "color"), input("depth_1", "spec")),
+        forward("F2", input("F0", "color"), input("depth_2", "spec")),
+        node(
+            "P0",
+            "present",
+            json!({}),
+            json!({"surface":input("F0","color")}),
+        ),
+        node(
+            "P1",
+            "present",
+            json!({}),
+            json!({"surface":input("F1","color")}),
+        ),
+        node(
+            "P2",
+            "present",
+            json!({}),
+            json!({"surface":input("F2","color")}),
+        ),
+    ]);
+    let error = compile_error(graph(nodes));
+    assert_eq!(error.code, "GRAPH_DUPLICATE_WRITER");
+    assert_eq!(error.details["path"], "nodes[10].inputs.colorTarget");
+}
+
+#[test]
+fn live_texture_cycle_reports_the_exact_first_cycle() {
+    let mut nodes = render_support_nodes();
+    nodes.extend(cyclic_forwards());
+    nodes.push(node(
+        "present",
+        "present",
+        json!({}),
+        json!({"surface":input("A","color")}),
+    ));
+    let error = compile_error(graph(nodes));
     assert_eq!(error.code, "GRAPH_CYCLE");
     assert_eq!(
-        error.details["edges"][0]["resource"]["id"],
-        "z_declared_first"
+        error.details,
+        json!({
+            "message":"live graph contains a cycle",
+            "kind":"cycle",
+            "edges":[
+                {"fromNode":"A","fromSocket":"color","toNode":"B","toSocket":"colorTarget","resource":{"node":"A","socket":"color"}},
+                {"fromNode":"B","fromSocket":"color","toNode":"A","toSocket":"colorTarget","resource":{"node":"B","socket":"color"}}
+            ]
+        })
     );
 }
 
 #[test]
-fn identifier_byte_limit_precedes_reference_and_executor_resolution() {
-    let overlong = "a".repeat(65);
-    let invalid = pass(
-        "p",
-        "unknown_executor",
-        serde_json::json!([sampled(&overlong, &overlong)]),
-        serde_json::json!([]),
+fn dead_texture_cycle_is_culled_without_cycle_execution() {
+    let mut value = full_cull_graph();
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .extend(cyclic_forwards());
+    let plan = compile_graph(value);
+    assert_eq!(plan.node_count, 13);
+    assert_eq!(plan.culled_node_count, 2);
+    assert_eq!(plan.culled_resource_count, 4);
+    assert!(!plan
+        .executions
+        .iter()
+        .any(|execution| matches!(execution.id.as_str(), "A" | "B")));
+}
+fn compile_error(v: Value) -> GraphError {
+    super::compile(serde_json::from_value(v).unwrap()).unwrap_err()
+}
+fn execution<'a>(p: &'a CompiledGraph, authored_id: &str) -> &'a CompiledExecution {
+    p.executions.iter().find(|e| e.id == authored_id).unwrap()
+}
+fn resource_by_origin<'a>(p: &'a CompiledGraph, node: &str, socket: &str) -> &'a CompiledResource {
+    p.resources
+        .iter()
+        .find(|r| r.origin.node == node && r.origin.socket == socket)
+        .unwrap()
+}
+
+fn family_by_source<'a>(p: &'a CompiledGraph, node: &str) -> &'a TextureFamily {
+    let source = resource_by_origin(p, node, "spec");
+    let family = match source.plan {
+        ResourcePlan::TextureSpec { family, .. } => family,
+        _ => panic!("{node} is not a texture specification"),
+    };
+    &p.texture_families[family as usize]
+}
+
+fn allocation_slot<'a>(p: &'a CompiledGraph, allocation: AllocationRef) -> &'a AllocationSlot {
+    &p.allocation_classes[allocation.class as usize].slots[allocation.slot as usize]
+}
+
+fn independent_depth_graph(
+    depth_specs: Vec<Value>,
+    forwards: Vec<Value>,
+    present_from: &str,
+) -> Value {
+    let mut nodes = vec![node("surface", "surface_target", json!({}), json!({}))];
+    nodes.extend(render_support_nodes());
+    nodes.extend(depth_specs);
+    nodes.extend(forwards);
+    nodes.push(node(
+        "present",
+        "present",
+        json!({}),
+        json!({"surface":input(present_from,"color")}),
+    ));
+    graph(nodes)
+}
+
+fn depth_spec(id: &str, residency: &str) -> Value {
+    node(
+        id,
+        "texture_spec",
+        texture("depth32_float", residency),
+        json!({}),
+    )
+}
+
+#[test]
+fn dense_lifetimes_exclude_authored_source_ordinals() {
+    let p = compile_graph(full_cull_graph());
+    assert_eq!(
+        p.executions
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["cull", "query", "forward", "present"]
     );
-    let error = compile_json(graph(
-        serde_json::json!([]),
-        serde_json::json!([invalid]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_LIMIT_EXCEEDED");
-}
-
-#[test]
-fn uninitialized_resource_precedes_transient_attachment_load_legality() {
-    let error = compile_json(graph(
-        serde_json::json!([
-            transient("loaded", "rgba8_unorm"),
-            transient("uninitialized", "rgba8_unorm")
-        ]),
-        serde_json::json!([pass(
-            "conflicting_errors",
-            "observable",
-            serde_json::json!([sampled("missing_writer", "uninitialized")]),
-            serde_json::json!([color_load("loaded", "loaded", 0)])
-        )]),
-        serde_json::json!([]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_UNINITIALIZED_RESOURCE");
-}
-
-#[test]
-fn malformed_resource_reference_ids_precede_resolution() {
-    for bindings in ["reads", "writes"] {
-        let mut invalid = pass(
-            "p",
-            "unknown_executor",
-            serde_json::json!([]),
-            serde_json::json!([]),
+    for (node, socket, first, last) in [
+        ("scene", "scene", 0, 2),
+        ("aabbs", "localAabbs", 0, 0),
+        ("frustum", "frustum", 0, 0),
+        ("visible", "flags", 1, 1),
+        ("depth_config", "config", 2, 2),
+    ] {
+        assert_eq!(
+            resource_by_origin(&p, node, socket).lifetime,
+            Some(Lifetime {
+                first_use: first,
+                last_use: last
+            }),
+            "lifetime for {node}.{socket}"
         );
-        invalid[bindings] = if bindings == "reads" {
-            serde_json::json!([sampled("input", "1bad")])
-        } else {
-            serde_json::json!([copy_write("output", "1bad")])
+    }
+    let color = resource_by_origin(&p, "forward", "color");
+    let depth = resource_by_origin(&p, "forward", "depth");
+    assert_eq!(color.producer_execution, Some(2));
+    assert_eq!(depth.producer_execution, Some(2));
+    assert_eq!(
+        color.lifetime,
+        Some(Lifetime {
+            first_use: 2,
+            last_use: 3
+        })
+    );
+    assert_eq!(
+        depth.lifetime,
+        Some(Lifetime {
+            first_use: 2,
+            last_use: 2
+        })
+    );
+    let depth_family = family_by_source(&p, "depth");
+    assert_eq!(
+        depth_family.lifetime,
+        Lifetime {
+            first_use: 2,
+            last_use: 2
+        }
+    );
+    assert_eq!(depth_family.versions[0].lifetime, depth_family.lifetime);
+}
+
+#[test]
+fn transient_aliasing_is_declaration_order_independent() {
+    let p = compile_graph(independent_depth_graph(
+        vec![
+            depth_spec("depth_second", "transient"),
+            depth_spec("depth_first", "transient"),
+        ],
+        vec![
+            forward(
+                "F0",
+                input("surface", "surface"),
+                input("depth_first", "spec"),
+            ),
+            forward("F1", input("F0", "color"), input("depth_second", "spec")),
+        ],
+        "F1",
+    ));
+    assert_eq!(execution(&p, "F1").original_node_index, 8);
+    let f0_ordinal = p.executions.iter().position(|e| e.id == "F0").unwrap() as u32;
+    let f1_ordinal = p.executions.iter().position(|e| e.id == "F1").unwrap() as u32;
+    assert_eq!(f1_ordinal, f0_ordinal + 1);
+    let first = family_by_source(&p, "depth_first");
+    let second = family_by_source(&p, "depth_second");
+    assert_eq!(
+        first.lifetime,
+        Lifetime {
+            first_use: f0_ordinal,
+            last_use: f0_ordinal
+        }
+    );
+    assert_eq!(
+        second.lifetime,
+        Lifetime {
+            first_use: f1_ordinal,
+            last_use: f1_ordinal
+        }
+    );
+    assert_eq!(first.versions[0].lifetime, first.lifetime);
+    assert_eq!(second.versions[0].lifetime, second.lifetime);
+    assert_eq!(first.allocation, second.allocation);
+    let slot = allocation_slot(&p, first.allocation.unwrap());
+    assert_eq!(slot.kind, AllocationKind::AliasedTransient);
+    assert_eq!(slot.usage, [TextureUsage::DepthAttachment]);
+    assert_eq!(
+        slot.occupants.iter().copied().collect::<BTreeSet<_>>(),
+        [first.id, second.id].into_iter().collect()
+    );
+}
+
+#[test]
+fn overlapping_family_lifetimes_prevent_transient_reuse() {
+    let p = compile_graph(independent_depth_graph(
+        vec![
+            depth_spec("depth_a", "transient"),
+            depth_spec("depth_b", "transient"),
+        ],
+        vec![
+            forward("F0", input("surface", "surface"), input("depth_a", "spec")),
+            forward("F1", input("F0", "color"), input("depth_b", "spec")),
+            forward("F2", input("F1", "color"), input("F0", "depth")),
+        ],
+        "F2",
+    ));
+    let a = family_by_source(&p, "depth_a");
+    let b = family_by_source(&p, "depth_b");
+    assert!(a.lifetime.first_use < b.lifetime.first_use);
+    assert!(a.lifetime.last_use > b.lifetime.last_use);
+    assert_ne!(a.allocation, b.allocation);
+    assert_ne!(a.allocation.unwrap().slot, b.allocation.unwrap().slot);
+}
+
+#[test]
+fn persistent_textures_are_dedicated_and_follow_transient_slots() {
+    let p = compile_graph(independent_depth_graph(
+        vec![
+            depth_spec("persistent_b", "persistent"),
+            depth_spec("transient", "transient"),
+            depth_spec("persistent_a", "persistent"),
+        ],
+        vec![
+            forward(
+                "F0",
+                input("surface", "surface"),
+                input("persistent_a", "spec"),
+            ),
+            forward("F1", input("F0", "color"), input("transient", "spec")),
+            forward("F2", input("F1", "color"), input("persistent_b", "spec")),
+        ],
+        "F2",
+    ));
+    let a = family_by_source(&p, "persistent_a");
+    let b = family_by_source(&p, "persistent_b");
+    assert_ne!(a.allocation, b.allocation);
+    for family in [a, b] {
+        let allocation = family.allocation.unwrap();
+        assert_eq!(
+            allocation_slot(&p, allocation).kind,
+            AllocationKind::Persistent
+        );
+        assert_eq!(family.usage, [TextureUsage::DepthAttachment]);
+        for version in &family.versions {
+            let ResourcePlan::Texture {
+                allocation: resource_allocation,
+                ..
+            } = p.resources[version.resource as usize].plan
+            else {
+                panic!()
+            };
+            assert_eq!(resource_allocation, Some(allocation));
+        }
+    }
+    let transient = family_by_source(&p, "transient").allocation.unwrap();
+    assert!(transient.slot < a.allocation.unwrap().slot);
+    assert!(transient.slot < b.allocation.unwrap().slot);
+    assert_eq!(p.transient_slot_count, 1);
+}
+
+#[test]
+fn exact_texture_compatibility_separates_allocation_classes() {
+    let mut different = texture("depth32_float", "transient");
+    different["texture"]["mipLevelCount"] = json!(2);
+    let p = compile_graph(independent_depth_graph(
+        vec![
+            depth_spec("relative", "transient"),
+            node("absolute", "texture_spec", different, json!({})),
+        ],
+        vec![
+            forward("F0", input("surface", "surface"), input("relative", "spec")),
+            forward("F1", input("F0", "color"), input("absolute", "spec")),
+        ],
+        "F1",
+    ));
+    let relative = family_by_source(&p, "relative").allocation.unwrap();
+    let absolute = family_by_source(&p, "absolute").allocation.unwrap();
+    assert_ne!(relative.class, absolute.class);
+    assert_ne!(relative, absolute);
+}
+
+#[test]
+fn parser_and_registry_accept_only_canonical_schema() {
+    let bytes =
+        serde_json::to_vec(&json!({"schemaVersion":2,"graphId":"empty","revision":1,"nodes":[]}))
+            .unwrap();
+    assert!(parse_and_compile(&bytes).is_ok());
+    assert_eq!(
+        parse_and_compile(br#"{"schemaVersion":1}"#)
+            .unwrap_err()
+            .code,
+        "GRAPH_SCHEMA_UNSUPPORTED"
+    );
+    let mut r = Registry::default();
+    let (id, _) = r.compile(&bytes).unwrap();
+    assert_eq!(r.get(id).unwrap().graph_id, "empty");
+}
+
+#[test]
+fn authoritative_eleven_node_graph_lowers_exactly() {
+    let p = compile_graph(full_cull_graph());
+    assert_eq!(p.node_count, 11);
+    assert_eq!(p.resources.len(), 11);
+    assert_eq!(
+        p.executions
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["cull", "query", "forward", "present"]
+    );
+    for resource in &p.resources {
+        if let ResourcePlan::Texture { version, .. } = resource.plan {
+            assert_eq!(version, 0, "every first produced texture is symbolic v0");
+        }
+    }
+    assert!(p.executions.iter().all(|e| !matches!(
+        e.executor.key.as_str(),
+        "surface_target" | "texture_spec" | "scene_table"
+    )));
+}
+
+#[test]
+fn exact_wire_catalog_rejections() {
+    let cases = [
+        ("local_aabb", 0, "GRAPH_UNKNOWN_EXECUTOR"),
+        ("frustum", 4, "GRAPH_UNKNOWN_EXECUTOR"),
+        ("cull", 6, "GRAPH_UNKNOWN_EXECUTOR"),
+    ];
+    for (key, i, code) in cases {
+        let mut g = full_cull_graph();
+        g["nodes"][i]["executor"]["key"] = json!(key);
+        assert_eq!(compile_error(g).code, code);
+    }
+    for field in ["clearDepth", "clearColor"] {
+        let mut g = full_cull_graph();
+        let i = if field == "clearDepth" { 8 } else { 9 };
+        g["nodes"][i]["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
+    }
+    let mut g = full_cull_graph();
+    g["nodes"][0]["executor"]["version"] = json!(2);
+    let e = compile_error(g);
+    assert_eq!(e.code, "GRAPH_EXECUTOR_VERSION_UNSUPPORTED");
+    assert_eq!(e.details["path"], "nodes[0].executor.version");
+}
+
+#[test]
+fn mesh_filters_are_closed_and_any_removes_dependency() {
+    let p = compile_graph(full_cull_graph());
+    let NormalizedParameters::MeshQuery { filters } = execution(&p, "query").parameters.clone()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        filters.map(|f| f.flag),
+        [MeshFlag::IsVisible, MeshFlag::IsFrustumCulled]
+    );
+    for filters in [
+        json!([{"flag":"isVisible","predicate":"any"}]),
+        json!([{"flag":"isVisible","predicate":"any"},{"flag":"isVisible","predicate":"required_true"}]),
+        json!([{"flag":"bogus","predicate":"any"},{"flag":"isVisible","predicate":"any"}]),
+    ] {
+        let mut g = full_cull_graph();
+        g["nodes"][7]["parameters"]["filters"] = filters;
+        assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
+    }
+    let mut g = full_cull_graph();
+    // The authored order is [culled, visible], while normalization is catalog order.
+    g["nodes"][7]["parameters"]["filters"][0]["predicate"] = json!("any");
+    let p = compile_graph(g);
+    let q = execution(&p, "query");
+    assert!(!q.inputs.iter().any(|x| x.socket == "isFrustumCulled"));
+    assert!(!p.executions.iter().any(|e| e.id == "cull"));
+    assert!(!p
+        .resources
+        .iter()
+        .any(|r| r.origin.node == "cull" && r.origin.socket == "flags"));
+}
+
+#[test]
+fn provenance_and_lowering_are_consistent() {
+    let p = compile_graph(full_cull_graph());
+    let scene = resource_by_origin(&p, "scene", "scene");
+    for id in ["aabbs", "visible", "cull", "query"] {
+        let r = p.resources.iter().find(|r| r.origin.node == id).unwrap();
+        match r.plan {
+            ResourcePlan::LocalAabbBuffer { scene: s }
+            | ResourcePlan::BooleanFlagBuffer { scene: s, .. }
+            | ResourcePlan::DrawStream { scene: s } => {
+                assert_eq!(
+                    s,
+                    p.resources
+                        .iter()
+                        .position(|r| std::ptr::eq(r, scene))
+                        .unwrap() as u32
+                )
+            }
+            _ => {}
+        }
+    }
+    let f = execution(&p, "forward");
+    let color_in = f
+        .inputs
+        .iter()
+        .find(|x| x.socket == "colorTarget")
+        .unwrap()
+        .resource;
+    let color_out = f
+        .outputs
+        .iter()
+        .find(|x| x.socket == "color")
+        .unwrap()
+        .resource;
+    assert_ne!(color_in, color_out);
+    assert!(f
+        .accesses
+        .iter()
+        .any(|a| a.resource == color_out && matches!(a.mode, AccessMode::ColorAttachment { .. })));
+    assert!(!f
+        .accesses
+        .iter()
+        .any(|a| a.resource == color_in && matches!(a.mode, AccessMode::ColorAttachment { .. })));
+    for (socket, expected) in [
+        ("scene", AccessMode::SemanticRead),
+        ("draws", AccessMode::IndirectRead),
+    ] {
+        let access = f.accesses.iter().find(|a| a.socket == socket).unwrap();
+        assert_eq!(access.mode, expected, "legacy_forward {socket} access");
+    }
+}
+
+#[test]
+fn descriptor_validation_and_normalization_table() {
+    for (field, value) in [("sampleCount", json!(3))] {
+        let mut g = full_cull_graph();
+        g["nodes"][1]["parameters"]["texture"][field] = value;
+        assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
+    }
+    let mut g = full_cull_graph();
+    g["nodes"][1]["parameters"]["texture"]["extent"] =
+        json!({"kind":"absolute","width":1,"height":1,"depthOrArrayLayers":1});
+    g["nodes"][1]["parameters"]["texture"]["mipLevelCount"] = json!(2);
+    assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
+
+    let mut g = full_cull_graph();
+    g["nodes"][1]["parameters"]["texture"]["mipLevelCount"] = json!(99);
+    assert_eq!(
+        resource_by_origin(&compile_graph(g), "depth", "spec").semantic_type,
+        SemanticType::TextureSpec
+    );
+    for residency in ["history", "readback"] {
+        let mut g = full_cull_graph();
+        g["nodes"][1]["parameters"]["residency"] = json!(residency);
+        assert_eq!(compile_error(g).code, "GRAPH_UNSUPPORTED_FEATURE");
+    }
+    let p = compile_graph(full_cull_graph());
+    let surface = p
+        .texture_families
+        .iter()
+        .find(|f| matches!(f.source, TextureFamilySource::ImportedSurface { .. }))
+        .unwrap();
+    assert!(surface.allocation.is_none());
+}
+
+#[test]
+fn validation_precedence_and_identifier_limits() {
+    let mut g = full_cull_graph();
+    g["nodes"][0]["id"] = json!("x".repeat(65));
+    g["nodes"][1]["executor"]["key"] = json!("bad");
+    let e = compile_error(g);
+    assert_eq!(e.code, "GRAPH_LIMIT_EXCEEDED");
+    assert_eq!(e.details["path"], "nodes[0].id");
+    let mut g = full_cull_graph();
+    g["nodes"][0]["id"] = json!("bad id");
+    assert_eq!(compile_error(g).code, "GRAPH_INVALID_ID");
+    let mut g = full_cull_graph();
+    g["nodes"][1]["executor"]["key"] = json!("bad");
+    g["nodes"][0]["parameters"] = json!({"bad":1});
+    assert_eq!(compile_error(g).details["path"], "nodes[1].executor.key");
+}
+
+#[test]
+fn global_identifier_lengths_precede_grammar_and_duplicates() {
+    let mut invalid_grammar = full_cull_graph();
+    invalid_grammar["nodes"][0]["id"] = json!("bad id");
+    invalid_grammar["nodes"][10]["executor"]["key"] = json!("x".repeat(65));
+    let error = compile_error(invalid_grammar);
+    assert_eq!(error.code, "GRAPH_LIMIT_EXCEEDED");
+    assert_eq!(error.details["path"], "nodes[10].executor.key");
+
+    let mut duplicate = full_cull_graph();
+    duplicate["nodes"][1]["id"] = duplicate["nodes"][0]["id"].clone();
+    duplicate["nodes"][10]["executor"]["key"] = json!("x".repeat(65));
+    let error = compile_error(duplicate);
+    assert_eq!(error.code, "GRAPH_LIMIT_EXCEEDED");
+    assert_eq!(error.details["path"], "nodes[10].executor.key");
+}
+
+#[test]
+fn strict_mesh_diagnostics_and_inactive_any_edges() {
+    let cases = [
+        (
+            json!([{"flag":"bogus","predicate":"any"},{"flag":"isVisible","predicate":"any"}]),
+            "nodes[7].parameters.filters[0].flag",
+        ),
+        (
+            json!([{"flag":"isFrustumCulled","predicate":"nope"},{"flag":"isVisible","predicate":"any"}]),
+            "nodes[7].parameters.filters[0].predicate",
+        ),
+        (
+            json!([{"flag":"isVisible","predicate":"any"},{"flag":"isVisible","predicate":"required_true"}]),
+            "nodes[7].parameters.filters[1].flag",
+        ),
+        (
+            json!([{"flag":"isVisible","predicate":"any"}]),
+            "nodes[7].parameters.filters",
+        ),
+    ];
+    for (filters, path) in cases {
+        let mut g = full_cull_graph();
+        g["nodes"][7]["parameters"]["filters"] = filters;
+        let e = compile_error(g);
+        assert_eq!(e.code, "GRAPH_PARAMETERS_INVALID");
+        assert_eq!(e.details["path"], path);
+    }
+    for predicate in ["required_true", "required_false"] {
+        let mut g = full_cull_graph();
+        g["nodes"][7]["parameters"]["filters"][0]["predicate"] = json!(predicate);
+        g["nodes"][7]["inputs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("isFrustumCulled");
+        let e = compile_error(g);
+        assert_eq!(e.code, "GRAPH_SOCKET_CARDINALITY");
+        assert_eq!(e.details["path"], "nodes[7].inputs.isFrustumCulled");
+    }
+    let mut g = full_cull_graph();
+    g["nodes"][7]["inputs"]["isVisible"] = input("cull", "flags");
+    let e = compile_error(g);
+    assert_eq!(e.code, "GRAPH_SOCKET_TYPE_MISMATCH");
+    assert_eq!(e.details["path"], "nodes[7].inputs.isVisible");
+
+    let mut g = full_cull_graph();
+    g["nodes"][7]["parameters"]["filters"][0]["predicate"] = json!("any");
+    let p = compile_graph(g);
+    let q = execution(&p, "query");
+    assert!(!q.inputs.iter().any(|i| i.socket == "isFrustumCulled"));
+    assert!(!q.accesses.iter().any(|a| a.socket == "isFrustumCulled"));
+    assert!(!p.executions.iter().any(|e| e.id == "cull"));
+}
+
+#[test]
+fn transitive_scene_roots_are_vector_resource_ids() {
+    let p = compile_graph(full_cull_graph());
+    let scene_id = p
+        .resources
+        .iter()
+        .position(|r| r.origin.node == "scene")
+        .unwrap() as u32;
+    for origin in ["aabbs", "visible", "cull", "query"] {
+        let resource = p
+            .resources
+            .iter()
+            .find(|r| r.origin.node == origin)
+            .unwrap();
+        let rooted = match resource.plan {
+            ResourcePlan::LocalAabbBuffer { scene }
+            | ResourcePlan::BooleanFlagBuffer { scene, .. }
+            | ResourcePlan::DrawStream { scene } => Some(scene),
+            _ => None,
         };
-        let error = compile_json(graph(
-            serde_json::json!([]),
-            serde_json::json!([invalid]),
-            serde_json::json!([]),
-        ))
-        .unwrap_err();
-        assert_eq!(error.code, "GRAPH_INVALID_ID");
+        assert_eq!(rooted, Some(scene_id));
+    }
+    let mut g = full_cull_graph();
+    g["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(node("sceneB", "scene_table", json!({}), json!({})));
+    g["nodes"][3]["inputs"]["scene"] = input("sceneB", "scene");
+    let e = compile_error(g);
+    assert_eq!(e.code, "GRAPH_SOCKET_TYPE_MISMATCH");
+    assert_eq!(e.details["path"], "nodes[6].inputs.localAabbs");
+    let mut g = full_cull_graph();
+    g["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(node("sceneB", "scene_table", json!({}), json!({})));
+    g["nodes"][3]["inputs"]["scene"] = input("sceneB", "scene");
+    g["nodes"][5]["inputs"]["scene"] = input("sceneB", "scene");
+    g["nodes"][6]["inputs"]["scene"] = input("sceneB", "scene");
+    g["nodes"][7]["inputs"]["scene"] = input("sceneB", "scene");
+    let e = compile_error(g);
+    assert_eq!(e.code, "GRAPH_SOCKET_TYPE_MISMATCH");
+    assert_eq!(e.details["path"], "nodes[9].inputs.draws");
+}
+
+#[test]
+fn descriptor_exact_paths_and_normalization() {
+    let cases = [
+        ("sampleCount", json!(2), "sampleCount"),
+        ("sampleCount", json!(8), "sampleCount"),
+        ("mipLevelCount", json!(0), "mipLevelCount"),
+    ];
+    for (field, value, suffix) in cases {
+        let mut g = full_cull_graph();
+        g["nodes"][1]["parameters"]["texture"][field] = value;
+        let e = compile_error(g);
+        assert_eq!(e.code, "GRAPH_PARAMETERS_INVALID");
+        assert_eq!(
+            e.details["path"],
+            format!("nodes[1].parameters.texture.{suffix}")
+        );
+    }
+    for (view, index) in [("depth32_float", 0), ("rgba8_unorm", 0)] {
+        let mut g = full_cull_graph();
+        g["nodes"][1]["parameters"]["texture"]["viewFormats"] = json!([view]);
+        let e = compile_error(g);
+        assert_eq!(
+            e.details["path"],
+            format!("nodes[1].parameters.texture.viewFormats[{index}]")
+        );
+    }
+    for residency in ["history", "readback"] {
+        let mut g = full_cull_graph();
+        g["nodes"][1]["parameters"]["residency"] = json!(residency);
+        let e = compile_error(g);
+        assert_eq!(e.code, "GRAPH_UNSUPPORTED_FEATURE");
+        assert_eq!(e.details["path"], "nodes[1].parameters.residency");
+    }
+    let mut g = full_cull_graph();
+    let d = &mut g["nodes"][1]["parameters"]["texture"];
+    d["extent"]["width"] = json!({"numerator":2,"denominator":2});
+    let p = compile_graph(g);
+    let TextureFamilySource::AuthoredTexture { descriptor, .. } =
+        &family_by_source(&p, "depth").source
+    else {
+        panic!()
+    };
+    assert!(
+        matches!(&descriptor.extent, NormalizedTextureExtent::SurfaceRelative { width, .. } if *width == Ratio { numerator: 1, denominator: 1 })
+    );
+}
+
+#[test]
+fn descriptor_multi_error_precedence_is_exact() {
+    let cases = [
+        (json!(3), json!(0), 9000, "sampleCount"),
+        (json!(1), json!(0), 9000, "mipLevelCount"),
+        (json!(1), json!(30), 9000, "mipLevelCount"),
+        (json!(1), json!(14), 9000, "extent"),
+        (json!(1), json!(14), 8192, "viewFormats[0]"),
+    ];
+    for (sample_count, mip_count, width, expected) in cases {
+        let mut g = full_cull_graph();
+        let d = &mut g["nodes"][1]["parameters"]["texture"];
+        d["format"] = json!("rgba8_unorm");
+        d["extent"] = json!({
+            "kind":"absolute",
+            "width":width,
+            "height":1,
+            "depthOrArrayLayers":1
+        });
+        d["sampleCount"] = sample_count;
+        d["mipLevelCount"] = mip_count;
+        d["viewFormats"] = json!(["rgba8_unorm"]);
+        let e = compile_error(g);
+        assert_eq!(e.code, "GRAPH_PARAMETERS_INVALID");
+        assert_eq!(
+            e.details["path"],
+            format!("nodes[1].parameters.texture.{expected}")
+        );
+    }
+}
+
+#[test]
+fn global_raw_limits_have_stable_narrow_paths() {
+    for (g, path) in [
+        (
+            {
+                let mut g = full_cull_graph();
+                g["graphId"] = json!("x".repeat(65));
+                g
+            },
+            "graphId",
+        ),
+        (
+            {
+                let mut g = full_cull_graph();
+                g["nodes"][0]["executor"]["key"] = json!("x".repeat(65));
+                g
+            },
+            "nodes[0].executor.key",
+        ),
+        (
+            {
+                let mut g = full_cull_graph();
+                g["nodes"][9]["inputs"]["x".repeat(65)] = input("scene", "scene");
+                g
+            },
+            "nodes[9].inputs.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ),
+        (
+            {
+                let mut g = full_cull_graph();
+                g["nodes"][9]["inputs"]["scene"]["node"] = json!("x".repeat(65));
+                g
+            },
+            "nodes[9].inputs.scene.node",
+        ),
+        (
+            {
+                let mut g = full_cull_graph();
+                g["nodes"][9]["inputs"]["scene"]["socket"] = json!("x".repeat(65));
+                g
+            },
+            "nodes[9].inputs.scene.socket",
+        ),
+    ] {
+        let e = compile_error(g);
+        assert_eq!(e.code, "GRAPH_LIMIT_EXCEEDED");
+        assert_eq!(e.details["path"], path);
+    }
+    let mut inputs = serde_json::Map::new();
+    for i in 0..8193 {
+        inputs.insert(format!("s{i}"), input("n", "x"));
+    }
+    let g = graph(vec![node(
+        "n",
+        "surface_target",
+        json!({}),
+        Value::Object(inputs),
+    )]);
+    let e = compile_error(g);
+    assert_eq!(e.code, "GRAPH_LIMIT_EXCEEDED");
+    assert_eq!(e.details["path"], "nodes[0].inputs");
+}
+
+#[test]
+fn empty_plan_has_no_lowered_objects() {
+    let p = compile_graph(json!({"schemaVersion":2,"graphId":"empty","revision":1,"nodes":[]}));
+    assert_eq!(
+        (
+            p.node_count,
+            p.resources.len(),
+            p.executions.len(),
+            p.texture_families.len(),
+            p.allocation_classes.len()
+        ),
+        (0, 0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn registry_revision_handles_are_immutable_and_drop_is_transactional() {
+    let bytes = |revision| {
+        serde_json::to_vec(
+            &json!({"schemaVersion":2,"graphId":"registry","revision":revision,"nodes":[]}),
+        )
+        .unwrap()
+    };
+    let mut r = Registry::new(2);
+    let (id, _) = r.compile(&bytes(1)).unwrap();
+    assert_eq!(
+        r.compile(&bytes(1)).unwrap_err().message,
+        "revision must increase"
+    );
+    let (second, _) = r.compile(&bytes(2)).unwrap();
+    assert_ne!(id, second);
+    assert_eq!(r.get(id).unwrap().revision, 1);
+    r.drop_graph(id).unwrap();
+    assert_eq!(r.get(id).unwrap_err().code, "STALE_GRAPH_ID");
+    let (next, _) = r.compile(&bytes(3)).unwrap();
+    assert_ne!(id, next);
+    assert!(r.get(second).is_ok());
+}
+
+#[test]
+fn legacy_schema_is_rejected() {
+    let legacy = br#"{"schemaVersion":1,"graphId":"legacy","revision":1,"nodes":[]}"#;
+    assert_eq!(
+        parse_and_compile(legacy).unwrap_err().code,
+        "GRAPH_SCHEMA_UNSUPPORTED"
+    );
+}
+
+#[test]
+fn socket_validation_is_globally_phased() {
+    let mut g = full_cull_graph();
+    g["nodes"][3]["inputs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("scene");
+    g["nodes"][9]["inputs"]["bogus"] = input("scene", "scene");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_UNKNOWN_SOCKET", Some("nodes[9].inputs.bogus"))
+    );
+
+    let mut g = full_cull_graph();
+    g["nodes"][3]["inputs"]["scene"] = input("frustum", "frustum");
+    g["nodes"][9]["inputs"]["colorTarget"]["socket"] = json!("bogus");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        (
+            "GRAPH_UNKNOWN_SOCKET",
+            Some("nodes[9].inputs.colorTarget.socket")
+        )
+    );
+
+    let mut g = full_cull_graph();
+    g["nodes"][3]["inputs"]["scene"] = input("frustum", "frustum");
+    g["nodes"][9]["inputs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("draws");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_SOCKET_CARDINALITY", Some("nodes[9].inputs.draws"))
+    );
+
+    let mut g = full_cull_graph();
+    g["nodes"][3]["inputs"]["scene"] = input("frustum", "frustum");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_SOCKET_TYPE_MISMATCH", Some("nodes[3].inputs.scene"))
+    );
+}
+
+#[test]
+fn executor_version_parameter_and_state_precedence_is_global() {
+    let mut g = full_cull_graph();
+    g["nodes"][2]["inputs"]["bad"] = input("missing", "bad");
+    g["nodes"][10]["executor"]["key"] = json!("unknown");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_UNKNOWN_NODE", Some("nodes[2].inputs.bad.node"))
+    );
+
+    let mut g = full_cull_graph();
+    g["nodes"][0]["parameters"] = json!({"bad":1});
+    g["nodes"][1]["state"] = json!("muted");
+    g["nodes"][2]["inputs"]["bad"] = input("scene", "bad");
+    g["nodes"][10]["executor"]["key"] = json!("unknown");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_UNKNOWN_EXECUTOR", Some("nodes[10].executor.key"))
+    );
+
+    let mut g = full_cull_graph();
+    g["nodes"][0]["parameters"] = json!({"bad":1});
+    g["nodes"][1]["state"] = json!("muted");
+    g["nodes"][2]["inputs"]["bad"] = input("scene", "bad");
+    g["nodes"][10]["executor"]["version"] = json!(2);
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        (
+            "GRAPH_EXECUTOR_VERSION_UNSUPPORTED",
+            Some("nodes[10].executor.version")
+        )
+    );
+
+    let mut g = full_cull_graph();
+    g["nodes"][0]["parameters"] = json!({"bad":1});
+    g["nodes"][1]["state"] = json!("muted");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_PARAMETERS_INVALID", Some("nodes[0].parameters"))
+    );
+}
+
+#[test]
+fn attachment_compatibility_matrix_is_enforced() {
+    let cases = [
+        (
+            "depth_surface",
+            json!({"kind":"absolute","width":4,"height":4,"depthOrArrayLayers":1}),
+            "depth32_float",
+            "d2",
+            1,
+        ),
+        (
+            "depth_half",
+            json!({"kind":"surface_relative","width":{"numerator":1,"denominator":2},"height":{"numerator":1,"denominator":2},"depthOrArrayLayers":1}),
+            "depth32_float",
+            "d2",
+            1,
+        ),
+        (
+            "depth_layers",
+            json!({"kind":"surface_relative","width":{"numerator":1,"denominator":1},"height":{"numerator":1,"denominator":1},"depthOrArrayLayers":2}),
+            "depth32_float",
+            "d2",
+            1,
+        ),
+        (
+            "depth_format",
+            json!({"kind":"surface_relative","width":{"numerator":1,"denominator":1},"height":{"numerator":1,"denominator":1},"depthOrArrayLayers":1}),
+            "rgba8_unorm",
+            "d2",
+            1,
+        ),
+    ];
+    for (_, extent, format, dimension, samples) in cases {
+        let mut g = full_cull_graph();
+        let d = &mut g["nodes"][1]["parameters"]["texture"];
+        d["extent"] = extent;
+        d["format"] = json!(format);
+        d["dimension"] = json!(dimension);
+        d["sampleCount"] = json!(samples);
+        assert_eq!(compile_error(g).code, "GRAPH_ILLEGAL_ACCESS");
     }
 
-    let error = compile_json(graph(
-        serde_json::json!([]),
-        serde_json::json!([]),
-        serde_json::json!([{"name":"present", "resource":resource_ref("1bad")}]),
-    ))
-    .unwrap_err();
-    assert_eq!(error.code, "GRAPH_INVALID_ID");
+    let mut g = full_cull_graph();
+    g["nodes"][1]["parameters"] = texture("rgba8_unorm", "transient");
+    g["nodes"][9]["inputs"]["colorTarget"] = input("depth", "spec");
+    g["nodes"][9]["inputs"]["depthTarget"] = input("surface", "surface");
+    assert_eq!(compile_error(g).code, "GRAPH_ILLEGAL_ACCESS");
+
+    for field in ["dimension", "extent", "sampleCount"] {
+        let mut g = full_cull_graph();
+        let mut color = texture("rgba8_unorm", "transient");
+        match field {
+            "dimension" => {
+                color["texture"][field] = json!("d3");
+                color["texture"]["extent"] =
+                    json!({"kind":"absolute","width":1,"height":1,"depthOrArrayLayers":1});
+            }
+            "extent" => {
+                color["texture"][field] =
+                    json!({"kind":"absolute","width":4,"height":4,"depthOrArrayLayers":1})
+            }
+            _ => color["texture"][field] = json!(4),
+        }
+        g["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .insert(2, node("color", "texture_spec", color, json!({})));
+        g["nodes"][10]["inputs"]["colorTarget"] = input("color", "spec");
+        assert_eq!(compile_error(g).code, "GRAPH_ILLEGAL_ACCESS", "{field}");
+    }
+
+    let mut g = full_cull_graph();
+    g["nodes"].as_array_mut().unwrap().insert(
+        2,
+        node(
+            "color",
+            "texture_spec",
+            texture("rgba8_unorm", "transient"),
+            json!({}),
+        ),
+    );
+    g["nodes"][10]["inputs"]["colorTarget"] = input("color", "spec");
+    let e = compile_error(g);
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_ILLEGAL_ACCESS", Some("nodes[11].inputs.surface"))
+    );
+}
+
+#[test]
+fn wire_rejects_old_and_unknown_fields_exactly() {
+    let mut cases = Vec::new();
+    let mut g = full_cull_graph();
+    g["nodes"][1]["parameters"]["descriptor"] = g["nodes"][1]["parameters"]["texture"].take();
+    cases.push(g);
+    for old in ["compare", "writeEnabled", "clear"] {
+        let mut g = full_cull_graph();
+        g["nodes"][8]["parameters"][old] = json!(1);
+        cases.push(g);
+    }
+    for missing in ["clearDepth", "clearColor"] {
+        let mut g = full_cull_graph();
+        let i = if missing == "clearDepth" { 8 } else { 9 };
+        g["nodes"][i]["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove(missing);
+        cases.push(g);
+    }
+    for g in cases {
+        assert_eq!(
+            parse_and_compile(&serde_json::to_vec(&g).unwrap())
+                .unwrap_err()
+                .code,
+            "GRAPH_PARAMETERS_INVALID"
+        );
+    }
+    for (index, field) in [(0, "legacyOptional"), (0, "unknownNodeField")] {
+        let mut g = full_cull_graph();
+        g["nodes"][index][field] = json!(null);
+        assert_eq!(
+            parse_and_compile(&serde_json::to_vec(&g).unwrap())
+                .unwrap_err()
+                .code,
+            "GRAPH_JSON_INVALID"
+        );
+    }
+    let mut g = full_cull_graph();
+    g["unknownGraphField"] = json!(true);
+    assert_eq!(
+        parse_and_compile(&serde_json::to_vec(&g).unwrap())
+            .unwrap_err()
+            .code,
+        "GRAPH_JSON_INVALID"
+    );
+}
+
+#[test]
+fn raw_limits_precede_malformed_content_and_cover_live_resources() {
+    let mut g = graph(
+        (0..1025)
+            .map(|i| node(&format!("n{i}"), "surface_target", json!({}), json!({})))
+            .collect(),
+    );
+    g["graphId"] = json!("bad id");
+    assert_eq!(compile_error(g).details["path"], "nodes");
+    let mut nodes: Vec<_> = (0..65)
+        .map(|i| {
+            node(
+                &format!("p{i}"),
+                "present",
+                json!({}),
+                json!({"surface":input("missing","bad")}),
+            )
+        })
+        .collect();
+    assert_eq!(
+        compile_error(graph(std::mem::take(&mut nodes))).details["path"],
+        "nodes"
+    );
+    let mut nodes = vec![node("surface", "surface_target", json!({}), json!({}))];
+    nodes.extend(render_support_nodes());
+    let mut color = input("surface", "surface");
+    for i in 0..508 {
+        let d = format!("d{i}");
+        let f = format!("f{i}");
+        nodes.push(node(
+            &d,
+            "texture_spec",
+            texture("depth32_float", "transient"),
+            json!({}),
+        ));
+        nodes.push(forward(&f, color, input(&d, "spec")));
+        color = input(&f, "color");
+    }
+    nodes.push(node(
+        "present",
+        "present",
+        json!({}),
+        json!({"surface":color}),
+    ));
+    let e = compile_error(graph(nodes));
+    assert_eq!(
+        (e.code, e.details["path"].as_str()),
+        ("GRAPH_LIMIT_EXCEEDED", Some("resources"))
+    );
+}
+
+#[test]
+fn generated_resource_limit_is_only_final() {
+    fn oversized(old_present: bool) -> Value {
+        let mut nodes = vec![node("surface", "surface_target", json!({}), json!({}))];
+        nodes.extend(render_support_nodes());
+        let mut color = input("surface", "surface");
+        for i in 0..508 {
+            let d = format!("d{i}");
+            let f = format!("f{i}");
+            nodes.push(node(
+                &d,
+                "texture_spec",
+                texture("depth32_float", "transient"),
+                json!({}),
+            ));
+            nodes.push(forward(&f, color, input(&d, "spec")));
+            color = input(&f, "color");
+        }
+        nodes.push(node(
+            "present",
+            "present",
+            json!({}),
+            json!({"surface":color}),
+        ));
+        if old_present {
+            nodes.push(node(
+                "old_present",
+                "present",
+                json!({}),
+                json!({"surface":input("f0","color")}),
+            ));
+        }
+        assert!(nodes.len() <= 1024);
+        graph(nodes)
+    }
+
+    let clean = compile_error(oversized(false));
+    assert_eq!(
+        (clean.code, clean.details["path"].as_str()),
+        ("GRAPH_LIMIT_EXCEEDED", Some("resources"))
+    );
+    let polluted = compile_error(oversized(true));
+    assert_eq!(polluted.code, "GRAPH_RESOURCE_VERSION_INVALID");
+    assert_eq!(polluted.details["path"], "nodes[1022].inputs.surface");
+}
+
+#[test]
+fn bloom_composite_rejects_each_stale_sampled_texture_version() {
+    for stale_socket in ["source", "bloom"] {
+        let mut half = texture("rgba16_float", "transient");
+        half["texture"]["extent"]["width"] = json!({"numerator":1,"denominator":2});
+        half["texture"]["extent"]["height"] = json!({"numerator":1,"denominator":2});
+        let mut half_depth = texture("depth32_float", "transient");
+        half_depth["texture"]["extent"] = half["texture"]["extent"].clone();
+        let mut nodes = vec![
+            node("surface", "surface_target", json!({}), json!({})),
+            node(
+                "source_target",
+                "texture_spec",
+                texture("rgba16_float", "transient"),
+                json!({}),
+            ),
+            node("bloom_target", "texture_spec", half, json!({})),
+            node(
+                "output",
+                "texture_spec",
+                texture("rgba16_float", "transient"),
+                json!({}),
+            ),
+            depth_spec("source_depth_0", "transient"),
+            depth_spec("source_depth_1", "transient"),
+            node(
+                "bloom_depth_0",
+                "texture_spec",
+                half_depth.clone(),
+                json!({}),
+            ),
+            node("bloom_depth_1", "texture_spec", half_depth, json!({})),
+        ];
+        nodes.extend(render_support_nodes());
+        nodes.extend([
+            forward("source_f0", input("source_target","spec"), input("source_depth_0","spec")),
+            forward("source_f1", input("source_f0","color"), input("source_depth_1","spec")),
+            forward("bloom_f0", input("bloom_target","spec"), input("bloom_depth_0","spec")),
+            forward("bloom_f1", input("bloom_f0","color"), input("bloom_depth_1","spec")),
+            node(
+                "composite",
+                "bloom_composite",
+                json!({"intensity":1.0}),
+                json!({
+                    "source":input(if stale_socket == "source" { "source_f0" } else { "source_f1" },"color"),
+                    "bloom":input(if stale_socket == "bloom" { "source_f0" } else { "source_f1" },"color"),
+                    "colorTarget":input("output","spec")
+                }),
+            ),
+            node(
+                "to_surface",
+                "fullscreen_copy",
+                json!({}),
+                json!({"source":input("composite","color"),"colorTarget":input("surface","surface")}),
+            ),
+            node(
+                "present",
+                "present",
+                json!({}),
+                json!({"surface":input("to_surface","color")}),
+            ),
+        ]);
+        let error = compile_error(graph(nodes));
+        assert_eq!(error.code, "GRAPH_RESOURCE_VERSION_INVALID");
+        assert_eq!(
+            error.details["path"],
+            format!("nodes[16].inputs.{stale_socket}")
+        );
+    }
+}
+
+#[test]
+fn bloom_composite_requires_a_single_view_rgba16_half_resolution_bloom() {
+    let mut half = texture("rgba16_float", "transient");
+    half["texture"]["extent"]["width"] = json!({"numerator":1,"denominator":2});
+    half["texture"]["extent"]["height"] = json!({"numerator":1,"denominator":2});
+    let make_graph = || {
+        let mut bloom_depth = texture("depth32_float", "transient");
+        bloom_depth["texture"]["extent"] = half["texture"]["extent"].clone();
+        let mut nodes = vec![
+            node("surface", "surface_target", json!({}), json!({})),
+            node(
+                "source",
+                "texture_spec",
+                texture("rgba16_float", "transient"),
+                json!({}),
+            ),
+            node("bloom", "texture_spec", half.clone(), json!({})),
+            node(
+                "target",
+                "texture_spec",
+                texture("rgba16_float", "transient"),
+                json!({}),
+            ),
+            depth_spec("source_depth", "transient"),
+            node("bloom_depth", "texture_spec", bloom_depth, json!({})),
+        ];
+        nodes.extend(render_support_nodes());
+        nodes.extend([
+            forward(
+                "source_writer",
+                input("source", "spec"),
+                input("source_depth", "spec"),
+            ),
+            forward(
+                "bloom_writer",
+                input("bloom", "spec"),
+                input("bloom_depth", "spec"),
+            ),
+            node(
+                "composite",
+                "bloom_composite",
+                json!({"intensity":1.0}),
+                json!({"source":input("source_writer","color"),"bloom":input("bloom_writer","color"),"colorTarget":input("target","spec")}),
+            ),
+            node(
+                "to_surface",
+                "fullscreen_copy",
+                json!({}),
+                json!({"source":input("composite","color"),"colorTarget":input("surface","surface")}),
+            ),
+            node(
+                "present",
+                "present",
+                json!({}),
+                json!({"surface":input("to_surface","color")}),
+            ),
+        ]);
+        graph(nodes)
+    };
+    compile_graph(make_graph());
+
+    let mut invalid = make_graph();
+    invalid["nodes"][2]["parameters"]["texture"]["format"] = json!("rgba8_unorm");
+    invalid["nodes"][2]["parameters"]["texture"]["mipLevelCount"] = json!(2);
+    let error = compile_error(invalid);
+    assert_eq!(error.code, "GRAPH_ILLEGAL_ACCESS");
+    assert_eq!(error.details["path"], "nodes[12].inputs");
+}
+
+#[test]
+fn fullscreen_copy_rejects_incompatible_authored_targets_at_copy_inputs() {
+    for (field, value, expected_code, expected_path) in [
+        (
+            "format",
+            json!("depth32_float"),
+            "GRAPH_ILLEGAL_ACCESS",
+            "nodes[9].inputs",
+        ),
+        (
+            "dimension",
+            json!("d3"),
+            "GRAPH_PARAMETERS_INVALID",
+            "nodes[2].parameters.texture.extent",
+        ),
+        (
+            "sampleCount",
+            json!(4),
+            "GRAPH_ILLEGAL_ACCESS",
+            "nodes[9].inputs",
+        ),
+        (
+            "mipLevelCount",
+            json!(2),
+            "GRAPH_ILLEGAL_ACCESS",
+            "nodes[9].inputs",
+        ),
+    ] {
+        let mut target = texture("rgba16_float", "transient");
+        target["texture"][field] = value;
+        let mut nodes = vec![
+            node("surface", "surface_target", json!({}), json!({})),
+            node(
+                "source",
+                "texture_spec",
+                texture("rgba16_float", "transient"),
+                json!({}),
+            ),
+            node("target", "texture_spec", target, json!({})),
+            depth_spec("depth", "transient"),
+        ];
+        nodes.extend(render_support_nodes());
+        nodes.extend([
+            forward("source_writer", input("source","spec"), input("depth","spec")),
+            node(
+                "copy",
+                "fullscreen_copy",
+                json!({}),
+                json!({"source":input("source_writer","color"),"colorTarget":input("target","spec")}),
+            ),
+            node(
+                "to_surface",
+                "fullscreen_copy",
+                json!({}),
+                json!({"source":input("copy","color"),"colorTarget":input("surface","surface")}),
+            ),
+            node(
+                "present",
+                "present",
+                json!({}),
+                json!({"surface":input("to_surface","color")}),
+            ),
+        ]);
+        let error = compile_error(graph(nodes));
+        assert_eq!(error.code, expected_code, "field {field}");
+        assert_eq!(error.details["path"], expected_path, "field {field}");
+    }
 }

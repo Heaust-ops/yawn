@@ -1,6 +1,6 @@
 use crate::renderer::{
-    gpu_scene::GpuSceneCache, material::MaterialResources, ActiveCompiledV1, ActiveCompiledV2,
-    PipelineLibrary, PreparedExecutionV2,
+    gpu_scene::GpuSceneCache, material::MaterialResources, ActiveCompiledGraph, PipelineLibrary,
+    PreparedExecution,
 };
 
 use super::super::scene::Scene;
@@ -46,10 +46,10 @@ fn encode_scene<'a, T: Scene>(
     }
 }
 
-pub(crate) fn encode_compiled_v2<T: Scene>(
+pub(crate) fn encode_compiled<T: Scene>(
     encoder: &mut wgpu::CommandEncoder,
     surface: &wgpu::TextureView,
-    active: &ActiveCompiledV2,
+    active: &ActiveCompiledGraph,
     scene: &T,
     gpu: &GpuSceneCache,
     pipelines: &PipelineLibrary,
@@ -57,7 +57,7 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
     mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) -> Result<(), &'static str> {
     use crate::render_graph::{
-        ExecutionKindV2, NormalizedColorLoadV2, NormalizedDepthLoadV2, ResourcePlanV2, StoreOpV2,
+        ExecutionKind, NormalizedColorLoad, NormalizedDepthLoad, ResourcePlan, StoreOp,
     };
     let view = |resource: u32| -> Result<&wgpu::TextureView, &'static str> {
         let is_surface = active
@@ -67,8 +67,8 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
             .is_some_and(|resource| {
                 matches!(
                     resource.plan,
-                    ResourcePlanV2::SurfaceTarget { family }
-                        | ResourcePlanV2::Texture { family, .. }
+                    ResourcePlan::SurfaceTarget { family }
+                        | ResourcePlan::Texture { family, .. }
                         if family == active.runtime.allocations.surface_family
                 )
             });
@@ -82,25 +82,25 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
             .get(resource as usize)
             .copied()
             .flatten()
-            .ok_or("V2 resource has no allocation")?;
+            .ok_or(" resource has no allocation")?;
         active
             .textures
             .get(a.class as usize)
             .and_then(|c| c.get(a.slot as usize))
             .map(|s| &s.view)
-            .ok_or("V2 allocation out of bounds")
+            .ok_or(" allocation out of bounds")
     };
     for (execution_index, prepared) in active.executions.iter().enumerate() {
         let profile_id = &active.graph.executions[execution_index].id;
         match prepared {
-            PreparedExecutionV2::FrustumCull => {
+            PreparedExecution::FrustumCull => {
                 gpu.encode_frustum_cull(encoder, profile.as_deref_mut(), profile_id);
             }
-            PreparedExecutionV2::MeshQuery => {
+            PreparedExecution::MeshQuery => {
                 gpu.encode_mesh_query(encoder, profile.as_deref_mut(), profile_id);
             }
-            PreparedExecutionV2::Present => {}
-            PreparedExecutionV2::Fullscreen {
+            PreparedExecution::Present => {}
+            PreparedExecution::Fullscreen {
                 execution,
                 bind_group,
                 pipeline,
@@ -110,8 +110,8 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                     .graph
                     .executions
                     .get(*execution)
-                    .ok_or("V2 execution out of bounds")?;
-                let ExecutionKindV2::Render {
+                    .ok_or(" execution out of bounds")?;
+                let ExecutionKind::Render {
                     color_attachments, ..
                 } = &execution.kind
                 else {
@@ -128,8 +128,8 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: match color.load {
-                                NormalizedColorLoadV2::Load => wgpu::LoadOp::Load,
-                                NormalizedColorLoadV2::Clear { value } => {
+                                NormalizedColorLoad::Load => wgpu::LoadOp::Load,
+                                NormalizedColorLoad::Clear { value } => {
                                     wgpu::LoadOp::Clear(wgpu::Color {
                                         r: value[0],
                                         g: value[1],
@@ -138,7 +138,7 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                                     })
                                 }
                             },
-                            store: if color.store == StoreOpV2::Store {
+                            store: if color.store == StoreOp::Store {
                                 wgpu::StoreOp::Store
                             } else {
                                 wgpu::StoreOp::Discard
@@ -155,7 +155,7 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
-            PreparedExecutionV2::LegacyForward {
+            PreparedExecution::LegacyForward {
                 execution,
                 variants,
             } => {
@@ -163,8 +163,8 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                     .graph
                     .executions
                     .get(*execution)
-                    .ok_or("V2 execution out of bounds")?;
-                let ExecutionKindV2::Render {
+                    .ok_or(" execution out of bounds")?;
+                let ExecutionKind::Render {
                     color_attachments,
                     depth_stencil,
                 } = &execution.kind
@@ -181,8 +181,8 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: match color.load {
-                                NormalizedColorLoadV2::Load => wgpu::LoadOp::Load,
-                                NormalizedColorLoadV2::Clear { value } => {
+                                NormalizedColorLoad::Load => wgpu::LoadOp::Load,
+                                NormalizedColorLoad::Clear { value } => {
                                     wgpu::LoadOp::Clear(wgpu::Color {
                                         r: value[0],
                                         g: value[1],
@@ -191,7 +191,7 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                                     })
                                 }
                             },
-                            store: if color.store == StoreOpV2::Store {
+                            store: if color.store == StoreOp::Store {
                                 wgpu::StoreOp::Store
                             } else {
                                 wgpu::StoreOp::Discard
@@ -202,12 +202,10 @@ pub(crate) fn encode_compiled_v2<T: Scene>(
                         view: view(depth.resource)?,
                         depth_ops: Some(wgpu::Operations {
                             load: match depth.load {
-                                NormalizedDepthLoadV2::Load => wgpu::LoadOp::Load,
-                                NormalizedDepthLoadV2::Clear { value } => {
-                                    wgpu::LoadOp::Clear(value)
-                                }
+                                NormalizedDepthLoad::Load => wgpu::LoadOp::Load,
+                                NormalizedDepthLoad::Clear { value } => wgpu::LoadOp::Clear(value),
                             },
-                            store: if depth.store == StoreOpV2::Store {
+                            store: if depth.store == StoreOp::Store {
                                 wgpu::StoreOp::Store
                             } else {
                                 wgpu::StoreOp::Discard
@@ -303,89 +301,4 @@ pub(crate) fn encode_immediate<T: Scene>(
         timestamp_writes: profile.and_then(|p| p.render_writes("immediate.forward")),
     });
     encode_scene(&mut pass, scene, gpu, pipelines, materials);
-}
-
-pub(crate) fn encode_compiled_v1<T: Scene>(
-    encoder: &mut wgpu::CommandEncoder,
-    color_view: &wgpu::TextureView,
-    active: &ActiveCompiledV1,
-    scene: &T,
-    gpu: &GpuSceneCache,
-    pipelines: &PipelineLibrary,
-    materials: &MaterialResources,
-    mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
-) {
-    for pass in &active.graph.passes {
-        let depth_resource = pass
-            .writes
-            .iter()
-            .find(|w| w.binding == "depth")
-            .unwrap()
-            .resource as usize;
-        let allocation = active.graph.resources[depth_resource].allocation.unwrap();
-        let depth_view =
-            &active.views[active.class_bases[allocation.class as usize] + allocation.slot as usize];
-        let color = pass.writes.iter().find(|w| w.binding == "color").unwrap();
-        let depth = pass.writes.iter().find(|w| w.binding == "depth").unwrap();
-        let (color_load, color_store) = match &color.access {
-            crate::render_graph::WriteAccess::ColorAttachment { load, store, .. } => (
-                match load {
-                    crate::render_graph::ColorLoad::Clear { value } => {
-                        wgpu::LoadOp::Clear(wgpu::Color {
-                            r: value[0],
-                            g: value[1],
-                            b: value[2],
-                            a: value[3],
-                        })
-                    }
-                    crate::render_graph::ColorLoad::Load => wgpu::LoadOp::Load,
-                },
-                if matches!(store, crate::render_graph::StoreOp::Store) {
-                    wgpu::StoreOp::Store
-                } else {
-                    wgpu::StoreOp::Discard
-                },
-            ),
-            _ => unreachable!(),
-        };
-        let (depth_load, depth_store) = match &depth.access {
-            crate::render_graph::WriteAccess::DepthAttachment { load, store } => (
-                match load {
-                    crate::render_graph::DepthLoad::Clear { value } => wgpu::LoadOp::Clear(*value),
-                    crate::render_graph::DepthLoad::Load => wgpu::LoadOp::Load,
-                },
-                if matches!(store, crate::render_graph::StoreOp::Store) {
-                    wgpu::StoreOp::Store
-                } else {
-                    wgpu::StoreOp::Discard
-                },
-            ),
-            _ => unreachable!(),
-        };
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(&pass.id),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                depth_slice: None,
-                view: color_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: color_load,
-                    store: color_store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: depth_load,
-                    store: depth_store,
-                }),
-                stencil_ops: None,
-            }),
-            occlusion_query_set: None,
-            timestamp_writes: profile
-                .as_deref_mut()
-                .and_then(|p| p.render_writes(&pass.id)),
-        });
-        encode_scene(&mut render_pass, scene, gpu, pipelines, materials);
-    }
 }

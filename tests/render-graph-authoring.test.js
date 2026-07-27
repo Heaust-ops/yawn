@@ -85,7 +85,7 @@ function fixture() {
     version: 1,
   };
 }
-test("catalog exhaustively mirrors all current V2 contracts", () => {
+test("catalog exhaustively mirrors all current contracts", () => {
   assert.deepEqual(
     Object.keys(semanticCatalog).sort(),
     [
@@ -115,7 +115,7 @@ test("catalog exhaustively mirrors all current V2 contracts", () => {
     assert.ok(c.parameters);
   }
 });
-test("adapter deterministically emits strict V2, permits repeated types, omits muted links and maps sources", () => {
+test("adapter deterministically emits the canonical schema, permits repeated types, omits muted links and maps sources", () => {
   const x = fixture(),
     a = adaptFxNodeSnapshot(x, 7);
   x.nodes.reverse();

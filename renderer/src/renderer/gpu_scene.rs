@@ -84,7 +84,7 @@ impl GpuScenePlan {
     pub fn build(data: &SceneFramePlan) -> Result<Self, &'static str> {
         self::GpuScenePlan::build_with_query(
             data,
-            crate::render_graph::MeshQueryRuntimeKeyV2 {
+            crate::render_graph::MeshQueryRuntimeKey {
                 visible: crate::render_graph::TriStatePredicate::RequiredTrue,
                 frustum_culled: crate::render_graph::TriStatePredicate::Any,
             },
@@ -93,7 +93,7 @@ impl GpuScenePlan {
 
     pub fn build_with_query(
         data: &SceneFramePlan,
-        query: crate::render_graph::MeshQueryRuntimeKeyV2,
+        query: crate::render_graph::MeshQueryRuntimeKey,
     ) -> Result<Self, &'static str> {
         let _ = query; // Packing is canonical; predicates are evaluated by the GPU.
         let mut plan = Self::default();
@@ -277,7 +277,7 @@ pub struct BufferSlot {
 #[derive(Default)]
 pub struct GpuSceneCache {
     revision: Option<u64>,
-    query: Option<crate::render_graph::MeshQueryRuntimeKeyV2>,
+    query: Option<crate::render_graph::MeshQueryRuntimeKey>,
     pub positions: BufferSlot,
     pub normals: BufferSlot,
     pub uvs: BufferSlot,
@@ -329,7 +329,7 @@ impl GpuSceneCache {
             device,
             queue,
             data,
-            crate::render_graph::MeshQueryRuntimeKeyV2 {
+            crate::render_graph::MeshQueryRuntimeKey {
                 visible: crate::render_graph::TriStatePredicate::RequiredTrue,
                 frustum_culled: crate::render_graph::TriStatePredicate::Any,
             },
@@ -341,7 +341,7 @@ impl GpuSceneCache {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         data: &SceneFramePlan,
-        query: crate::render_graph::MeshQueryRuntimeKeyV2,
+        query: crate::render_graph::MeshQueryRuntimeKey,
     ) -> Result<(), String> {
         if self.revision == Some(data.revision) && self.query == Some(query) {
             return Ok(());
@@ -580,7 +580,7 @@ impl GpuSceneCache {
         &self,
         queue: &wgpu::Queue,
         planes: Option<[[f32; 4]; 6]>,
-        query: crate::render_graph::MeshQueryRuntimeKeyV2,
+        query: crate::render_graph::MeshQueryRuntimeKey,
     ) {
         if let Some(compute) = &self.compute {
             if let Some(planes) = planes {

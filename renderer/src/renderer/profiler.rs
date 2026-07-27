@@ -4,7 +4,7 @@ use std::{
 };
 use wasm_bindgen::JsValue;
 
-pub const MAX_PROFILE_PASSES: usize = crate::render_graph::MAX_PASSES;
+pub const MAX_PROFILE_PASSES: usize = crate::render_graph::MAX_EXECUTIONS;
 const SLOT_COUNT: usize = 4;
 const QUERY_COUNT: u32 = (MAX_PROFILE_PASSES * 2) as u32;
 const RESOLVE_SIZE: u64 = QUERY_COUNT as u64 * 8;

@@ -1,232 +1,171 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 
-use serde::Serialize;
+use serde::Deserialize;
 
-use super::schema::*;
-use super::{GraphError, MAX_JSON_BYTES, MAX_OUTPUTS, MAX_PASSES, MAX_RESOURCES, MAX_USES};
+use super::*;
 
-pub enum ExecutorResolution<'a> {
-    Found(&'a dyn ExecutorContract),
-    UnknownKey,
-    UnsupportedVersion,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureParameters {
+    residency: TextureResidency,
+    texture: TextureDescriptor,
 }
-pub trait ExecutorRegistry {
-    fn resolve(&self, executor: &ExecutorRef) -> ExecutorResolution<'_>;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DepthParameters {
+    depth_compare: CompareFunction,
+    depth_write_enabled: bool,
+    clear_depth: f32,
 }
-pub trait ExecutorContract {
-    fn inherently_observable(&self) -> bool;
-    fn normalize_parameters(
-        &self,
-        parameters: &serde_json::Value,
-    ) -> Result<NormalizedParameters, String>;
-    fn validate_bindings(
-        &self,
-        pass: &Pass,
-        resources: &HashMap<ResourceRef, &Resource>,
-    ) -> Result<(), String>;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ForwardParameters {
+    clear_color: [f64; 4],
 }
-pub struct SceneForwardExecutors;
-static SCENE_FORWARD: SceneForward = SceneForward;
-struct SceneForward;
-impl ExecutorRegistry for SceneForwardExecutors {
-    fn resolve(&self, e: &ExecutorRef) -> ExecutorResolution<'_> {
-        if e.key != "scene_forward" {
-            ExecutorResolution::UnknownKey
-        } else if e.version != 1 {
-            ExecutorResolution::UnsupportedVersion
-        } else {
-            ExecutorResolution::Found(&SCENE_FORWARD)
-        }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToneMapParameters {
+    exposure: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BloomExtractParameters {
+    threshold: f32,
+    knee: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BloomBlurParameters {
+    direction: [f32; 2],
+    radius: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BloomCompositeParameters {
+    intensity: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LuminanceEdgeParameters {
+    strength: f32,
+}
+
+fn range(value: f32, min: f32, max: f32, path: String) -> Result<f32, GraphError> {
+    if value.is_finite() && (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(error(
+            "GRAPH_PARAMETERS_INVALID",
+            &format!("value must be finite and in [{min},{max}]"),
+            path,
+        ))
     }
 }
-impl ExecutorContract for SceneForward {
-    fn inherently_observable(&self) -> bool {
-        false
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct OutputKey(usize, u16);
+#[derive(Clone, Copy)]
+struct BoundInput {
+    producer: OutputKey,
+    active: bool,
+}
+#[derive(Clone)]
+struct DependencyEdge {
+    from_node: usize,
+    from_socket: String,
+    producer_output_ordinal: u16,
+    to_node: usize,
+    to_socket: String,
+    consumer_input_ordinal: u16,
+    resource: NodeOutputRef,
+}
+
+#[derive(Clone, Copy)]
+struct TextureTransition {
+    writer_node: usize,
+    input_socket: &'static str,
+    target: OutputKey,
+    output: OutputKey,
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedTransition {
+    Resolved {
+        family: u32,
+        version: u32,
+        target: OutputKey,
+    },
+    Cyclic,
+}
+
+fn reaches(
+    from: usize,
+    to: usize,
+    outgoing_edges: &[Vec<usize>],
+    edges: &[DependencyEdge],
+    live: &HashSet<usize>,
+    memo: &mut HashMap<(usize, usize), bool>,
+) -> bool {
+    if let Some(&answer) = memo.get(&(from, to)) {
+        return answer;
     }
-    fn normalize_parameters(
-        &self,
-        value: &serde_json::Value,
-    ) -> Result<NormalizedParameters, String> {
-        if value == &serde_json::json!({}) {
-            Ok(NormalizedParameters::SceneForward)
-        } else {
-            Err("requires parameters {}".into())
+    let mut stack = vec![from];
+    let mut visited = HashSet::new();
+    let mut answer = false;
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if node == to {
+            answer = true;
+            break;
+        }
+        for &edge_index in &outgoing_edges[node] {
+            let next = edges[edge_index].to_node;
+            if live.contains(&next) {
+                stack.push(next);
+            }
         }
     }
-    fn validate_bindings(
-        &self,
-        p: &Pass,
-        r: &HashMap<ResourceRef, &Resource>,
-    ) -> Result<(), String> {
-        if !p.reads.is_empty() || p.writes.len() != 2 {
-            return Err(
-                "requires parameters {}, no reads, and exactly color and depth bindings".into(),
-            );
-        }
-        let color = p.writes.iter().find(|x| x.binding == "color");
-        let depth = p.writes.iter().find(|x| x.binding == "depth");
-        let (Some(c), Some(d)) = (color, depth) else {
-            return Err("requires bindings named color and depth".into());
-        };
-        if !matches!(c.access, WriteAccess::ColorAttachment { location: 0, .. })
-            || !matches!(d.access, WriteAccess::DepthAttachment { .. })
-        {
-            return Err("color must be attachment location 0 and depth a depth attachment".into());
-        }
-        let (c, d) = (r[&c.resource], r[&d.resource]);
-        if d.texture.format != Format::Depth32Float
-            || c.texture.format == Format::Depth32Float
-            || c.texture.extent != d.texture.extent
-            || c.texture.sample_count != d.texture.sample_count
-        {
-            return Err(
-                "attachments must match extent/sample count and depth must be depth32_float".into(),
-            );
-        }
+    memo.insert((from, to), answer);
+    answer
+}
+
+fn error(code: &'static str, message: &str, path: impl Into<String>) -> GraphError {
+    GraphError::at(code, message, path)
+}
+fn validate_name_length(s: &str, path: impl Into<String>) -> Result<(), GraphError> {
+    if s.len() > 64 {
+        Err(error(
+            "GRAPH_LIMIT_EXCEEDED",
+            "identifier exceeds 64 bytes",
+            path.into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+fn validate_name_grammar(s: &str, path: impl Into<String>) -> Result<(), GraphError> {
+    if s.is_empty() || !identifier(s) {
+        Err(error("GRAPH_INVALID_ID", "invalid identifier", path))
+    } else {
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NormalizedParameters {
-    SceneForward,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CompiledRead {
-    pub binding: String,
-    pub resource: u32,
-    pub access: ReadAccess,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct CompiledWrite {
-    pub binding: String,
-    pub resource: u32,
-    pub access: WriteAccess,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CompiledPass {
-    pub id: String,
-    pub original_index: u32,
-    pub executor: ExecutorRef,
-    pub parameters: NormalizedParameters,
-    pub reads: Vec<CompiledRead>,
-    pub writes: Vec<CompiledWrite>,
-}
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct Lifetime {
-    pub first_use: u32,
-    pub last_use: u32,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-pub enum TextureUsage {
-    Sampled,
-    Storage,
-    CopySrc,
-    CopyDst,
-    ColorAttachment,
-    DepthAttachment,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-pub struct TextureAllocationKey {
-    pub descriptor: TextureDescriptor,
-    pub usage: Vec<TextureUsage>,
-    #[serde(rename = "viewFormats")]
-    pub view_formats: Vec<Format>,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct CompiledResource {
-    pub original_index: u32,
-    #[serde(rename = "ref")]
-    pub resource_ref: ResourceRef,
-    pub residency: Residency,
-    pub descriptor: TextureDescriptor,
-    pub writer: Option<u32>,
-    pub lifetime: Lifetime,
-    pub allocation: Option<TransientAllocation>,
-}
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-pub struct TransientAllocation {
-    pub class: u32,
-    pub slot: u32,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct CompiledOutput {
-    pub name: String,
-    pub resource: u32,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct AllocationClass {
-    pub key: TextureAllocationKey,
-    pub slot_count: u32,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct CompiledGraph {
-    pub schema_version: u32,
-    pub graph_id: String,
-    pub revision: u32,
-    pub passes: Vec<CompiledPass>,
-    pub resources: Vec<CompiledResource>,
-    pub outputs: Vec<CompiledOutput>,
-    pub allocation_classes: Vec<AllocationClass>,
-    pub culled_pass_count: u32,
-    pub culled_resource_count: u32,
-    pub transient_slot_count: u32,
-}
-impl CompiledGraph {
-    pub fn summary(&self, id: [u32; 2]) -> serde_json::Value {
-        serde_json::json!({"compiledId":id,"graphId":self.graph_id,"revision":self.revision,"schemaVersion":self.schema_version,"passCount":self.passes.len(),"resourceCount":self.resources.len(),"culledPassCount":self.culled_pass_count,"culledResourceCount":self.culled_resource_count,"transientSlotCount":self.transient_slot_count})
-    }
-}
-
-fn fail(code: &'static str, msg: impl Into<String>, path: impl Into<String>) -> GraphError {
-    GraphError::at(code, msg, path)
-}
-fn norm(mut d: TextureDescriptor) -> TextureDescriptor {
-    fn gcd(mut a: u32, mut b: u32) -> u32 {
-        while b != 0 {
-            let n = a % b;
-            a = b;
-            b = n
-        }
-        a
-    }
-    if let Extent::SurfaceRelative { width, height, .. } = &mut d.extent {
-        let g = gcd(width.numerator, width.denominator);
-        width.numerator /= g;
-        width.denominator /= g;
-        let g = gcd(height.numerator, height.denominator);
-        height.numerator /= g;
-        height.denominator /= g
-    }
-    d
-}
-fn usage_read(a: ReadAccess) -> TextureUsage {
-    match a {
-        ReadAccess::Sampled => TextureUsage::Sampled,
-        ReadAccess::Storage => TextureUsage::Storage,
-        ReadAccess::CopySrc => TextureUsage::CopySrc,
-    }
-}
-fn usage_write(a: &WriteAccess) -> TextureUsage {
-    match a {
-        WriteAccess::Storage => TextureUsage::Storage,
-        WriteAccess::CopyDst => TextureUsage::CopyDst,
-        WriteAccess::ColorAttachment { .. } => TextureUsage::ColorAttachment,
-        WriteAccess::DepthAttachment { .. } => TextureUsage::DepthAttachment,
+pub fn mesh_predicate_matches(predicate: TriStatePredicate, flag: bool) -> bool {
+    match predicate {
+        TriStatePredicate::Any => true,
+        TriStatePredicate::RequiredTrue => flag,
+        TriStatePredicate::RequiredFalse => !flag,
     }
 }
 
 pub fn parse_and_compile(bytes: &[u8]) -> Result<CompiledGraph, GraphError> {
-    compile_with(bytes, &SceneForwardExecutors)
-}
-pub fn compile_with(
-    bytes: &[u8],
-    executors: &dyn ExecutorRegistry,
-) -> Result<CompiledGraph, GraphError> {
     if bytes.len() > MAX_JSON_BYTES {
         return Err(GraphError::new(
             "GRAPH_PAYLOAD_TOO_LARGE",
@@ -235,865 +174,1778 @@ pub fn compile_with(
     }
     let text = std::str::from_utf8(bytes)
         .map_err(|_| GraphError::new("GRAPH_ENCODING_INVALID", "graph payload is not UTF-8"))?;
-    let value: serde_json::Value = serde_json::from_str(text)
+    let probe: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| GraphError::new("GRAPH_JSON_INVALID", e.to_string()))?;
-    let version = value.get("schemaVersion").and_then(|v| v.as_u64());
-    if version != Some(1) {
+    if probe.get("schemaVersion").and_then(|v| v.as_u64()) != Some(2) {
         return Err(GraphError::new(
             "GRAPH_SCHEMA_UNSUPPORTED",
-            "schemaVersion must be 1",
+            "schemaVersion must be 2",
         ));
     }
-    let g: GraphV1 = serde_json::from_str(text)
+    let graph = serde_json::from_str(text)
         .map_err(|e| GraphError::new("GRAPH_JSON_INVALID", e.to_string()))?;
-    compile(g, executors)
+    compile(graph)
 }
-pub fn compile(
-    mut g: GraphV1,
-    executors: &dyn ExecutorRegistry,
-) -> Result<CompiledGraph, GraphError> {
-    if g.schema_version != 1 {
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+fn compatible_view(a: TextureFormat, b: TextureFormat) -> bool {
+    matches!(
+        (a, b),
+        (TextureFormat::Rgba8Unorm, TextureFormat::Rgba8UnormSrgb)
+            | (TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba8Unorm)
+            | (TextureFormat::Bgra8Unorm, TextureFormat::Bgra8UnormSrgb)
+            | (TextureFormat::Bgra8UnormSrgb, TextureFormat::Bgra8Unorm)
+    )
+}
+fn normalize_texture(
+    d: TextureDescriptor,
+    base: &str,
+) -> Result<NormalizedTextureDescriptor, GraphError> {
+    let bad = |message: &str, suffix: &str| {
+        error(
+            "GRAPH_PARAMETERS_INVALID",
+            message,
+            format!("{base}.texture.{suffix}"),
+        )
+    };
+    let (extent, w, h, layers, relative) = match d.extent {
+        TextureExtent::Absolute {
+            width,
+            height,
+            depth_or_array_layers,
+        } => (
+            NormalizedTextureExtent::Absolute {
+                width,
+                height,
+                depth_or_array_layers,
+            },
+            width,
+            height,
+            depth_or_array_layers,
+            false,
+        ),
+        TextureExtent::SurfaceRelative {
+            mut width,
+            mut height,
+            depth_or_array_layers,
+        } => {
+            if width.numerator == 0
+                || width.denominator == 0
+                || height.numerator == 0
+                || height.denominator == 0
+                || depth_or_array_layers == 0
+            {
+                return Err(bad(
+                    "extent components and ratio terms must be nonzero",
+                    "extent",
+                ));
+            }
+            let g = gcd(width.numerator, width.denominator);
+            width.numerator /= g;
+            width.denominator /= g;
+            let g = gcd(height.numerator, height.denominator);
+            height.numerator /= g;
+            height.denominator /= g;
+            (
+                NormalizedTextureExtent::SurfaceRelative {
+                    width,
+                    height,
+                    depth_or_array_layers,
+                },
+                1,
+                1,
+                depth_or_array_layers,
+                true,
+            )
+        }
+    };
+    if w == 0 || h == 0 || layers == 0 {
+        return Err(bad("extent components must be nonzero", "extent"));
+    }
+    if relative && d.dimension != TextureDimension::D2 {
+        return Err(bad("surface-relative textures must be d2", "extent"));
+    }
+    if d.dimension == TextureDimension::D1 && (h != 1 || layers != 1) {
+        return Err(bad(
+            "d1 textures require height and layers equal to one",
+            "extent",
+        ));
+    }
+    if d.format == TextureFormat::Depth32Float && d.dimension != TextureDimension::D2 {
+        return Err(bad("depth textures must be d2", "dimension"));
+    }
+    if !matches!(d.sample_count, 1 | 4) {
+        return Err(bad("sampleCount must be 1 or 4", "sampleCount"));
+    }
+    if d.mip_level_count == 0 {
+        return Err(bad("mipLevelCount must be at least one", "mipLevelCount"));
+    }
+    if d.sample_count == 4
+        && (d.dimension != TextureDimension::D2 || d.mip_level_count != 1 || layers != 1)
+    {
+        return Err(bad(
+            "multisampled textures must be d2, single-mip, single-layer",
+            "sampleCount",
+        ));
+    }
+    let max_dim = w.max(h).max(if d.dimension == TextureDimension::D3 {
+        layers
+    } else {
+        1
+    });
+    let max_mips = 32 - max_dim.leading_zeros();
+    if !relative && d.mip_level_count > max_mips {
+        return Err(bad(
+            "mipLevelCount exceeds the full mip chain",
+            "mipLevelCount",
+        ));
+    }
+    let limit = if d.dimension == TextureDimension::D3 {
+        2048
+    } else {
+        8192
+    };
+    if w > limit
+        || h > limit
+        || (d.dimension == TextureDimension::D3 && layers > 2048)
+        || (d.dimension != TextureDimension::D3 && layers > 256)
+    {
+        return Err(bad("texture exceeds dimension limits", "extent"));
+    }
+    for (j, &view) in d.view_formats.iter().enumerate() {
+        if view == d.format || !compatible_view(d.format, view) {
+            return Err(bad(
+                "view format must be compatible and exclude the base format",
+                &format!("viewFormats[{j}]"),
+            ));
+        }
+    }
+    let mut views = d.view_formats;
+    views.sort();
+    views.dedup();
+    Ok(NormalizedTextureDescriptor {
+        dimension: d.dimension,
+        format: d.format,
+        extent,
+        mip_level_count: d.mip_level_count,
+        sample_count: d.sample_count,
+        view_formats: views,
+    })
+}
+
+fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
+    let base = format!("nodes[{i}].parameters");
+    let invalid =
+        |e: serde_json::Error| error("GRAPH_PARAMETERS_INVALID", &e.to_string(), base.clone());
+    macro_rules! empty {
+        ($variant:expr) => {{
+            serde_json::from_value::<Empty>(node.parameters.clone()).map_err(invalid)?;
+            $variant
+        }};
+    }
+    Ok(match node.executor.key.as_str() {
+        "surface_target" => empty!(NormalizedParameters::SurfaceTarget),
+        "scene_table" => empty!(NormalizedParameters::SceneTable),
+        "local_aabb_buffer" => empty!(NormalizedParameters::LocalAabbBuffer),
+        "camera_frustum" => empty!(NormalizedParameters::CameraFrustum),
+        "visibility_flags" => empty!(NormalizedParameters::VisibilityFlags),
+        "frustum_cull" => empty!(NormalizedParameters::FrustumCull),
+        "fullscreen_copy" => empty!(NormalizedParameters::FullscreenCopy),
+        "tone_map" => {
+            let p: ToneMapParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::ToneMap {
+                exposure: range(p.exposure, 0.0, 32.0, format!("{base}.exposure"))?,
+            }
+        }
+        "bloom_extract" => {
+            let p: BloomExtractParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::BloomExtract {
+                threshold: range(p.threshold, 0.0, 64.0, format!("{base}.threshold"))?,
+                knee: range(p.knee, 0.0, 1.0, format!("{base}.knee"))?,
+            }
+        }
+        "bloom_blur" => {
+            let p: BloomBlurParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            let x = range(p.direction[0], -1.0, 1.0, format!("{base}.direction[0]"))?;
+            let y = range(p.direction[1], -1.0, 1.0, format!("{base}.direction[1]"))?;
+            if (x.abs() + y.abs() - 1.0).abs() > 0.0001 {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "direction must be a unit axis",
+                    format!("{base}.direction"),
+                ));
+            }
+            NormalizedParameters::BloomBlur {
+                direction: [x, y],
+                radius: range(p.radius, 1.0, 16.0, format!("{base}.radius"))?,
+            }
+        }
+        "bloom_composite" => {
+            let p: BloomCompositeParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::BloomComposite {
+                intensity: range(p.intensity, 0.0, 16.0, format!("{base}.intensity"))?,
+            }
+        }
+        "luminance_edge" => {
+            let p: LuminanceEdgeParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::LuminanceEdge {
+                strength: range(p.strength, 0.0, 16.0, format!("{base}.strength"))?,
+            }
+        }
+        "present" => empty!(NormalizedParameters::Present),
+        "texture_spec" => {
+            let p: TextureParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            if matches!(
+                p.residency,
+                TextureResidency::History | TextureResidency::Readback
+            ) {
+                return Err(error(
+                    "GRAPH_UNSUPPORTED_FEATURE",
+                    "history and readback textures are unsupported",
+                    format!("{base}.residency"),
+                ));
+            }
+            NormalizedParameters::TextureSpec {
+                residency: p.residency,
+                texture: normalize_texture(p.texture, &base)?,
+            }
+        }
+        "mesh_query" => {
+            let object = node.parameters.as_object().ok_or_else(|| {
+                error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "parameters must be an object",
+                    base.clone(),
+                )
+            })?;
+            if object.len() != 1 || !object.contains_key("filters") {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "mesh query parameters must contain only filters",
+                    base.clone(),
+                ));
+            }
+            let filters = object["filters"].as_array().ok_or_else(|| {
+                error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "filters must be an array",
+                    format!("{base}.filters"),
+                )
+            })?;
+            let mut found = [None, None];
+            for (j, value) in filters.iter().enumerate() {
+                let filter = value.as_object().ok_or_else(|| {
+                    error(
+                        "GRAPH_PARAMETERS_INVALID",
+                        "filter must be an object",
+                        format!("{base}.filters[{j}]"),
+                    )
+                })?;
+                if filter.len() != 2
+                    || !filter.contains_key("flag")
+                    || !filter.contains_key("predicate")
+                {
+                    return Err(error(
+                        "GRAPH_PARAMETERS_INVALID",
+                        "filter must contain flag and predicate",
+                        format!("{base}.filters[{j}]"),
+                    ));
+                }
+                let flag: MeshFlag =
+                    serde_json::from_value(filter["flag"].clone()).map_err(|e| {
+                        error(
+                            "GRAPH_PARAMETERS_INVALID",
+                            &e.to_string(),
+                            format!("{base}.filters[{j}].flag"),
+                        )
+                    })?;
+                let predicate: TriStatePredicate =
+                    serde_json::from_value(filter["predicate"].clone()).map_err(|e| {
+                        error(
+                            "GRAPH_PARAMETERS_INVALID",
+                            &e.to_string(),
+                            format!("{base}.filters[{j}].predicate"),
+                        )
+                    })?;
+                let index = if flag == MeshFlag::IsVisible { 0 } else { 1 };
+                if found[index].replace(predicate).is_some() {
+                    return Err(error(
+                        "GRAPH_PARAMETERS_INVALID",
+                        "duplicate mesh flag",
+                        format!("{base}.filters[{j}].flag"),
+                    ));
+                }
+            }
+            if found.iter().any(Option::is_none) {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "both mesh flags are required",
+                    format!("{base}.filters"),
+                ));
+            }
+            NormalizedParameters::MeshQuery {
+                filters: [
+                    NormalizedMeshFilter {
+                        flag: MeshFlag::IsVisible,
+                        predicate: found[0].unwrap(),
+                    },
+                    NormalizedMeshFilter {
+                        flag: MeshFlag::IsFrustumCulled,
+                        predicate: found[1].unwrap(),
+                    },
+                ],
+            }
+        }
+        "depth_stencil_config" => {
+            let p: DepthParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            if !p.clear_depth.is_finite() || !(0.0..=1.0).contains(&p.clear_depth) {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "clearDepth must be finite and in [0,1]",
+                    format!("{base}.clearDepth"),
+                ));
+            }
+            NormalizedParameters::DepthStencilConfig {
+                config: NormalizedDepthStencil {
+                    depth_compare: p.depth_compare,
+                    depth_write_enabled: p.depth_write_enabled,
+                    clear_depth: p.clear_depth,
+                },
+            }
+        }
+        "legacy_forward" => {
+            let p: ForwardParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            if p.clear_color.iter().any(|x| !x.is_finite()) {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "clearColor must be finite",
+                    format!("{base}.clearColor"),
+                ));
+            }
+            NormalizedParameters::LegacyForward {
+                clear_color: p.clear_color,
+            }
+        }
+        _ => unreachable!(),
+    })
+}
+
+fn accepts(c: TypeConstraint, ty: SemanticType) -> bool {
+    match c {
+        TypeConstraint::Exact(x) => x == ty,
+        TypeConstraint::OneOf(xs) => xs.contains(&ty),
+    }
+}
+
+pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
+    if graph.nodes.len() > MAX_EXECUTIONS {
+        return Err(error(
+            "GRAPH_LIMIT_EXCEEDED",
+            "node count exceeds 1024",
+            "nodes",
+        ));
+    }
+    let mut input_count = 0usize;
+    for (i, node) in graph.nodes.iter().enumerate() {
+        input_count = input_count.saturating_add(node.inputs.len());
+        if input_count > 8192 {
+            return Err(error(
+                "GRAPH_LIMIT_EXCEEDED",
+                "input count exceeds 8192",
+                format!("nodes[{i}].inputs"),
+            ));
+        }
+    }
+    if graph
+        .nodes
+        .iter()
+        .filter(|n| n.executor.key == "present")
+        .count()
+        > 64
+    {
+        return Err(error(
+            "GRAPH_LIMIT_EXCEEDED",
+            "present count exceeds 64",
+            "nodes",
+        ));
+    }
+    if graph.schema_version != 2 {
         return Err(GraphError::new(
             "GRAPH_SCHEMA_UNSUPPORTED",
-            "schemaVersion must be 1",
+            "schemaVersion must be 2",
         ));
     }
-    if g.resources.len() > MAX_RESOURCES
-        || g.passes.len() > MAX_PASSES
-        || g.outputs.len() > MAX_OUTPUTS
-        || g.passes
-            .iter()
-            .map(|p| p.reads.len() + p.writes.len())
-            .sum::<usize>()
-            > MAX_USES
-    {
-        return Err(GraphError::new(
-            "GRAPH_LIMIT_EXCEEDED",
-            "graph limit exceeded",
-        ));
-    }
-    let identifiers = std::iter::once(&g.graph_id)
-        .chain(g.resources.iter().map(|resource| &resource.id))
-        .chain(g.passes.iter().flat_map(|pass| {
-            std::iter::once(&pass.id)
-                .chain(std::iter::once(&pass.executor.key))
-                .chain(
-                    pass.reads
-                        .iter()
-                        .flat_map(|binding| [&binding.binding, &binding.resource.id]),
-                )
-                .chain(
-                    pass.writes
-                        .iter()
-                        .flat_map(|binding| [&binding.binding, &binding.resource.id]),
-                )
-        }))
-        .chain(
-            g.outputs
-                .iter()
-                .flat_map(|output| [&output.name, &output.resource.id]),
-        );
-    if identifiers
-        .into_iter()
-        .any(|identifier| identifier.len() > 64)
-    {
-        return Err(GraphError::new(
-            "GRAPH_LIMIT_EXCEEDED",
-            "identifier exceeds 64 UTF-8 bytes",
-        ));
-    }
-    if !identifier(&g.graph_id) || g.revision == 0 {
-        return Err(fail(
-            "GRAPH_INVALID_ID",
-            "invalid graphId or revision",
-            "graphId",
-        ));
-    }
-    let mut resource_ids = HashSet::new();
-    let mut external = HashSet::new();
-    for (i, r) in g.resources.iter().enumerate() {
-        let rr = ResourceRef {
-            id: r.id.clone(),
-            version: r.version,
-        };
-        if !identifier(&r.id) {
-            return Err(fail(
-                "GRAPH_INVALID_ID",
-                "invalid resource id",
-                format!("resources[{i}].id"),
-            ));
+    validate_name_length(&graph.graph_id, "graphId")?;
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for (value, path) in [
+            (&n.id, format!("nodes[{i}].id")),
+            (&n.executor.key, format!("nodes[{i}].executor.key")),
+        ] {
+            validate_name_length(value, path)?;
         }
-        if !resource_ids.insert(rr) {
-            return Err(fail(
+        for (socket, r) in &n.inputs {
+            for (value, path) in [
+                (socket, format!("nodes[{i}].inputs.{socket}")),
+                (&r.node, format!("nodes[{i}].inputs.{socket}.node")),
+                (&r.socket, format!("nodes[{i}].inputs.{socket}.socket")),
+            ] {
+                validate_name_length(value, path)?;
+            }
+        }
+    }
+
+    validate_name_grammar(&graph.graph_id, "graphId")?;
+    let mut ids = HashMap::new();
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for (value, path) in [
+            (&n.id, format!("nodes[{i}].id")),
+            (&n.executor.key, format!("nodes[{i}].executor.key")),
+        ] {
+            validate_name_grammar(value, path)?;
+        }
+        if ids.insert(n.id.as_str(), i).is_some() {
+            return Err(error(
                 "GRAPH_DUPLICATE_ID",
-                "duplicate resource id/version",
-                format!("resources[{i}]"),
+                "duplicate node id",
+                format!("nodes[{i}].id"),
             ));
         }
-        if let Residency::External { source } = r.residency {
-            if !external.insert(source) {
-                return Err(fail(
-                    "GRAPH_DUPLICATE_ID",
-                    "duplicate external source",
-                    format!("resources[{i}].residency"),
+        for (socket, r) in &n.inputs {
+            for (value, path) in [
+                (socket, format!("nodes[{i}].inputs.{socket}")),
+                (&r.node, format!("nodes[{i}].inputs.{socket}.node")),
+                (&r.socket, format!("nodes[{i}].inputs.{socket}.socket")),
+            ] {
+                validate_name_grammar(value, path)?;
+            }
+        }
+    }
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for (s, r) in &n.inputs {
+            if !ids.contains_key(r.node.as_str()) {
+                return Err(error(
+                    "GRAPH_UNKNOWN_NODE",
+                    "unknown input node",
+                    format!("nodes[{i}].inputs.{s}.node"),
                 ));
             }
         }
     }
-    let mut pass_ids = HashSet::new();
-    for (pi, p) in g.passes.iter().enumerate() {
-        if !identifier(&p.id) || !identifier(&p.executor.key) {
-            return Err(fail(
-                "GRAPH_INVALID_ID",
-                "invalid pass or executor id",
-                format!("passes[{pi}]"),
-            ));
-        }
-        if !pass_ids.insert(&p.id) {
-            return Err(fail(
-                "GRAPH_DUPLICATE_ID",
-                "duplicate pass id",
-                format!("passes[{pi}].id"),
-            ));
-        }
-    }
-    let mut output_names = HashSet::new();
-    for (i, o) in g.outputs.iter().enumerate() {
-        if !identifier(&o.name) || !output_names.insert(&o.name) {
-            return Err(fail(
-                if identifier(&o.name) {
-                    "GRAPH_DUPLICATE_ID"
-                } else {
-                    "GRAPH_INVALID_ID"
-                },
-                "invalid or duplicate output",
-                format!("outputs[{i}]"),
-            ));
-        }
-    }
-    for (i, resource) in g.resources.iter_mut().enumerate() {
-        let valid_ratio = match &resource.texture.extent {
-            Extent::SurfaceRelative { width, height, .. } => {
-                width.numerator != 0
-                    && width.denominator != 0
-                    && height.numerator != 0
-                    && height.denominator != 0
-            }
-            Extent::Absolute { .. } => true,
-        };
-        if !valid_ratio {
-            return Err(fail(
-                "GRAPH_ILLEGAL_ACCESS",
-                "invalid extent",
-                format!("resources[{i}].texture.extent"),
-            ));
-        }
-        resource.texture = norm(resource.texture.clone());
-    }
-    for (i, r) in g.resources.iter().enumerate() {
-        if r.texture.mip_level_count != 1 || r.texture.sample_count != 1 {
-            return Err(fail(
-                "GRAPH_UNSUPPORTED_FEATURE",
-                "V1 mipLevels and sampleCount must be 1",
-                format!("resources[{i}].texture"),
-            ));
-        }
-        let valid = match &r.texture.extent {
-            Extent::Absolute {
-                width,
-                height,
-                depth_or_array_layers,
-            } => *width > 0 && *height > 0 && *depth_or_array_layers > 0,
-            Extent::SurfaceRelative {
-                width,
-                height,
-                depth_or_array_layers,
-            } => {
-                width.numerator > 0
-                    && width.denominator > 0
-                    && height.numerator > 0
-                    && height.denominator > 0
-                    && *depth_or_array_layers > 0
-            }
-        };
-        if !valid {
-            return Err(fail(
-                "GRAPH_ILLEGAL_ACCESS",
-                "invalid extent",
-                format!("resources[{i}].texture.extent"),
-            ));
-        }
-        match r.residency {
-            Residency::External { .. } => {
-                let surface = TextureDescriptor {
-                    dimension: Dimension::D2,
-                    format: Format::Surface,
-                    extent: Extent::SurfaceRelative {
-                        width: Ratio {
-                            numerator: 1,
-                            denominator: 1,
-                        },
-                        height: Ratio {
-                            numerator: 1,
-                            denominator: 1,
-                        },
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                };
-                if r.texture != surface {
-                    return Err(fail(
-                        "GRAPH_ILLEGAL_ACCESS",
-                        "external source must use the exact surface descriptor",
-                        format!("resources[{i}]"),
-                    ));
-                }
-            }
-            Residency::Transient => {
-                if r.texture.format == Format::Surface {
-                    return Err(fail(
-                        "GRAPH_ILLEGAL_ACCESS",
-                        "transient cannot use surface format",
-                        format!("resources[{i}]"),
-                    ));
-                }
-            }
-        }
-        if matches!(r.texture.extent, Extent::SurfaceRelative { .. })
-            && r.texture.dimension != Dimension::D2
-        {
-            return Err(fail(
-                "GRAPH_ILLEGAL_ACCESS",
-                "surface-relative extent requires d2",
-                format!("resources[{i}].texture"),
-            ));
-        }
-        if r.texture.format == Format::Depth32Float && r.texture.dimension != Dimension::D2 {
-            return Err(fail(
-                "GRAPH_ILLEGAL_ACCESS",
-                "depth32_float requires d2",
-                format!("resources[{i}].texture"),
-            ));
-        }
-        if r.texture.dimension == Dimension::D1
-            && !matches!(
-                r.texture.extent,
-                Extent::Absolute {
-                    height: 1,
-                    depth_or_array_layers: 1,
-                    ..
-                }
-            )
-        {
-            return Err(fail(
-                "GRAPH_ILLEGAL_ACCESS",
-                "d1 textures require height and depthOrArrayLayers to be 1",
-                format!("resources[{i}].texture.extent"),
-            ));
-        }
-    }
-    let map: HashMap<ResourceRef, &Resource> = g
-        .resources
+    let contracts: Vec<_> = graph
+        .nodes
         .iter()
-        .map(|r| {
-            (
-                ResourceRef {
-                    id: r.id.clone(),
-                    version: r.version,
-                },
-                r,
-            )
+        .enumerate()
+        .map(|(i, n)| {
+            contract(&n.executor.key).ok_or_else(|| {
+                error(
+                    "GRAPH_UNKNOWN_EXECUTOR",
+                    "unknown executor",
+                    format!("nodes[{i}].executor.key"),
+                )
+            })
         })
-        .collect();
-    for (pi, pass) in g.passes.iter().enumerate() {
-        for resource_ref in pass
-            .reads
-            .iter()
-            .map(|binding| &binding.resource)
-            .chain(pass.writes.iter().map(|binding| &binding.resource))
+        .collect::<Result<_, _>>()?;
+    for (i, n) in graph.nodes.iter().enumerate() {
+        if n.executor.version != contracts[i].version {
+            return Err(error(
+                "GRAPH_EXECUTOR_VERSION_UNSUPPORTED",
+                "unsupported executor version",
+                format!("nodes[{i}].executor.version"),
+            ));
+        }
+    }
+    let params: Vec<_> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| decode(n, i))
+        .collect::<Result<_, _>>()?;
+    for (i, n) in graph.nodes.iter().enumerate() {
+        if n.state != NodeState::Enabled {
+            return Err(error(
+                "GRAPH_NODE_STATE_INVALID",
+                "muted nodes are unsupported",
+                format!("nodes[{i}].state"),
+            ));
+        }
+    }
+
+    // Socket validation is intentionally global and phased. In particular, no
+    // cardinality or semantic error may hide a later structural socket error.
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for name in n.inputs.keys() {
+            if !contracts[i].inputs.iter().any(|s| s.name == name) {
+                return Err(error(
+                    "GRAPH_UNKNOWN_SOCKET",
+                    "unknown input socket",
+                    format!("nodes[{i}].inputs.{name}"),
+                ));
+            }
+        }
+    }
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for (name, r) in &n.inputs {
+            let pn = ids[r.node.as_str()];
+            if !contracts[pn].outputs.iter().any(|out| out.name == r.socket) {
+                return Err(error(
+                    "GRAPH_UNKNOWN_SOCKET",
+                    "unknown output socket",
+                    format!("nodes[{i}].inputs.{name}.socket"),
+                ));
+            }
+        }
+    }
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for input in contracts[i].inputs {
+            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { filters } if filters.iter().any(|f| f.flag.input_socket() == input.name && f.predicate == TriStatePredicate::Any));
+            if !n.inputs.contains_key(input.name) {
+                if input.cardinality == InputCardinality::RequiredOne
+                    || (!inactive
+                        && matches!(params[i], NormalizedParameters::MeshQuery { .. })
+                        && input.name != "scene")
+                {
+                    return Err(error(
+                        "GRAPH_SOCKET_CARDINALITY",
+                        "required input is missing",
+                        format!("nodes[{i}].inputs.{}", input.name),
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut bound: Vec<BTreeMap<&str, BoundInput>> = vec![BTreeMap::new(); graph.nodes.len()];
+    for (i, n) in graph.nodes.iter().enumerate() {
+        for input in contracts[i].inputs {
+            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { filters } if filters.iter().any(|f| f.flag.input_socket() == input.name && f.predicate == TriStatePredicate::Any));
+            let Some(r) = n.inputs.get(input.name) else {
+                continue;
+            };
+            let pn = ids[r.node.as_str()];
+            let (ordinal, out) = contracts[pn]
+                .outputs
+                .iter()
+                .enumerate()
+                .find(|(_, o)| o.name == r.socket)
+                .expect("producer sockets were globally validated");
+            let attachment_shape_checked_later = contracts[i].key == "legacy_forward"
+                && input.name == "depthTarget"
+                && out.semantic_type == SemanticType::SurfaceTarget;
+            if !accepts(input.accepted, out.semantic_type) && !attachment_shape_checked_later {
+                return Err(error(
+                    "GRAPH_SOCKET_TYPE_MISMATCH",
+                    "socket type mismatch",
+                    format!("nodes[{i}].inputs.{}", input.name),
+                ));
+            }
+            if let Some(flag) = MeshFlag::ORDERED
+                .iter()
+                .find(|f| f.input_socket() == input.name)
+            {
+                if out.metadata != (OutputMetadata::BooleanFlag { flag: *flag }) {
+                    return Err(error(
+                        "GRAPH_SOCKET_TYPE_MISMATCH",
+                        "mesh flag metadata mismatch",
+                        format!("nodes[{i}].inputs.{}", input.name),
+                    ));
+                }
+            }
+            bound[i].insert(
+                input.name,
+                BoundInput {
+                    producer: OutputKey(pn, ordinal as u16),
+                    active: !inactive,
+                },
+            );
+        }
+    }
+    let root = |key: OutputKey,
+                bound: &Vec<BTreeMap<&str, BoundInput>>,
+                contracts: &Vec<&Contract>|
+     -> Option<OutputKey> {
+        let mut k = key;
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(k.0) {
+                return None;
+            }
+            if contracts[k.0].outputs[k.1 as usize].semantic_type == SemanticType::SceneTable {
+                return Some(k);
+            }
+            k = bound[k.0].get("scene")?.producer;
+        }
+    };
+    for (i, c) in contracts.iter().enumerate() {
+        if c.key == "frustum_cull"
+            && root(bound[i]["scene"].producer, &bound, &contracts)
+                != root(bound[i]["localAabbs"].producer, &bound, &contracts)
         {
-            if !identifier(&resource_ref.id) {
-                return Err(fail(
-                    "GRAPH_INVALID_ID",
-                    "invalid resource reference id",
-                    format!("passes[{pi}]"),
-                ));
-            }
-            if !resource_ids.contains(resource_ref) {
-                return Err(fail(
-                    "GRAPH_UNKNOWN_RESOURCE",
-                    "unknown resource reference",
-                    format!("passes[{pi}]"),
-                ));
+            return Err(error(
+                "GRAPH_SOCKET_TYPE_MISMATCH",
+                "scene roots differ",
+                format!("nodes[{i}].inputs.localAabbs"),
+            ));
+        }
+        if matches!(c.key, "mesh_query" | "legacy_forward") {
+            let scene = root(bound[i]["scene"].producer, &bound, &contracts);
+            for (s, b) in &bound[i] {
+                if b.active
+                    && matches!(*s, "isVisible" | "isFrustumCulled" | "draws")
+                    && root(b.producer, &bound, &contracts) != scene
+                {
+                    return Err(error(
+                        "GRAPH_SOCKET_TYPE_MISMATCH",
+                        "scene roots differ",
+                        format!("nodes[{i}].inputs.{s}"),
+                    ));
+                }
             }
         }
     }
-    for (i, output) in g.outputs.iter().enumerate() {
-        if !identifier(&output.resource.id) {
-            return Err(fail(
-                "GRAPH_INVALID_ID",
-                "invalid output resource id",
-                format!("outputs[{i}].resource.id"),
-            ));
-        }
-        if !resource_ids.contains(&output.resource) {
-            return Err(fail(
-                "GRAPH_UNKNOWN_RESOURCE",
-                "unknown output resource",
-                format!("outputs[{i}]"),
-            ));
+    let mut edges = Vec::new();
+    for i in 0..graph.nodes.len() {
+        for (input_ordinal, input) in contracts[i].inputs.iter().enumerate() {
+            if let Some(b) = bound[i].get(input.name).filter(|b| b.active) {
+                edges.push(DependencyEdge {
+                    from_node: b.producer.0,
+                    from_socket: contracts[b.producer.0].outputs[b.producer.1 as usize]
+                        .name
+                        .into(),
+                    producer_output_ordinal: b.producer.1,
+                    to_node: i,
+                    to_socket: input.name.into(),
+                    consumer_input_ordinal: input_ordinal as u16,
+                    resource: graph.nodes[i].inputs[input.name].clone(),
+                });
+            }
         }
     }
-    let mut observable = vec![false; g.passes.len()];
-    let mut parameters = Vec::with_capacity(g.passes.len());
-    // Validate executor signatures and pass-local binding identity before building
-    // the graph-wide writer map. Access legality is deliberately checked later.
-    for (pi, p) in g.passes.iter().enumerate() {
-        let contract = match executors.resolve(&p.executor) {
-            ExecutorResolution::Found(contract) => contract,
-            resolution => {
-                return Err(GraphError::at(
-                    if matches!(resolution, ExecutorResolution::UnsupportedVersion) {
-                        "GRAPH_EXECUTOR_VERSION_UNSUPPORTED"
-                    } else {
-                        "GRAPH_UNKNOWN_EXECUTOR"
+    edges.sort_by_key(|e| {
+        (
+            e.to_node,
+            e.consumer_input_ordinal,
+            e.from_node,
+            e.producer_output_ordinal,
+        )
+    });
+    let mut deps = vec![Vec::new(); graph.nodes.len()];
+    for edge in &edges {
+        deps[edge.to_node].push(edge.from_node);
+    }
+    for node_deps in &mut deps {
+        node_deps.sort();
+        node_deps.dedup();
+    }
+    let mut live = HashSet::new();
+    let mut stack: Vec<_> = contracts
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.inherently_observable)
+        .map(|(i, _)| i)
+        .collect();
+    while let Some(i) = stack.pop() {
+        if live.insert(i) {
+            stack.extend(deps[i].iter().copied());
+        }
+    }
+    // IDs are independent of scheduling: original node order, then contract output order.
+    let mut output_ids = BTreeMap::new();
+    let mut resource_meta = Vec::new();
+    for i in 0..graph.nodes.len() {
+        if live.contains(&i) {
+            for (o, out) in contracts[i].outputs.iter().enumerate() {
+                let id = resource_meta.len() as u32;
+                output_ids.insert(OutputKey(i, o as u16), id);
+                resource_meta.push((i, o as u16, *out));
+            }
+        }
+    }
+    let all_outputs: usize = contracts.iter().map(|c| c.outputs.len()).sum();
+
+    // Establish families and transitions without relying on a schedule.
+    let mut families = Vec::new();
+    let mut source_family = HashMap::new();
+    for i in 0..graph.nodes.len() {
+        if !live.contains(&i) {
+            continue;
+        }
+        let source = output_ids.get(&OutputKey(i, 0)).copied();
+        match &params[i] {
+            NormalizedParameters::SurfaceTarget => {
+                let id = families.len() as u32;
+                let r = source.unwrap();
+                source_family.insert(OutputKey(i, 0), id);
+                families.push(TextureFamily {
+                    id,
+                    key: TextureFamilyKey {
+                        source_node: i as u32,
+                        source_socket: 0,
                     },
-                    "executor is not registered",
-                    format!("passes[{pi}].executor"),
+                    source: TextureFamilySource::ImportedSurface { resource: r },
+                    lifetime: Lifetime {
+                        first_use: 0,
+                        last_use: 0,
+                    },
+                    versions: vec![],
+                    usage: vec![],
+                    allocation: None,
+                    aliasable: false,
+                });
+            }
+            NormalizedParameters::TextureSpec { residency, texture } => {
+                let id = families.len() as u32;
+                let r = source.unwrap();
+                source_family.insert(OutputKey(i, 0), id);
+                families.push(TextureFamily {
+                    id,
+                    key: TextureFamilyKey {
+                        source_node: i as u32,
+                        source_socket: 0,
+                    },
+                    source: TextureFamilySource::AuthoredTexture {
+                        resource: r,
+                        residency: *residency,
+                        descriptor: texture.clone(),
+                    },
+                    lifetime: Lifetime {
+                        first_use: 0,
+                        last_use: 0,
+                    },
+                    versions: vec![],
+                    usage: vec![],
+                    allocation: None,
+                    aliasable: false,
+                });
+            }
+            _ => {}
+        }
+    }
+    let mut transitions: Vec<TextureTransition> = Vec::new();
+    let mut transitions_by_target: BTreeMap<OutputKey, Vec<usize>> = BTreeMap::new();
+    for i in 0..graph.nodes.len() {
+        if !live.contains(&i) {
+            continue;
+        }
+        let transition_sockets: &[(&str, u16)] = match contracts[i].key {
+            "legacy_forward" => &[("colorTarget", 0), ("depthTarget", 1)],
+            "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur" | "bloom_composite"
+            | "luminance_edge" => &[("colorTarget", 0)],
+            _ => continue,
+        };
+        for &(input_socket, output_ordinal) in transition_sockets {
+            let transition = TextureTransition {
+                writer_node: i,
+                input_socket,
+                target: bound[i][input_socket].producer,
+                output: OutputKey(i, output_ordinal),
+            };
+            let index = transitions.len();
+            transitions.push(transition);
+            transitions_by_target
+                .entry(transition.target)
+                .or_default()
+                .push(index);
+        }
+    }
+
+    fn resolve_transition(
+        output: OutputKey,
+        transitions: &[TextureTransition],
+        transition_for_output: &HashMap<OutputKey, usize>,
+        source_family: &HashMap<OutputKey, u32>,
+        colors: &mut HashMap<OutputKey, u8>,
+        resolved: &mut HashMap<OutputKey, ResolvedTransition>,
+    ) -> ResolvedTransition {
+        if let Some(&value) = resolved.get(&output) {
+            return value;
+        }
+        if colors.get(&output) == Some(&1) {
+            return ResolvedTransition::Cyclic;
+        }
+        colors.insert(output, 1);
+        let transition = transitions[transition_for_output[&output]];
+        let value = if let Some(&family) = source_family.get(&transition.target) {
+            ResolvedTransition::Resolved {
+                family,
+                version: 0,
+                target: transition.target,
+            }
+        } else if transition_for_output.contains_key(&transition.target) {
+            match resolve_transition(
+                transition.target,
+                transitions,
+                transition_for_output,
+                source_family,
+                colors,
+                resolved,
+            ) {
+                ResolvedTransition::Resolved {
+                    family, version, ..
+                } => ResolvedTransition::Resolved {
+                    family,
+                    version: version + 1,
+                    target: transition.target,
+                },
+                ResolvedTransition::Cyclic => ResolvedTransition::Cyclic,
+            }
+        } else {
+            ResolvedTransition::Cyclic
+        };
+        colors.insert(output, 2);
+        resolved.insert(output, value);
+        value
+    }
+
+    let transition_for_output: HashMap<_, _> = transitions
+        .iter()
+        .enumerate()
+        .map(|(index, transition)| (transition.output, index))
+        .collect();
+    let mut resolved = HashMap::new();
+    let mut colors = HashMap::new();
+    for transition in &transitions {
+        resolve_transition(
+            transition.output,
+            &transitions,
+            &transition_for_output,
+            &source_family,
+            &mut colors,
+            &mut resolved,
+        );
+    }
+    let mut version_of: HashMap<OutputKey, (u32, u32, u32)> = HashMap::new();
+    for transition in &transitions {
+        if let ResolvedTransition::Resolved {
+            family,
+            version,
+            target,
+        } = resolved[&transition.output]
+        {
+            let target_id = output_ids[&target];
+            version_of.insert(transition.output, (family, version, target_id));
+        }
+    }
+
+    let mut outgoing_edges = vec![Vec::new(); graph.nodes.len()];
+    for (index, edge) in edges.iter().enumerate() {
+        if live.contains(&edge.from_node) && live.contains(&edge.to_node) {
+            outgoing_edges[edge.from_node].push(index);
+        }
+    }
+    for outgoing in &mut outgoing_edges {
+        outgoing.sort_by_key(|&index| {
+            let edge = &edges[index];
+            (
+                edge.to_node,
+                edge.producer_output_ordinal,
+                edge.consumer_input_ordinal,
+            )
+        });
+    }
+
+    // Every texture reader must execute before a successor overwrites the
+    // physical allocation backing the older symbolic version.
+    let mut reachability = HashMap::new();
+    for (i, contract) in contracts.iter().enumerate() {
+        if !live.contains(&i) {
+            continue;
+        }
+        for input in contract
+            .inputs
+            .iter()
+            .filter(|input| matches!(input.role, InputRole::Present | InputRole::SampledTexture))
+        {
+            let key = bound[i][input.name].producer;
+            if !version_of.contains_key(&key) {
+                continue;
+            }
+            let Some(next_indices) = transitions_by_target.get(&key) else {
+                continue;
+            };
+            let [next_index] = next_indices.as_slice() else {
+                continue;
+            };
+            let next = transitions[*next_index];
+            if i != next.writer_node
+                && !reaches(
+                    i,
+                    next.writer_node,
+                    &outgoing_edges,
+                    &edges,
+                    &live,
+                    &mut reachability,
+                )
+            {
+                return Err(error(
+                    "GRAPH_RESOURCE_VERSION_INVALID",
+                    "older texture version may be read after its successor",
+                    format!("nodes[{i}].inputs.{}", input.name),
+                ));
+            }
+        }
+    }
+
+    // Same-pass hazards are global and precede every duplicate-writer diagnostic.
+    for i in 0..graph.nodes.len() {
+        if !live.contains(&i) {
+            continue;
+        }
+        if contracts[i].key == "legacy_forward" {
+            if bound[i]["colorTarget"].producer == bound[i]["depthTarget"].producer
+                || matches!((version_of.get(&OutputKey(i, 0)), version_of.get(&OutputKey(i, 1))), (Some((cf, _, _)), Some((df, _, _))) if cf == df)
+            {
+                return Err(error(
+                    "GRAPH_SAME_PASS_HAZARD",
+                    "color and depth use one texture family",
+                    format!("nodes[{i}].inputs"),
+                ));
+            }
+        } else if contracts[i]
+            .inputs
+            .iter()
+            .any(|input| matches!(input.role, InputRole::SampledTexture))
+        {
+            let hazard = contracts[i].inputs.iter().filter(|input| matches!(input.role, InputRole::SampledTexture)).any(|input| matches!((version_of.get(&bound[i][input.name].producer), version_of.get(&OutputKey(i, 0))), (Some((sf, _, _)), Some((tf, _, _))) if sf == tf));
+            if hazard {
+                return Err(error(
+                    "GRAPH_SAME_PASS_HAZARD",
+                    "copy source and target use one texture family",
+                    format!("nodes[{i}].inputs"),
+                ));
+            }
+        }
+    }
+    let mut first_writer = BTreeMap::new();
+    for transition in &transitions {
+        if first_writer
+            .insert(transition.target, transition.writer_node)
+            .is_some_and(|writer| writer != transition.writer_node)
+        {
+            return Err(error(
+                "GRAPH_DUPLICATE_WRITER",
+                "texture version has multiple writers",
+                format!(
+                    "nodes[{}].inputs.{}",
+                    transition.writer_node, transition.input_socket
+                ),
+            ));
+        }
+    }
+
+    // Materialize versions only after hazard and writer precedence has been settled.
+    for transition in &transitions {
+        if let Some(&(family, version, target)) = version_of.get(&transition.output) {
+            families[family as usize].versions.push(TextureVersion {
+                version,
+                resource: output_ids[&transition.output],
+                target,
+                initialized: true,
+                stored: true,
+                lifetime: Lifetime {
+                    first_use: 0,
+                    last_use: 0,
+                },
+            });
+        }
+    }
+    for family in &mut families {
+        family.versions.sort_by_key(|version| version.version);
+        for (index, version) in family.versions.iter().enumerate() {
+            if version.version != index as u32 {
+                return Err(error(
+                    "GRAPH_RESOURCE_VERSION_INVALID",
+                    "texture versions must form a dense linear chain",
+                    "resources",
+                ));
+            }
+        }
+    }
+
+    // Validate every independently resolved attachment before graph cycle reporting.
+    for i in 0..graph.nodes.len() {
+        if !live.contains(&i) || contracts[i].key != "legacy_forward" {
+            continue;
+        }
+        let (Some(&(cf, _, _)), Some(&(df, _, _))) = (
+            version_of.get(&OutputKey(i, 0)),
+            version_of.get(&OutputKey(i, 1)),
+        ) else {
+            continue;
+        };
+        let cd = match &families[cf as usize].source {
+            TextureFamilySource::AuthoredTexture { descriptor, .. } => Some(descriptor),
+            _ => None,
+        };
+        let dd = match &families[df as usize].source {
+            TextureFamilySource::AuthoredTexture { descriptor, .. } => descriptor,
+            _ => {
+                return Err(error(
+                    "GRAPH_ILLEGAL_ACCESS",
+                    "depth target must be authored",
+                    format!("nodes[{i}].inputs.depthTarget"),
                 ))
             }
         };
-        observable[pi] = contract.inherently_observable();
-        parameters.push(contract.normalize_parameters(&p.parameters).map_err(|m| {
-            GraphError::at(
-                "GRAPH_PARAMETERS_INVALID",
-                m,
-                format!("passes[{pi}].parameters"),
-            )
-        })?);
-        let mut names = HashSet::new();
-        let mut refs = HashSet::new();
-        let mut color_locations = HashSet::new();
-        for b in &p.reads {
-            if !identifier(&b.binding) {
-                return Err(fail(
-                    "GRAPH_INVALID_ID",
-                    "invalid binding",
-                    format!("passes[{pi}].reads"),
-                ));
-            }
-            if !names.insert(&b.binding) || !refs.insert(&b.resource) {
-                return Err(fail(
-                    "GRAPH_BINDING_INVALID",
-                    "duplicate binding or resource use",
-                    format!("passes[{pi}]"),
-                ));
-            }
+        let ok_depth = dd.dimension == TextureDimension::D2
+            && dd.format == TextureFormat::Depth32Float
+            && dd.sample_count == 1
+            && extent_layers(&dd.extent) == 1;
+        let ok_color = cd.is_none_or(|d| {
+            d.format != TextureFormat::Depth32Float
+                && d.dimension == dd.dimension
+                && d.extent == dd.extent
+                && d.sample_count == 1
+        });
+        let surface_ok = cd.is_some()
+            || matches!(&dd.extent,NormalizedTextureExtent::SurfaceRelative{width,height,..} if *width==Ratio{numerator:1,denominator:1}&&*height==Ratio{numerator:1,denominator:1});
+        if !ok_depth || !ok_color || !surface_ok {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "attachments are incompatible",
+                format!("nodes[{i}].inputs"),
+            ));
         }
-        for b in &p.writes {
-            if !identifier(&b.binding) {
-                return Err(fail(
-                    "GRAPH_INVALID_ID",
-                    "invalid binding",
-                    format!("passes[{pi}].writes"),
-                ));
-            }
-            if !names.insert(&b.binding) || !refs.insert(&b.resource) {
-                return Err(fail(
-                    "GRAPH_BINDING_INVALID",
-                    "duplicate binding or resource use",
-                    format!("passes[{pi}]"),
-                ));
-            }
-            if let WriteAccess::ColorAttachment { location, .. } = b.access {
-                if !color_locations.insert(location) {
-                    return Err(fail(
-                        "GRAPH_BINDING_INVALID",
-                        "duplicate color location",
-                        format!("passes[{pi}].writes"),
-                    ));
-                }
-            }
-        }
-        contract
-            .validate_bindings(p, &map)
-            .map_err(|m| GraphError::at("GRAPH_BINDING_INVALID", m, format!("passes[{pi}]")))?;
     }
 
-    let mut writer: HashMap<ResourceRef, usize> = HashMap::new();
-    for (pi, pass) in g.passes.iter().enumerate() {
-        if pass.state != PassState::Enabled {
+    for i in 0..graph.nodes.len() {
+        if !live.contains(&i)
+            || !contracts[i]
+                .inputs
+                .iter()
+                .any(|input| matches!(input.role, InputRole::SampledTexture))
+        {
             continue;
         }
-        for binding in &pass.writes {
-            if writer.insert(binding.resource.clone(), pi).is_some() {
-                return Err(fail(
-                    "GRAPH_DUPLICATE_WRITER",
-                    "resource has multiple enabled writers",
-                    format!("passes[{pi}]"),
-                ));
+        let source_key = bound[i]["source"].producer;
+        let Some(&(source_family_id, _, _)) = version_of.get(&source_key) else {
+            return Err(error(
+                "GRAPH_UNINITIALIZED_RESOURCE",
+                "copy source is not produced",
+                format!("nodes[{i}].inputs.source"),
+            ));
+        };
+        let Some(&(target_family_id, _, _)) = version_of.get(&OutputKey(i, 0)) else {
+            continue;
+        };
+        let source_descriptor = match &families[source_family_id as usize].source {
+            TextureFamilySource::AuthoredTexture { descriptor, .. } => descriptor,
+            TextureFamilySource::ImportedSurface { .. } => {
+                return Err(error(
+                    "GRAPH_ILLEGAL_ACCESS",
+                    "copy source must be an authored texture",
+                    format!("nodes[{i}].inputs.source"),
+                ))
             }
+        };
+        let source_ok = source_descriptor.format == TextureFormat::Rgba16Float
+            && is_single_view_d2(source_descriptor);
+        let target_descriptor = match &families[target_family_id as usize].source {
+            TextureFamilySource::AuthoredTexture { descriptor, .. } => Some(descriptor),
+            TextureFamilySource::ImportedSurface { .. } => None,
+        };
+        let authored_target_ok = target_descriptor.is_some_and(|descriptor| {
+            descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
+        });
+        let bloom_input_ok = if contracts[i].key == "bloom_composite" {
+            let bloom_key = bound[i]["bloom"].producer;
+            let Some(&(bloom_family_id, _, _)) = version_of.get(&bloom_key) else {
+                return Err(error(
+                    "GRAPH_UNINITIALIZED_RESOURCE",
+                    "bloom source is not produced",
+                    format!("nodes[{i}].inputs.bloom"),
+                ));
+            };
+            match &families[bloom_family_id as usize].source {
+                TextureFamilySource::AuthoredTexture { descriptor, .. } => {
+                    descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
+                }
+                TextureFamilySource::ImportedSurface { .. } => {
+                    return Err(error(
+                        "GRAPH_ILLEGAL_ACCESS",
+                        "bloom source must be an authored texture",
+                        format!("nodes[{i}].inputs.bloom"),
+                    ))
+                }
+            }
+        } else {
+            true
+        };
+        let source_is_full_surface = matches!(&source_descriptor.extent, NormalizedTextureExtent::SurfaceRelative { width, height, depth_or_array_layers: 1 } if *width == Ratio { numerator:1, denominator:1 } && *height == Ratio { numerator:1, denominator:1 });
+        let target_matches_source = target_descriptor
+            .is_some_and(|descriptor| descriptor.extent == source_descriptor.extent);
+        let descriptor_ok = match contracts[i].key {
+            "fullscreen_copy" => {
+                target_descriptor.is_none() && source_is_full_surface
+                    || target_descriptor.is_some_and(|descriptor| {
+                        descriptor.format != TextureFormat::Depth32Float
+                            && is_single_view_d2(descriptor)
+                            && descriptor.extent == source_descriptor.extent
+                    })
+            }
+            "tone_map" => target_descriptor.is_none() && source_is_full_surface,
+            "bloom_extract" => authored_target_ok,
+            "bloom_blur" | "luminance_edge" => authored_target_ok && target_matches_source,
+            "bloom_composite" => authored_target_ok && target_matches_source && bloom_input_ok,
+            _ => false,
+        };
+        if !source_ok || !descriptor_ok {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "fullscreen textures are incompatible",
+                format!("nodes[{i}].inputs"),
+            ));
         }
     }
 
-    for (pi, p) in g.passes.iter().enumerate() {
-        for b in &p.reads {
-            let r = map[&b.resource];
-            if (r.texture.format.depth() && matches!(b.access, ReadAccess::Storage))
-                || (matches!(b.access, ReadAccess::Storage)
-                    && !matches!(
-                        r.texture.format,
-                        Format::Rgba8Unorm | Format::Rgba16Float | Format::R32Float
-                    ))
-                || (r.texture.format == Format::Surface && !matches!(b.access, ReadAccess::CopySrc))
-            {
-                return Err(fail(
-                    "GRAPH_ILLEGAL_ACCESS",
-                    "format/access mismatch",
-                    format!("passes[{pi}].reads"),
+    // Initialization and presentation legality are later than attachment compatibility.
+    for (i, contract) in contracts.iter().enumerate() {
+        if !live.contains(&i) || contract.key != "present" {
+            continue;
+        }
+        let key = bound[i]["surface"].producer;
+        let Some(&(family, _, _)) = version_of.get(&key) else {
+            if !matches!(resolved.get(&key), Some(ResolvedTransition::Cyclic)) {
+                return Err(error(
+                    "GRAPH_UNINITIALIZED_RESOURCE",
+                    "present source is not produced",
+                    format!("nodes[{i}].inputs.surface"),
                 ));
+            }
+            continue;
+        };
+        if !matches!(
+            families[family as usize].source,
+            TextureFamilySource::ImportedSurface { .. }
+        ) {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "offscreen textures cannot be presented",
+                format!("nodes[{i}].inputs.surface"),
+            ));
+        }
+    }
+
+    // Stable Kahn scheduling is deliberately after resource and access validation.
+    let mut indegree = vec![0; graph.nodes.len()];
+    for &node in &live {
+        indegree[node] = edges
+            .iter()
+            .filter(|edge| edge.to_node == node && live.contains(&edge.from_node))
+            .count();
+    }
+    let mut queue = BinaryHeap::new();
+    for &node in &live {
+        if indegree[node] == 0 {
+            queue.push(Reverse(node));
+        }
+    }
+    let mut order = Vec::new();
+    while let Some(Reverse(node)) = queue.pop() {
+        order.push(node);
+        for &edge_index in &outgoing_edges[node] {
+            let consumer = edges[edge_index].to_node;
+            indegree[consumer] -= 1;
+            if indegree[consumer] == 0 {
+                queue.push(Reverse(consumer));
             }
         }
-        let mut attachment_descriptor: Option<&TextureDescriptor> = None;
-        for b in &p.writes {
-            let r = map[&b.resource];
-            let depth = r.texture.format.depth();
-            let is_attachment = matches!(
-                b.access,
-                WriteAccess::ColorAttachment { .. } | WriteAccess::DepthAttachment { .. }
-            );
-            if (matches!(b.access, WriteAccess::DepthAttachment { .. }) && !depth)
-                || (matches!(b.access, WriteAccess::ColorAttachment { .. }) && depth)
-                || (matches!(b.access, WriteAccess::Storage) && depth)
-                || (matches!(b.access, WriteAccess::Storage)
-                    && !matches!(
-                        r.texture.format,
-                        Format::Rgba8Unorm | Format::Rgba16Float | Format::R32Float
-                    ))
-                || (is_attachment && r.texture.dimension != Dimension::D2)
-            {
-                return Err(fail(
-                    "GRAPH_ILLEGAL_ACCESS",
-                    "format/access mismatch",
-                    format!("passes[{pi}].writes"),
-                ));
+    }
+    if order.len() != live.len() {
+        let residual: Vec<_> = (0..graph.nodes.len())
+            .map(|node| live.contains(&node) && indegree[node] != 0)
+            .collect();
+        fn cycle_dfs(
+            node: usize,
+            outgoing_edges: &[Vec<usize>],
+            edges: &[DependencyEdge],
+            residual: &[bool],
+            colors: &mut [u8],
+            node_stack: &mut Vec<usize>,
+            edge_stack: &mut Vec<usize>,
+        ) -> Option<Vec<usize>> {
+            colors[node] = 1;
+            node_stack.push(node);
+            for &edge_index in &outgoing_edges[node] {
+                let to = edges[edge_index].to_node;
+                if !residual[to] {
+                    continue;
+                }
+                if colors[to] == 0 {
+                    edge_stack.push(edge_index);
+                    if let Some(cycle) = cycle_dfs(
+                        to,
+                        outgoing_edges,
+                        edges,
+                        residual,
+                        colors,
+                        node_stack,
+                        edge_stack,
+                    ) {
+                        return Some(cycle);
+                    }
+                    edge_stack.pop();
+                } else if colors[to] == 1 {
+                    let position = node_stack
+                        .iter()
+                        .position(|&stacked| stacked == to)
+                        .unwrap();
+                    let mut cycle = edge_stack[position..].to_vec();
+                    cycle.push(edge_index);
+                    return Some(cycle);
+                }
             }
-            if is_attachment {
-                if let Some(first) = attachment_descriptor {
-                    if first.dimension != r.texture.dimension
-                        || first.extent != r.texture.extent
-                        || first.sample_count != r.texture.sample_count
-                    {
-                        return Err(fail(
-                            "GRAPH_ILLEGAL_ACCESS",
-                            "attachments must have matching dimensions, extents, and sample counts",
-                            format!("passes[{pi}].writes"),
-                        ));
+            node_stack.pop();
+            colors[node] = 2;
+            None
+        }
+        let mut colors = vec![0; graph.nodes.len()];
+        let mut cycle = None;
+        for node in 0..graph.nodes.len() {
+            if residual[node] && colors[node] == 0 {
+                cycle = cycle_dfs(
+                    node,
+                    &outgoing_edges,
+                    &edges,
+                    &residual,
+                    &mut colors,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                );
+                if cycle.is_some() {
+                    break;
+                }
+            }
+        }
+        let mut graph_error = GraphError::new("GRAPH_CYCLE", "live graph contains a cycle");
+        let payload: Vec<_> = cycle
+            .unwrap_or_default()
+            .into_iter()
+            .map(|index| {
+                let edge = &edges[index];
+                serde_json::json!({
+                    "fromNode": graph.nodes[edge.from_node].id,
+                    "fromSocket": edge.from_socket,
+                    "toNode": graph.nodes[edge.to_node].id,
+                    "toSocket": edge.to_socket,
+                    "resource": edge.resource,
+                })
+            })
+            .collect();
+        graph_error.details =
+            serde_json::json!({"message":graph_error.message,"kind":"cycle","edges":payload});
+        return Err(graph_error);
+    }
+    if transitions
+        .iter()
+        .any(|transition| matches!(resolved[&transition.output], ResolvedTransition::Cyclic))
+    {
+        return Err(error(
+            "GRAPH_RESOURCE_VERSION_INVALID",
+            "texture predecessor is unresolved in an acyclic graph",
+            "resources",
+        ));
+    }
+
+    let mut resources = Vec::new();
+    for (i, o, out) in resource_meta {
+        let key = OutputKey(i, o);
+        let id = output_ids[&key];
+        let scene = || output_ids[&root(bound[i]["scene"].producer, &bound, &contracts).unwrap()];
+        let plan = match out.semantic_type {
+            SemanticType::SurfaceTarget => ResourcePlan::SurfaceTarget {
+                family: source_family[&key],
+            },
+            SemanticType::TextureSpec => {
+                if let NormalizedParameters::TextureSpec { residency, texture } = &params[i] {
+                    ResourcePlan::TextureSpec {
+                        family: source_family[&key],
+                        residency: *residency,
+                        descriptor: texture.clone(),
                     }
                 } else {
-                    attachment_descriptor = Some(&r.texture);
+                    unreachable!()
                 }
             }
-            match &b.access {
-                WriteAccess::ColorAttachment { load, .. } => {
-                    if let ColorLoad::Clear { value } = load {
-                        if value.iter().any(|x| !x.is_finite()) {
-                            return Err(fail(
-                                "GRAPH_ILLEGAL_ACCESS",
-                                "clear values must be finite",
-                                format!("passes[{pi}]"),
-                            ));
-                        }
+            SemanticType::Texture => {
+                let (f, v, t) = version_of[&key];
+                ResourcePlan::Texture {
+                    family: f,
+                    version: v,
+                    target: t,
+                    initialized: true,
+                    stored: true,
+                    allocation: None,
+                }
+            }
+            SemanticType::SceneTable => ResourcePlan::SceneTable,
+            SemanticType::LocalAabbBuffer => ResourcePlan::LocalAabbBuffer { scene: scene() },
+            SemanticType::CameraFrustum => ResourcePlan::CameraFrustum,
+            SemanticType::BooleanFlagBuffer => {
+                if let OutputMetadata::BooleanFlag { flag } = out.metadata {
+                    ResourcePlan::BooleanFlagBuffer {
+                        scene: scene(),
+                        flag,
+                    }
+                } else {
+                    unreachable!()
+                }
+            }
+            SemanticType::DrawStream => ResourcePlan::DrawStream { scene: scene() },
+            SemanticType::DepthStencilConfig => {
+                if let NormalizedParameters::DepthStencilConfig { config } = &params[i] {
+                    ResourcePlan::DepthStencilConfig { config: *config }
+                } else {
+                    unreachable!()
+                }
+            }
+        };
+        resources.push(CompiledResource {
+            original_node_index: i as u32,
+            output_ordinal: o,
+            origin: NodeOutputRef {
+                node: graph.nodes[i].id.clone(),
+                socket: out.name.into(),
+            },
+            semantic_type: out.semantic_type,
+            producer_execution: None,
+            lifetime: None,
+            plan,
+        });
+        let _ = id;
+    }
+    let mut executions = Vec::new();
+    let mut node_execution = HashMap::new();
+    for &i in &order {
+        if contracts[i].execution == ExecutionClass::Source {
+            continue;
+        }
+        let ordinal = executions.len() as u32;
+        node_execution.insert(i, ordinal);
+        let input_resource = |s: &str| output_ids[&bound[i][s].producer];
+        let mut inputs = Vec::new();
+        for s in contracts[i].inputs {
+            if let Some(b) = bound[i].get(s.name).filter(|b| b.active) {
+                inputs.push(CompiledSocketInput {
+                    socket: s.name.into(),
+                    resource: output_ids[&b.producer],
+                });
+            }
+        }
+        let outputs: Vec<_> = contracts[i]
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(o, s)| CompiledSocketOutput {
+                socket: s.name.into(),
+                resource: output_ids[&OutputKey(i, o as u16)],
+            })
+            .collect();
+        let mut accesses = Vec::new();
+        let kind = match contracts[i].key {
+            "frustum_cull" => {
+                for (s, m) in [
+                    ("scene", AccessMode::StorageRead),
+                    ("localAabbs", AccessMode::StorageRead),
+                    ("frustum", AccessMode::UniformRead),
+                ] {
+                    accesses.push(CompiledAccess {
+                        socket: s.into(),
+                        resource: input_resource(s),
+                        mode: m,
+                    });
+                }
+                let r = output_ids[&OutputKey(i, 0)];
+                accesses.push(CompiledAccess {
+                    socket: "flags".into(),
+                    resource: r,
+                    mode: AccessMode::StorageWrite {
+                        full_overwrite: true,
+                    },
+                });
+                ExecutionKind::Compute {
+                    work: ComputeWork::FrustumCull,
+                }
+            }
+            "mesh_query" => {
+                for s in ["scene", "isVisible", "isFrustumCulled"] {
+                    if let Some(b) = bound[i].get(s).filter(|b| b.active) {
+                        accesses.push(CompiledAccess {
+                            socket: s.into(),
+                            resource: output_ids[&b.producer],
+                            mode: AccessMode::StorageRead,
+                        });
                     }
                 }
-                WriteAccess::DepthAttachment { load, .. } => {
-                    if let DepthLoad::Clear { value } = load {
-                        if !value.is_finite() || !(0.0..=1.0).contains(value) {
-                            return Err(fail(
-                                "GRAPH_ILLEGAL_ACCESS",
-                                "depth clear must be finite and in [0,1]",
-                                format!("passes[{pi}]"),
-                            ));
-                        }
-                    }
+                accesses.push(CompiledAccess {
+                    socket: "draws".into(),
+                    resource: output_ids[&OutputKey(i, 0)],
+                    mode: AccessMode::StorageWrite {
+                        full_overwrite: true,
+                    },
+                });
+                ExecutionKind::Compute {
+                    work: ComputeWork::MeshQuery,
+                }
+            }
+            "legacy_forward" => {
+                let color = output_ids[&OutputKey(i, 0)];
+                let depth = output_ids[&OutputKey(i, 1)];
+                let clear = match params[i] {
+                    NormalizedParameters::LegacyForward { clear_color } => clear_color,
+                    _ => unreachable!(),
+                };
+                let config_node = bound[i]["depthStencil"].producer.0;
+                let dc = match params[config_node] {
+                    NormalizedParameters::DepthStencilConfig { config } => config,
+                    _ => unreachable!(),
+                };
+                let cl = NormalizedColorLoad::Clear { value: clear };
+                let dl = NormalizedDepthLoad::Clear {
+                    value: dc.clear_depth,
+                };
+                for s in ["scene", "draws"] {
+                    accesses.push(CompiledAccess {
+                        socket: s.into(),
+                        resource: input_resource(s),
+                        mode: if s == "draws" {
+                            AccessMode::IndirectRead
+                        } else {
+                            AccessMode::SemanticRead
+                        },
+                    });
+                }
+                accesses.push(CompiledAccess {
+                    socket: "color".into(),
+                    resource: color,
+                    mode: AccessMode::ColorAttachment {
+                        location: 0,
+                        load: cl,
+                        store: StoreOp::Store,
+                        full_overwrite: true,
+                    },
+                });
+                accesses.push(CompiledAccess {
+                    socket: "depth".into(),
+                    resource: depth,
+                    mode: AccessMode::DepthAttachment {
+                        load: dl,
+                        store: StoreOp::Store,
+                        full_overwrite: true,
+                    },
+                });
+                ExecutionKind::Render {
+                    color_attachments: vec![ColorAttachmentPlan {
+                        resource: color,
+                        location: 0,
+                        load: cl,
+                        store: StoreOp::Store,
+                    }],
+                    depth_stencil: Some(DepthStencilAttachmentPlan {
+                        resource: depth,
+                        load: dl,
+                        store: StoreOp::Store,
+                    }),
+                }
+            }
+            "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur" | "bloom_composite"
+            | "luminance_edge" => {
+                let color = output_ids[&OutputKey(i, 0)];
+                let load = NormalizedColorLoad::Clear {
+                    value: [0.0, 0.0, 0.0, 0.0],
+                };
+                accesses.push(CompiledAccess {
+                    socket: "source".into(),
+                    resource: input_resource("source"),
+                    mode: AccessMode::SampledTexture,
+                });
+                if contracts[i].key == "bloom_composite" {
+                    accesses.push(CompiledAccess {
+                        socket: "bloom".into(),
+                        resource: input_resource("bloom"),
+                        mode: AccessMode::SampledTexture,
+                    });
+                }
+                accesses.push(CompiledAccess {
+                    socket: "color".into(),
+                    resource: color,
+                    mode: AccessMode::ColorAttachment {
+                        location: 0,
+                        load,
+                        store: StoreOp::Store,
+                        full_overwrite: true,
+                    },
+                });
+                ExecutionKind::Render {
+                    color_attachments: vec![ColorAttachmentPlan {
+                        resource: color,
+                        location: 0,
+                        load,
+                        store: StoreOp::Store,
+                    }],
+                    depth_stencil: None,
+                }
+            }
+            "present" => {
+                let r = input_resource("surface");
+                accesses.push(CompiledAccess {
+                    socket: "surface".into(),
+                    resource: r,
+                    mode: AccessMode::Present,
+                });
+                ExecutionKind::Present { surface: r }
+            }
+            _ => unreachable!(),
+        };
+        executions.push(CompiledExecution {
+            id: graph.nodes[i].id.clone(),
+            original_node_index: i as u32,
+            executor: graph.nodes[i].executor.clone(),
+            parameters: params[i].clone(),
+            kind,
+            inputs,
+            outputs,
+            accesses,
+        });
+    }
+    for (ordinal, e) in executions.iter().enumerate() {
+        for o in &e.outputs {
+            resources[o.resource as usize].producer_execution = Some(ordinal as u32);
+        }
+    }
+    // Dense lifetimes touch bindings, outputs, and accesses.
+    for (ordinal, e) in executions.iter().enumerate() {
+        let ordinal = ordinal as u32;
+        let mut touched = BTreeSet::new();
+        for x in &e.inputs {
+            touched.insert(x.resource);
+        }
+        for x in &e.outputs {
+            touched.insert(x.resource);
+        }
+        for x in &e.accesses {
+            touched.insert(x.resource);
+        }
+        for r in touched {
+            let life = resources[r as usize].lifetime.get_or_insert(Lifetime {
+                first_use: ordinal,
+                last_use: ordinal,
+            });
+            life.first_use = life.first_use.min(ordinal);
+            life.last_use = life.last_use.max(ordinal);
+        }
+    }
+    for f in &mut families {
+        let mut first = None;
+        let mut last = 0;
+        for v in &mut f.versions {
+            v.lifetime = resources[v.resource as usize].lifetime.unwrap();
+            first = Some(first.map_or(v.lifetime.first_use, |x: u32| x.min(v.lifetime.first_use)));
+            last = last.max(v.lifetime.last_use);
+        }
+        f.lifetime = Lifetime {
+            first_use: first.unwrap_or(0),
+            last_use: last,
+        };
+        f.usage = texture_usage(f, &executions);
+        f.aliasable = matches!(
+            f.source,
+            TextureFamilySource::AuthoredTexture {
+                residency: TextureResidency::Transient,
+                ..
+            }
+        ) && f.versions.iter().all(|v| v.initialized);
+    }
+    let (classes, transient) = allocate(&mut families, &mut resources);
+    if resources.len() > 1024 {
+        return Err(error(
+            "GRAPH_LIMIT_EXCEEDED",
+            "too many final resources",
+            "resources",
+        ));
+    }
+    Ok(CompiledGraph {
+        schema_version: 2,
+        graph_id: graph.graph_id,
+        revision: graph.revision,
+        node_count: graph.nodes.len() as u32,
+        resources,
+        executions,
+        texture_families: families,
+        allocation_classes: classes,
+        culled_node_count: (graph.nodes.len() - live.len()) as u32,
+        culled_resource_count: (all_outputs - output_ids.len()) as u32,
+        transient_slot_count: transient,
+    })
+}
+
+fn extent_layers(e: &NormalizedTextureExtent) -> u32 {
+    match e {
+        NormalizedTextureExtent::Absolute {
+            depth_or_array_layers,
+            ..
+        }
+        | NormalizedTextureExtent::SurfaceRelative {
+            depth_or_array_layers,
+            ..
+        } => *depth_or_array_layers,
+    }
+}
+fn is_single_view_d2(descriptor: &NormalizedTextureDescriptor) -> bool {
+    descriptor.dimension == TextureDimension::D2
+        && descriptor.sample_count == 1
+        && descriptor.mip_level_count == 1
+        && extent_layers(&descriptor.extent) == 1
+}
+fn texture_usage(f: &TextureFamily, executions: &[CompiledExecution]) -> Vec<TextureUsage> {
+    let rs: HashSet<_> = f.versions.iter().map(|v| v.resource).collect();
+    let mut u = BTreeSet::new();
+    for e in executions {
+        for a in &e.accesses {
+            if !rs.contains(&a.resource) {
+                continue;
+            }
+            match a.mode {
+                AccessMode::SampledTexture => {
+                    u.insert(TextureUsage::Sampled);
+                }
+                AccessMode::StorageRead | AccessMode::StorageWrite { .. } => {
+                    u.insert(TextureUsage::Storage);
+                }
+                AccessMode::ColorAttachment { .. } => {
+                    u.insert(TextureUsage::ColorAttachment);
+                }
+                AccessMode::DepthAttachment { .. } => {
+                    u.insert(TextureUsage::DepthAttachment);
                 }
                 _ => {}
             }
         }
     }
-    let mut roots = Vec::new();
-    for (i, o) in g.outputs.iter().enumerate() {
-        let Some(r) = map.get(&o.resource) else {
-            return Err(fail(
-                "GRAPH_UNKNOWN_RESOURCE",
-                "unknown output resource",
-                format!("outputs[{i}]"),
-            ));
-        };
-        if writer.get(&o.resource).is_none() {
-            return Err(fail(
-                "GRAPH_UNINITIALIZED_RESOURCE",
-                if matches!(r.residency, Residency::Transient) {
-                    "transient output is uninitialized"
-                } else {
-                    "external output requires a live writer"
-                },
-                format!("outputs[{i}]"),
-            ));
-        }
-        roots.push(o.resource.clone())
-    }
-    for (pi, p) in g.passes.iter().enumerate() {
-        if p.state == PassState::Enabled {
-            for b in &p.reads {
-                if matches!(map[&b.resource].residency, Residency::Transient)
-                    && !writer.contains_key(&b.resource)
-                {
-                    return Err(fail(
-                        "GRAPH_UNINITIALIZED_RESOURCE",
-                        "transient read is uninitialized",
-                        format!("passes[{pi}]"),
-                    ));
-                }
-            }
-        }
-    }
-    for (pi, pass) in g.passes.iter().enumerate() {
-        for binding in &pass.writes {
-            if matches!(map[&binding.resource].residency, Residency::Transient)
-                && matches!(
-                    binding.access,
-                    WriteAccess::ColorAttachment {
-                        load: ColorLoad::Load,
-                        ..
-                    } | WriteAccess::DepthAttachment {
-                        load: DepthLoad::Load,
-                        ..
-                    }
-                )
-            {
-                return Err(fail(
-                    "GRAPH_ILLEGAL_ACCESS",
-                    "transient attachment load is illegal",
-                    format!("passes[{pi}]"),
-                ));
-            }
-        }
-    }
-    let mut live: Vec<bool> = observable
-        .iter()
-        .enumerate()
-        .map(|(i, x)| *x && g.passes[i].state == PassState::Enabled)
-        .collect();
-    let mut stack = roots.clone();
-    for (i, is_live) in live.iter().enumerate() {
-        if *is_live {
-            stack.extend(g.passes[i].reads.iter().map(|b| b.resource.clone()));
-        }
-    }
-    while let Some(r) = stack.pop() {
-        if let Some(&p) = writer.get(&r) {
-            if !live[p] {
-                live[p] = true;
-                stack.extend(g.passes[p].reads.iter().map(|b| b.resource.clone()))
-            }
-        }
-    }
-    let resource_indices: HashMap<ResourceRef, usize> = g
-        .resources
-        .iter()
-        .enumerate()
-        .map(|(index, resource)| {
-            (
-                ResourceRef {
-                    id: resource.id.clone(),
-                    version: resource.version,
-                },
-                index,
-            )
-        })
-        .collect();
-    let mut edges = vec![Vec::<(usize, usize, ResourceRef)>::new(); g.passes.len()];
-    let mut indeg = vec![0u32; g.passes.len()];
-    for (b, p) in g.passes.iter().enumerate() {
-        if live[b] {
-            for u in &p.reads {
-                if let Some(&a) = writer.get(&u.resource) {
-                    if live[a] {
-                        edges[a].push((b, resource_indices[&u.resource], u.resource.clone()));
-                        indeg[b] += 1
-                    }
-                }
-            }
-        }
-    }
-    for e in &mut edges {
-        e.sort_by_key(|edge| (edge.0, edge.1))
-    }
-    let mut q = BinaryHeap::new();
-    for i in 0..g.passes.len() {
-        if live[i] && indeg[i] == 0 {
-            q.push(Reverse(i))
-        }
-    }
-    let mut order = Vec::new();
-    while let Some(Reverse(a)) = q.pop() {
-        order.push(a);
-        for (b, _, _) in &edges[a] {
-            indeg[*b] -= 1;
-            if indeg[*b] == 0 {
-                q.push(Reverse(*b))
-            }
-        }
-    }
-    if order.len() != live.iter().filter(|x| **x).count() {
-        fn visit(
-            node: usize,
-            edges: &[Vec<(usize, usize, ResourceRef)>],
-            residual: &[bool],
-            colors: &mut [u8],
-            stack: &mut Vec<usize>,
-            incoming: &mut Vec<ResourceRef>,
-        ) -> Option<(Vec<usize>, Vec<ResourceRef>)> {
-            colors[node] = 1;
-            stack.push(node);
-            for (next, _, resource) in &edges[node] {
-                if !residual[*next] {
-                    continue;
-                }
-                if colors[*next] == 0 {
-                    incoming.push(resource.clone());
-                    if let Some(cycle) = visit(*next, edges, residual, colors, stack, incoming) {
-                        return Some(cycle);
-                    }
-                    incoming.pop();
-                } else if colors[*next] == 1 {
-                    let start = stack.iter().position(|pass| pass == next)?;
-                    let mut resources = incoming[start..].to_vec();
-                    resources.push(resource.clone());
-                    return Some((stack[start..].to_vec(), resources));
-                }
-            }
-            stack.pop();
-            colors[node] = 2;
-            None
-        }
-        let residual: Vec<bool> = (0..g.passes.len())
-            .map(|i| live[i] && indeg[i] > 0)
-            .collect();
-        let mut colors = vec![0; g.passes.len()];
-        let mut stack = Vec::new();
-        let mut incoming = Vec::new();
-        let mut found = None;
-        for node in 0..g.passes.len() {
-            if residual[node] && colors[node] == 0 {
-                found = visit(
-                    node,
-                    &edges,
-                    &residual,
-                    &mut colors,
-                    &mut stack,
-                    &mut incoming,
-                );
-                if found.is_some() {
-                    break;
-                }
-            }
-        }
-        let (cycle_passes, cycle_resources) = found.unwrap_or_default();
-        let cycle_edges: Vec<_> = cycle_resources.iter().enumerate().map(|(i, r)| serde_json::json!({"from":g.passes[cycle_passes[i]].id,"resource":r,"to":g.passes[cycle_passes[(i+1)%cycle_passes.len()]].id})).collect();
-        return Err(GraphError {
-            code: "GRAPH_CYCLE",
-            message: "live graph contains a cycle".into(),
-            details: serde_json::json!({"message":"live graph contains a cycle","kind":"cycle","edges":cycle_edges}),
-        });
-    }
-    let pos: HashMap<usize, u32> = order
-        .iter()
-        .enumerate()
-        .map(|(i, p)| u32::try_from(i).map(|i| (*p, i)))
-        .collect::<Result<_, _>>()
-        .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "pass index overflow"))?;
-    let boundary = u32::try_from(order.len())
-        .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "pass index overflow"))?;
-    let output_refs: HashSet<_> = roots.into_iter().collect();
-    let mut resources = Vec::new();
-    let mut keys = Vec::new();
-    for (ri, r) in g.resources.iter().enumerate() {
-        let rr = ResourceRef {
-            id: r.id.clone(),
-            version: r.version,
-        };
-        let mut points = Vec::new();
-        let mut usage = BTreeSet::new();
-        for (pi, p) in g.passes.iter().enumerate() {
-            if let Some(&x) = pos.get(&pi) {
-                for b in &p.reads {
-                    if b.resource == rr {
-                        points.push(x);
-                        usage.insert(usage_read(b.access));
-                    }
-                }
-                for b in &p.writes {
-                    if b.resource == rr {
-                        points.push(x);
-                        usage.insert(usage_write(&b.access));
-                    }
-                }
-            }
-        }
-        if output_refs.contains(&rr) {
-            points.push(boundary)
-        }
-        if points.is_empty() {
-            continue;
-        }
-        let key = TextureAllocationKey {
-            descriptor: norm(r.texture.clone()),
-            usage: usage.into_iter().collect(),
-            view_formats: vec![],
-        };
-        keys.push(if matches!(r.residency, Residency::Transient) {
-            Some(key)
-        } else {
-            None
-        });
-        resources.push(CompiledResource {
-            original_index: u32::try_from(ri)
-                .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "resource index overflow"))?,
-            resource_ref: rr.clone(),
-            residency: r.residency.clone(),
-            descriptor: norm(r.texture.clone()),
-            writer: writer.get(&rr).and_then(|p| pos.get(p)).copied(),
-            lifetime: Lifetime {
-                first_use: *points.iter().min().unwrap(),
-                last_use: *points.iter().max().unwrap(),
-            },
-            allocation: None,
-        })
-    }
-    let resource_remap: HashMap<ResourceRef, u32> = resources
-        .iter()
-        .enumerate()
-        .map(|(i, r)| u32::try_from(i).map(|i| (r.resource_ref.clone(), i)))
-        .collect::<Result<_, _>>()
-        .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "resource index overflow"))?;
-    let mut groups: BTreeMap<TextureAllocationKey, Vec<usize>> = BTreeMap::new();
-    for (i, k) in keys.into_iter().enumerate() {
-        if let Some(k) = k {
-            groups.entry(k).or_default().push(i)
+    u.into_iter().collect()
+}
+fn allocate(
+    families: &mut [TextureFamily],
+    resources: &mut [CompiledResource],
+) -> (Vec<AllocationClass>, u32) {
+    let mut grouped: BTreeMap<TextureCompatibilityKey, Vec<usize>> = BTreeMap::new();
+    for (i, f) in families.iter().enumerate() {
+        if let TextureFamilySource::AuthoredTexture { descriptor, .. } = &f.source {
+            grouped
+                .entry(TextureCompatibilityKey {
+                    dimension: descriptor.dimension,
+                    format: descriptor.format,
+                    extent: descriptor.extent.clone(),
+                    mip_level_count: descriptor.mip_level_count,
+                    sample_count: descriptor.sample_count,
+                    view_formats: descriptor.view_formats.clone(),
+                })
+                .or_default()
+                .push(i);
         }
     }
     let mut classes = Vec::new();
-    let mut next = 0u32;
-    for (class_index, (k, mut ix)) in groups.into_iter().enumerate() {
-        ix.sort_by_key(|i| {
+    let mut transient = 0;
+    for (key, ids) in grouped {
+        let class = classes.len() as u32;
+        let mut slots: Vec<AllocationSlot> = Vec::new();
+        let mut aliasable = Vec::new();
+        let mut dedicated = Vec::new();
+        let mut persistent_ids = Vec::new();
+        for fi in ids {
+            let persistent = matches!(
+                families[fi].source,
+                TextureFamilySource::AuthoredTexture {
+                    residency: TextureResidency::Persistent,
+                    ..
+                }
+            );
+            let alias = families[fi].aliasable && !persistent;
+            if persistent {
+                persistent_ids.push(fi);
+            } else if alias {
+                aliasable.push(fi);
+            } else {
+                dedicated.push(fi);
+            }
+        }
+        aliasable.sort_by_key(|&fi| {
             (
-                resources[*i].lifetime.first_use,
-                resources[*i].lifetime.last_use,
-                resources[*i].original_index,
+                families[fi].lifetime.first_use,
+                families[fi].lifetime.last_use,
+                families[fi].key.clone(),
             )
         });
-        let mut active = BinaryHeap::<Reverse<(u32, u32)>>::new();
-        let mut free = BinaryHeap::<Reverse<u32>>::new();
-        let mut count = 0;
-        for i in ix {
-            while let Some(Reverse((last, slot))) = active.peek().copied() {
-                if last < resources[i].lifetime.first_use {
-                    active.pop();
-                    free.push(Reverse(slot))
-                } else {
-                    break;
+        dedicated.sort_by_key(|&fi| families[fi].key.clone());
+        persistent_ids.sort_by_key(|&fi| families[fi].key.clone());
+        for fi in aliasable.into_iter().chain(dedicated).chain(persistent_ids) {
+            let persistent = matches!(
+                families[fi].source,
+                TextureFamilySource::AuthoredTexture {
+                    residency: TextureResidency::Persistent,
+                    ..
+                }
+            );
+            let alias = families[fi].aliasable && !persistent;
+            let found = if alias {
+                slots.iter().position(|s| {
+                    s.kind == AllocationKind::AliasedTransient
+                        && s.occupants.iter().all(|&old| {
+                            families[old as usize].lifetime.last_use
+                                < families[fi].lifetime.first_use
+                        })
+                })
+            } else {
+                None
+            };
+            let slot = found.unwrap_or_else(|| {
+                let s = slots.len();
+                if !persistent {
+                    transient += 1;
+                }
+                slots.push(AllocationSlot {
+                    kind: if persistent {
+                        AllocationKind::Persistent
+                    } else if alias {
+                        AllocationKind::AliasedTransient
+                    } else {
+                        AllocationKind::DedicatedTransient
+                    },
+                    usage: Vec::new(),
+                    occupants: Vec::new(),
+                });
+                s
+            });
+            slots[slot].occupants.push(fi as u32);
+            slots[slot].usage.extend(families[fi].usage.iter().copied());
+            slots[slot].usage.sort();
+            slots[slot].usage.dedup();
+            let a = AllocationRef {
+                class,
+                slot: slot as u32,
+            };
+            families[fi].allocation = Some(a);
+            for v in &families[fi].versions {
+                if let ResourcePlan::Texture { allocation, .. } =
+                    &mut resources[v.resource as usize].plan
+                {
+                    *allocation = Some(a);
                 }
             }
-            let slot = free.pop().map(|x| x.0).unwrap_or_else(|| {
-                let x = count;
-                count += 1;
-                x
-            });
-            resources[i].allocation = Some(TransientAllocation {
-                class: u32::try_from(class_index)
-                    .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "class index overflow"))?,
-                slot,
-            });
-            active.push(Reverse((resources[i].lifetime.last_use, slot)))
         }
-        next = next
-            .checked_add(count)
-            .ok_or_else(|| GraphError::new("GRAPH_LIMIT_EXCEEDED", "allocation overflow"))?;
-        classes.push(AllocationClass {
-            key: k,
-            slot_count: count,
-        })
+        classes.push(AllocationClass { key, slots });
     }
-    Ok(CompiledGraph {
-        schema_version: 1,
-        graph_id: g.graph_id,
-        revision: g.revision,
-        passes: order
-            .into_iter()
-            .map(|i| {
-                Ok(CompiledPass {
-                    id: g.passes[i].id.clone(),
-                    original_index: u32::try_from(i).map_err(|_| {
-                        GraphError::new("GRAPH_LIMIT_EXCEEDED", "pass index overflow")
-                    })?,
-                    executor: g.passes[i].executor.clone(),
-                    parameters: parameters[i].clone(),
-                    reads: g.passes[i]
-                        .reads
-                        .iter()
-                        .map(|b| {
-                            Ok(CompiledRead {
-                                binding: b.binding.clone(),
-                                resource: *resource_remap.get(&b.resource).ok_or_else(|| {
-                                    GraphError::new(
-                                        "GRAPH_UNKNOWN_RESOURCE",
-                                        "compiled read remap missing",
-                                    )
-                                })?,
-                                access: b.access,
-                            })
-                        })
-                        .collect::<Result<_, GraphError>>()?,
-                    writes: g.passes[i]
-                        .writes
-                        .iter()
-                        .map(|b| {
-                            Ok(CompiledWrite {
-                                binding: b.binding.clone(),
-                                resource: *resource_remap.get(&b.resource).ok_or_else(|| {
-                                    GraphError::new(
-                                        "GRAPH_UNKNOWN_RESOURCE",
-                                        "compiled write remap missing",
-                                    )
-                                })?,
-                                access: b.access.clone(),
-                            })
-                        })
-                        .collect::<Result<_, GraphError>>()?,
-                })
-            })
-            .collect::<Result<_, GraphError>>()?,
-        culled_pass_count: u32::try_from(g.passes.len() - live.iter().filter(|x| **x).count())
-            .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "pass count overflow"))?,
-        culled_resource_count: u32::try_from(g.resources.len() - resources.len())
-            .map_err(|_| GraphError::new("GRAPH_LIMIT_EXCEEDED", "resource count overflow"))?,
-        resources,
-        outputs: g
-            .outputs
-            .into_iter()
-            .map(|o| {
-                Ok(CompiledOutput {
-                    name: o.name,
-                    resource: *resource_remap.get(&o.resource).ok_or_else(|| {
-                        GraphError::new("GRAPH_UNKNOWN_RESOURCE", "compiled output remap missing")
-                    })?,
-                })
-            })
-            .collect::<Result<_, GraphError>>()?,
-        allocation_classes: classes,
-        transient_slot_count: next,
-    })
+    (classes, transient)
 }

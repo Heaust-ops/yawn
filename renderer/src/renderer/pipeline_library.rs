@@ -419,12 +419,12 @@ impl PipelineLibrary {
         let spec =
             target_variant_spec(spec, color_format, depth_format, depth_compare, depth_write);
         let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("V2 target variant"),
+            label: Some(" target variant"),
             source: wgpu::ShaderSource::Wgsl(spec.vertex.shader_source.as_str().into()),
         });
         let fragment_shader = spec.fragment.as_ref().map(|stage| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("V2 target variant"),
+                label: Some(" target variant"),
                 source: wgpu::ShaderSource::Wgsl(stage.shader_source.as_str().into()),
             })
         });
@@ -469,7 +469,7 @@ impl PipelineLibrary {
         });
         Ok(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("V2 target variant"),
+                label: Some(" target variant"),
                 layout,
                 vertex: wgpu::VertexState {
                     module: &vertex_shader,
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_target_spec_disables_blending_without_mutating_base() {
+    fn target_spec_disables_blending_without_mutating_base() {
         let mut base = spec();
         base.primitive.cull_mode = Some(wgpu::Face::Front);
         base.multisample.count = 4;

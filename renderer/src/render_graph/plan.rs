@@ -4,15 +4,15 @@ use super::*;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompiledGraphV2 {
+pub struct CompiledGraph {
     pub schema_version: u32,
     pub graph_id: String,
     pub revision: u32,
     pub node_count: u32,
-    pub resources: Vec<CompiledResourceV2>,
-    pub executions: Vec<CompiledExecutionV2>,
-    pub texture_families: Vec<TextureFamilyV2>,
-    pub allocation_classes: Vec<AllocationClassV2>,
+    pub resources: Vec<CompiledResource>,
+    pub executions: Vec<CompiledExecution>,
+    pub texture_families: Vec<TextureFamily>,
+    pub allocation_classes: Vec<AllocationClass>,
     pub culled_node_count: u32,
     pub culled_resource_count: u32,
     pub transient_slot_count: u32,
@@ -20,26 +20,26 @@ pub struct CompiledGraphV2 {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompiledResourceV2 {
+pub struct CompiledResource {
     pub original_node_index: u32,
     pub output_ordinal: u16,
     pub origin: NodeOutputRef,
-    pub semantic_type: SemanticTypeV2,
+    pub semantic_type: SemanticType,
     pub producer_execution: Option<u32>,
-    pub lifetime: Option<LifetimeV2>,
-    pub plan: ResourcePlanV2,
+    pub lifetime: Option<Lifetime>,
+    pub plan: ResourcePlan,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ResourcePlanV2 {
+pub enum ResourcePlan {
     SurfaceTarget {
         family: u32,
     },
     TextureSpec {
         family: u32,
-        residency: TextureResidencyV2,
-        descriptor: NormalizedTextureDescriptorV2,
+        residency: TextureResidency,
+        descriptor: NormalizedTextureDescriptor,
     },
     Texture {
         family: u32,
@@ -47,7 +47,7 @@ pub enum ResourcePlanV2 {
         target: u32,
         initialized: bool,
         stored: bool,
-        allocation: Option<AllocationRefV2>,
+        allocation: Option<AllocationRef>,
     },
     SceneTable,
     LocalAabbBuffer {
@@ -56,53 +56,53 @@ pub enum ResourcePlanV2 {
     CameraFrustum,
     BooleanFlagBuffer {
         scene: u32,
-        flag: MeshFlagV2,
+        flag: MeshFlag,
     },
     DrawStream {
         scene: u32,
     },
     DepthStencilConfig {
-        config: NormalizedDepthStencilV2,
+        config: NormalizedDepthStencil,
     },
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompiledExecutionV2 {
+pub struct CompiledExecution {
     pub id: String,
     pub original_node_index: u32,
-    pub executor: ExecutorRefV2,
-    pub parameters: NormalizedParametersV2,
-    pub kind: ExecutionKindV2,
-    pub inputs: Vec<CompiledSocketInputV2>,
-    pub outputs: Vec<CompiledSocketOutputV2>,
-    pub accesses: Vec<CompiledAccessV2>,
+    pub executor: ExecutorRef,
+    pub parameters: NormalizedParameters,
+    pub kind: ExecutionKind,
+    pub inputs: Vec<CompiledSocketInput>,
+    pub outputs: Vec<CompiledSocketOutput>,
+    pub accesses: Vec<CompiledAccess>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompiledSocketInputV2 {
+pub struct CompiledSocketInput {
     pub socket: String,
     pub resource: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompiledSocketOutputV2 {
+pub struct CompiledSocketOutput {
     pub socket: String,
     pub resource: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ExecutionKindV2 {
+pub enum ExecutionKind {
     CpuPreparation,
     Compute {
-        work: ComputeWorkV2,
+        work: ComputeWork,
     },
     Render {
-        color_attachments: Vec<ColorAttachmentPlanV2>,
-        depth_stencil: Option<DepthStencilAttachmentPlanV2>,
+        color_attachments: Vec<ColorAttachmentPlan>,
+        depth_stencil: Option<DepthStencilAttachmentPlan>,
     },
     Present {
         surface: u32,
@@ -111,60 +111,60 @@ pub enum ExecutionKindV2 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ComputeWorkV2 {
+pub enum ComputeWork {
     FrustumCull,
     MeshQuery,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ColorAttachmentPlanV2 {
+pub struct ColorAttachmentPlan {
     pub resource: u32,
     pub location: u32,
-    pub load: NormalizedColorLoadV2,
-    pub store: StoreOpV2,
+    pub load: NormalizedColorLoad,
+    pub store: StoreOp,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DepthStencilAttachmentPlanV2 {
+pub struct DepthStencilAttachmentPlan {
     pub resource: u32,
-    pub load: NormalizedDepthLoadV2,
-    pub store: StoreOpV2,
+    pub load: NormalizedDepthLoad,
+    pub store: StoreOp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NormalizedColorLoadV2 {
+pub enum NormalizedColorLoad {
     Load,
     Clear { value: [f64; 4] },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NormalizedDepthLoadV2 {
+pub enum NormalizedDepthLoad {
     Load,
     Clear { value: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StoreOpV2 {
+pub enum StoreOp {
     Store,
     Discard,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompiledAccessV2 {
+pub struct CompiledAccess {
     pub socket: String,
     pub resource: u32,
-    pub mode: AccessModeV2,
+    pub mode: AccessMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AccessModeV2 {
+pub enum AccessMode {
     SemanticRead,
     UniformRead,
     StorageRead,
@@ -175,13 +175,13 @@ pub enum AccessModeV2 {
     SampledTexture,
     ColorAttachment {
         location: u32,
-        load: NormalizedColorLoadV2,
-        store: StoreOpV2,
+        load: NormalizedColorLoad,
+        store: StoreOp,
         full_overwrite: bool,
     },
     DepthAttachment {
-        load: NormalizedDepthLoadV2,
-        store: StoreOpV2,
+        load: NormalizedDepthLoad,
+        store: StoreOp,
         full_overwrite: bool,
     },
     Present,
@@ -189,11 +189,11 @@ pub enum AccessModeV2 {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NormalizedParametersV2 {
+pub enum NormalizedParameters {
     SurfaceTarget,
     TextureSpec {
-        residency: TextureResidencyV2,
-        texture: NormalizedTextureDescriptorV2,
+        residency: TextureResidency,
+        texture: NormalizedTextureDescriptor,
     },
     SceneTable,
     LocalAabbBuffer,
@@ -201,10 +201,10 @@ pub enum NormalizedParametersV2 {
     VisibilityFlags,
     FrustumCull,
     MeshQuery {
-        filters: [NormalizedMeshFilterV2; 2],
+        filters: [NormalizedMeshFilter; 2],
     },
     DepthStencilConfig {
-        config: NormalizedDepthStencilV2,
+        config: NormalizedDepthStencil,
     },
     LegacyForward {
         clear_color: [f64; 4],
@@ -232,117 +232,117 @@ pub enum NormalizedParametersV2 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NormalizedMeshFilterV2 {
-    pub flag: MeshFlagV2,
+pub struct NormalizedMeshFilter {
+    pub flag: MeshFlag,
     pub predicate: TriStatePredicate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NormalizedDepthStencilV2 {
-    pub depth_compare: CompareFunctionV2,
+pub struct NormalizedDepthStencil {
+    pub depth_compare: CompareFunction,
     pub depth_write_enabled: bool,
     pub clear_depth: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NormalizedTextureDescriptorV2 {
-    pub dimension: TextureDimensionV2,
-    pub format: TextureFormatV2,
-    pub extent: NormalizedTextureExtentV2,
+pub struct NormalizedTextureDescriptor {
+    pub dimension: TextureDimension,
+    pub format: TextureFormat,
+    pub extent: NormalizedTextureExtent,
     pub mip_level_count: u32,
     pub sample_count: u32,
-    pub view_formats: Vec<TextureFormatV2>,
+    pub view_formats: Vec<TextureFormat>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NormalizedTextureExtentV2 {
+pub enum NormalizedTextureExtent {
     Absolute {
         width: u32,
         height: u32,
         depth_or_array_layers: u32,
     },
     SurfaceRelative {
-        width: RatioV2,
-        height: RatioV2,
+        width: Ratio,
+        height: Ratio,
         depth_or_array_layers: u32,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LifetimeV2 {
+pub struct Lifetime {
     pub first_use: u32,
     pub last_use: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextureFamilyKeyV2 {
+pub struct TextureFamilyKey {
     pub source_node: u32,
     pub source_socket: u16,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TextureFamilySourceV2 {
+pub enum TextureFamilySource {
     ImportedSurface {
         resource: u32,
     },
     AuthoredTexture {
         resource: u32,
-        residency: TextureResidencyV2,
-        descriptor: NormalizedTextureDescriptorV2,
+        residency: TextureResidency,
+        descriptor: NormalizedTextureDescriptor,
     },
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextureFamilyV2 {
+pub struct TextureFamily {
     pub id: u32,
-    pub key: TextureFamilyKeyV2,
-    pub source: TextureFamilySourceV2,
-    pub lifetime: LifetimeV2,
-    pub versions: Vec<TextureVersionV2>,
-    pub usage: Vec<TextureUsageV2>,
-    pub allocation: Option<AllocationRefV2>,
+    pub key: TextureFamilyKey,
+    pub source: TextureFamilySource,
+    pub lifetime: Lifetime,
+    pub versions: Vec<TextureVersion>,
+    pub usage: Vec<TextureUsage>,
+    pub allocation: Option<AllocationRef>,
     pub aliasable: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextureVersionV2 {
+pub struct TextureVersion {
     pub version: u32,
     pub resource: u32,
     pub target: u32,
     pub initialized: bool,
     pub stored: bool,
-    pub lifetime: LifetimeV2,
+    pub lifetime: Lifetime,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextureCompatibilityKeyV2 {
-    pub dimension: TextureDimensionV2,
-    pub format: TextureFormatV2,
-    pub extent: NormalizedTextureExtentV2,
+pub struct TextureCompatibilityKey {
+    pub dimension: TextureDimension,
+    pub format: TextureFormat,
+    pub extent: NormalizedTextureExtent,
     pub mip_level_count: u32,
     pub sample_count: u32,
-    pub view_formats: Vec<TextureFormatV2>,
+    pub view_formats: Vec<TextureFormat>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AllocationClassV2 {
-    pub key: TextureCompatibilityKeyV2,
-    pub slots: Vec<AllocationSlotV2>,
+pub struct AllocationClass {
+    pub key: TextureCompatibilityKey,
+    pub slots: Vec<AllocationSlot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AllocationKindV2 {
+pub enum AllocationKind {
     AliasedTransient,
     DedicatedTransient,
     Persistent,
@@ -350,22 +350,22 @@ pub enum AllocationKindV2 {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AllocationSlotV2 {
-    pub kind: AllocationKindV2,
-    pub usage: Vec<TextureUsageV2>,
+pub struct AllocationSlot {
+    pub kind: AllocationKind,
+    pub usage: Vec<TextureUsage>,
     pub occupants: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AllocationRefV2 {
+pub struct AllocationRef {
     pub class: u32,
     pub slot: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TextureUsageV2 {
+pub enum TextureUsage {
     Sampled,
     Storage,
     CopySrc,
@@ -374,7 +374,7 @@ pub enum TextureUsageV2 {
     DepthAttachment,
 }
 
-impl CompiledGraphV2 {
+impl CompiledGraph {
     pub fn summary(&self, id: [u32; 2]) -> serde_json::Value {
         serde_json::json!({"compiledId":id,"graphId":self.graph_id,"revision":self.revision,"schemaVersion":self.schema_version,"nodeCount":self.node_count,"executionCount":self.executions.len(),"resourceCount":self.resources.len(),"culledNodeCount":self.culled_node_count,"culledResourceCount":self.culled_resource_count,"transientSlotCount":self.transient_slot_count})
     }

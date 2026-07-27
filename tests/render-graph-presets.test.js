@@ -7,7 +7,7 @@ import {
   midnight,
   renderGraphPresets,
 } from "../static/render-graph/presets.js";
-test("Phase 4 unit 4 presets preserve V1 graphs and add the V2 HDR fullscreen topology", () => {
+test("presets use canonical node graphs", () => {
   assert.deepEqual(Object.keys(renderGraphPresets), [
     "midnight",
     "ember",
@@ -22,20 +22,13 @@ test("Phase 4 unit 4 presets preserve V1 graphs and add the V2 HDR fullscreen to
     [midnight.graphId, ember.graphId],
     ["preset_midnight", "preset_ember"],
   );
-  assert.notDeepEqual(
-    midnight.passes[0].writes[0].access.load.value,
-    ember.passes[0].writes[0].access.load.value,
-  );
+  assert.notDeepEqual(midnight.nodes[6].parameters.clearColor, ember.nodes[6].parameters.clearColor);
   for (const graph of [midnight, ember]) {
-    assert.equal(graph.schemaVersion, 1);
+    assert.equal(graph.schemaVersion, 2);
     assert.equal(graph.revision, 1);
-    assert.equal(graph.passes.length, 1);
-    assert.equal(graph.passes[0].state, "enabled");
-    assert.deepEqual(graph.passes[0].executor, {
-      key: "scene_forward",
-      version: 1,
-    });
-    assert.equal(graph.outputs[0].name, "present");
+    assert.equal(graph.nodes[6].executor.key, "legacy_forward");
+    assert.deepEqual(graph.nodes[6].inputs.colorTarget, { node: "surface", socket: "surface" });
+    assert.equal(graph.nodes.at(-1).executor.key, "present");
   }
   assert.equal(hdr.schemaVersion, 2);
   assert.equal(hdr.revision, 1);

@@ -1,13 +1,3 @@
-import { semanticProjectionToV1 } from "./adapter.js";
-const make = (graphId, clearColor) =>
-  Object.freeze(
-    semanticProjectionToV1(
-      { graphId, clearColor, clearDepth: 1, passState: "enabled" },
-      1,
-    ),
-  );
-export const midnight = make("preset_midnight", [0.015, 0.06, 0.18, 1]);
-export const ember = make("preset_ember", [0.18, 0.035, 0.012, 1]);
 const input = (node, socket) => ({ node, socket });
 const node = (id, key, parameters = {}, inputs = {}) => ({
   id,
@@ -32,6 +22,38 @@ const texture = (format) => ({
   },
   residency: "transient",
 });
+const direct = (graphId, clearColor) => Object.freeze({
+  schemaVersion: 2,
+  graphId,
+  revision: 1,
+  nodes: [
+    node("surface", "surface_target"),
+    node("depth", "texture_spec", texture("depth32_float")),
+    node("scene", "scene_table"),
+    node("visible", "visibility_flags", {}, { scene: input("scene", "scene") }),
+    node("query", "mesh_query", {
+      filters: [
+        { flag: "isVisible", predicate: "required_true" },
+        { flag: "isFrustumCulled", predicate: "any" },
+      ],
+    }, { scene: input("scene", "scene"), isVisible: input("visible", "flags") }),
+    node("depth_config", "depth_stencil_config", {
+      depthCompare: "less_equal",
+      depthWriteEnabled: true,
+      clearDepth: 1,
+    }),
+    node("forward", "legacy_forward", { clearColor }, {
+      scene: input("scene", "scene"),
+      draws: input("query", "draws"),
+      colorTarget: input("surface", "surface"),
+      depthTarget: input("depth", "spec"),
+      depthStencil: input("depth_config", "config"),
+    }),
+    node("present", "present", {}, { surface: input("forward", "color") }),
+  ],
+});
+export const midnight = direct("preset_midnight", [0.015, 0.06, 0.18, 1]);
+export const ember = direct("preset_ember", [0.18, 0.035, 0.012, 1]);
 export const hdr = Object.freeze({
   schemaVersion: 2,
   graphId: "preset_hdr_fullscreen",
