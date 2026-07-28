@@ -3,15 +3,13 @@ use super::MeshFlag;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticType {
-    SurfaceTarget,
-    TextureSpec,
+    MeshData,
     Texture,
-    SceneTable,
     LocalAabbBuffer,
-    CameraFrustum,
     BooleanFlagBuffer,
+    PipelineIndexStream,
+    PipelineActivation,
     DrawStream,
-    DepthStencilConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -21,7 +19,7 @@ pub enum ExecutionClass {
     CpuPreparation,
     Compute,
     Render,
-    Present,
+    Frame,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -48,8 +46,6 @@ pub enum InputRole {
     SampledTexture,
     ColorTarget { location: u32 },
     DepthTarget,
-    Present,
-    Configuration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -119,48 +115,42 @@ const REQUIRED: InputCardinality = InputCardinality::RequiredOne;
 const OPTIONAL: InputCardinality = InputCardinality::OptionalOne;
 const NONE_IN: &[InputSocketContract] = &[];
 const NONE_OUT: &[OutputSocketContract] = &[];
-const SURFACE_OUT: &[OutputSocketContract] =
-    &[output("surface", SurfaceTarget, OutputMetadata::None)];
-const SPEC_OUT: &[OutputSocketContract] = &[output("spec", TextureSpec, OutputMetadata::None)];
-const SCENE_OUT: &[OutputSocketContract] = &[output("scene", SceneTable, OutputMetadata::None)];
-const AABB_OUT: &[OutputSocketContract] =
-    &[output("localAabbs", LocalAabbBuffer, OutputMetadata::None)];
-const FRUSTUM_OUT: &[OutputSocketContract] =
-    &[output("frustum", CameraFrustum, OutputMetadata::None)];
-const VISIBLE_OUT: &[OutputSocketContract] = &[output(
-    "flags",
-    BooleanFlagBuffer,
-    OutputMetadata::BooleanFlag {
-        flag: MeshFlag::IsVisible,
-    },
-)];
+const TEXTURE_OUT: &[OutputSocketContract] = &[output("texture", Texture, OutputMetadata::None)];
+const MESH_OUT: &[OutputSocketContract] = &[
+    output("mesh", MeshData, OutputMetadata::None),
+    output("localAabbs", LocalAabbBuffer, OutputMetadata::None),
+    output(
+        "isVisible",
+        BooleanFlagBuffer,
+        OutputMetadata::BooleanFlag {
+            flag: MeshFlag::IsVisible,
+        },
+    ),
+    output("pipelineIndices", PipelineIndexStream, OutputMetadata::None),
+];
 const CULLED_OUT: &[OutputSocketContract] = &[output(
-    "flags",
+    "isFrustumCulled",
     BooleanFlagBuffer,
     OutputMetadata::BooleanFlag {
         flag: MeshFlag::IsFrustumCulled,
     },
 )];
 const DRAW_OUT: &[OutputSocketContract] = &[output("draws", DrawStream, OutputMetadata::None)];
-const CONFIG_OUT: &[OutputSocketContract] =
-    &[output("config", DepthStencilConfig, OutputMetadata::None)];
-const FORWARD_OUT: &[OutputSocketContract] = &[
+const ACTIVATION_OUT: &[OutputSocketContract] = &[output(
+    "activation",
+    PipelineActivation,
+    OutputMetadata::None,
+)];
+const PIPELINE_OUT: &[OutputSocketContract] = &[
     output("color", Texture, OutputMetadata::None),
     output("depth", Texture, OutputMetadata::None),
 ];
 const FULLSCREEN_COPY_OUT: &[OutputSocketContract] =
     &[output("color", Texture, OutputMetadata::None)];
-const LOCAL_IN: &[InputSocketContract] = &[input(
-    "scene",
-    TypeConstraint::Exact(SceneTable),
-    REQUIRED,
-    InputRole::SemanticRead,
-)];
-const VISIBILITY_IN: &[InputSocketContract] = LOCAL_IN;
 const CULL_IN: &[InputSocketContract] = &[
     input(
-        "scene",
-        TypeConstraint::Exact(SceneTable),
+        "mesh",
+        TypeConstraint::Exact(MeshData),
         REQUIRED,
         InputRole::StorageRead,
     ),
@@ -170,17 +160,11 @@ const CULL_IN: &[InputSocketContract] = &[
         REQUIRED,
         InputRole::StorageRead,
     ),
-    input(
-        "frustum",
-        TypeConstraint::Exact(CameraFrustum),
-        REQUIRED,
-        InputRole::UniformRead,
-    ),
 ];
 const QUERY_IN: &[InputSocketContract] = &[
     input(
-        "scene",
-        TypeConstraint::Exact(SceneTable),
+        "mesh",
+        TypeConstraint::Exact(MeshData),
         REQUIRED,
         InputRole::StorageRead,
     ),
@@ -197,10 +181,16 @@ const QUERY_IN: &[InputSocketContract] = &[
         InputRole::StorageRead,
     ),
 ];
-const FORWARD_IN: &[InputSocketContract] = &[
+const REGISTRY_IN: &[InputSocketContract] = &[input(
+    "pipelineIndices",
+    TypeConstraint::Exact(PipelineIndexStream),
+    REQUIRED,
+    InputRole::SemanticRead,
+)];
+const PIPELINE_IN: &[InputSocketContract] = &[
     input(
-        "scene",
-        TypeConstraint::Exact(SceneTable),
+        "mesh",
+        TypeConstraint::Exact(MeshData),
         REQUIRED,
         InputRole::SemanticRead,
     ),
@@ -211,22 +201,22 @@ const FORWARD_IN: &[InputSocketContract] = &[
         InputRole::IndirectRead,
     ),
     input(
+        "activation",
+        TypeConstraint::Exact(PipelineActivation),
+        REQUIRED,
+        InputRole::SemanticRead,
+    ),
+    input(
         "colorTarget",
-        TypeConstraint::OneOf(&[SurfaceTarget, TextureSpec, Texture]),
+        TypeConstraint::Exact(Texture),
         REQUIRED,
         InputRole::ColorTarget { location: 0 },
     ),
     input(
         "depthTarget",
-        TypeConstraint::OneOf(&[TextureSpec, Texture]),
+        TypeConstraint::Exact(Texture),
         REQUIRED,
         InputRole::DepthTarget,
-    ),
-    input(
-        "depthStencil",
-        TypeConstraint::Exact(DepthStencilConfig),
-        REQUIRED,
-        InputRole::Configuration,
     ),
 ];
 const FULLSCREEN_COPY_IN: &[InputSocketContract] = &[
@@ -238,7 +228,7 @@ const FULLSCREEN_COPY_IN: &[InputSocketContract] = &[
     ),
     input(
         "colorTarget",
-        TypeConstraint::OneOf(&[SurfaceTarget, TextureSpec, Texture]),
+        TypeConstraint::Exact(Texture),
         REQUIRED,
         InputRole::ColorTarget { location: 0 },
     ),
@@ -258,65 +248,33 @@ const BLOOM_COMPOSITE_IN: &[InputSocketContract] = &[
     ),
     input(
         "colorTarget",
-        TypeConstraint::OneOf(&[SurfaceTarget, TextureSpec, Texture]),
+        TypeConstraint::Exact(Texture),
         REQUIRED,
         InputRole::ColorTarget { location: 0 },
     ),
 ];
-const PRESENT_IN: &[InputSocketContract] = &[input(
-    "surface",
+const FRAME_OUT_IN: &[InputSocketContract] = &[input(
+    "color",
     TypeConstraint::Exact(Texture),
     REQUIRED,
-    InputRole::Present,
+    InputRole::SampledTexture,
 )];
 
 pub static CONTRACTS: &[Contract] = &[
     Contract {
-        key: "surface_target",
+        key: "mesh",
         version: 1,
         execution: ExecutionClass::Source,
         inputs: NONE_IN,
-        outputs: SURFACE_OUT,
+        outputs: MESH_OUT,
         inherently_observable: false,
     },
     Contract {
-        key: "texture_spec",
+        key: "texture",
         version: 1,
         execution: ExecutionClass::Source,
         inputs: NONE_IN,
-        outputs: SPEC_OUT,
-        inherently_observable: false,
-    },
-    Contract {
-        key: "scene_table",
-        version: 1,
-        execution: ExecutionClass::Source,
-        inputs: NONE_IN,
-        outputs: SCENE_OUT,
-        inherently_observable: false,
-    },
-    Contract {
-        key: "local_aabb_buffer",
-        version: 1,
-        execution: ExecutionClass::Source,
-        inputs: LOCAL_IN,
-        outputs: AABB_OUT,
-        inherently_observable: false,
-    },
-    Contract {
-        key: "camera_frustum",
-        version: 1,
-        execution: ExecutionClass::Source,
-        inputs: NONE_IN,
-        outputs: FRUSTUM_OUT,
-        inherently_observable: false,
-    },
-    Contract {
-        key: "visibility_flags",
-        version: 1,
-        execution: ExecutionClass::Source,
-        inputs: VISIBILITY_IN,
-        outputs: VISIBLE_OUT,
+        outputs: TEXTURE_OUT,
         inherently_observable: false,
     },
     Contract {
@@ -336,19 +294,19 @@ pub static CONTRACTS: &[Contract] = &[
         inherently_observable: false,
     },
     Contract {
-        key: "depth_stencil_config",
+        key: "pipeline_registry",
         version: 1,
-        execution: ExecutionClass::Source,
-        inputs: NONE_IN,
-        outputs: CONFIG_OUT,
+        execution: ExecutionClass::CpuPreparation,
+        inputs: REGISTRY_IN,
+        outputs: ACTIVATION_OUT,
         inherently_observable: false,
     },
     Contract {
-        key: "legacy_forward",
+        key: "pipeline",
         version: 1,
         execution: ExecutionClass::Render,
-        inputs: FORWARD_IN,
-        outputs: FORWARD_OUT,
+        inputs: PIPELINE_IN,
+        outputs: PIPELINE_OUT,
         inherently_observable: false,
     },
     Contract {
@@ -400,10 +358,10 @@ pub static CONTRACTS: &[Contract] = &[
         inherently_observable: false,
     },
     Contract {
-        key: "present",
+        key: "frame_out",
         version: 1,
-        execution: ExecutionClass::Present,
-        inputs: PRESENT_IN,
+        execution: ExecutionClass::Frame,
+        inputs: FRAME_OUT_IN,
         outputs: NONE_OUT,
         inherently_observable: true,
     },

@@ -5,19 +5,16 @@ import { createAddNodeMenu } from "./add-node-menu.js";
 import { createNodeIdAllocator, spawnRequestedNode } from "./node-spawn.js";
 
 const spec = [
-  ["surface", "surface_target", { x: 40, y: 40 }],
-  ["hdr", "texture_spec", { x: 40, y: 170 }],
-  ["depth", "texture_spec", { x: 40, y: 300 }],
-  ["scene", "scene_table", { x: 40, y: 470 }],
-  ["aabbs", "local_aabb_buffer", { x: 290, y: 430 }],
-  ["frustum", "camera_frustum", { x: 290, y: 590 }],
-  ["visible", "visibility_flags", { x: 290, y: 300 }],
+  ["hdr", "texture", { x: 40, y: 170 }],
+  ["depth", "texture", { x: 40, y: 300 }],
+  ["mesh", "mesh", { x: 40, y: 470 }],
   ["cull", "frustum_cull", { x: 540, y: 480 }],
   ["query", "mesh_query", { x: 790, y: 330 }],
-  ["depth_config", "depth_stencil_config", { x: 790, y: 620 }],
-  ["forward", "legacy_forward", { x: 1040, y: 290 }],
-  ["copy", "fullscreen_copy", { x: 1300, y: 250 }],
-  ["present", "present", { x: 1540, y: 250 }],
+  ["registry", "pipeline_registry", { x: 790, y: 620 }],
+  ["ground", "pipeline", { x: 1040, y: 290 }],
+  ["pbr", "pipeline", { x: 1300, y: 290 }],
+  ["pbr_double", "pipeline", { x: 1560, y: 290 }],
+  ["frame_out", "frame_out", { x: 1820, y: 250 }],
 ];
 async function seed(root) {
   await root.setState({
@@ -30,22 +27,24 @@ async function seed(root) {
   for (const [nodeId, nodeType, position] of spec)
     await root.dispatch({ type: "node.add", nodeId, nodeType, position });
   const links = [
-    ["scene", "scene", "aabbs", "scene"],
-    ["scene", "scene", "visible", "scene"],
-    ["scene", "scene", "cull", "scene"],
-    ["aabbs", "localAabbs", "cull", "localAabbs"],
-    ["frustum", "frustum", "cull", "frustum"],
-    ["scene", "scene", "query", "scene"],
-    ["visible", "flags", "query", "isVisible"],
-    ["cull", "flags", "query", "isFrustumCulled"],
-    ["scene", "scene", "forward", "scene"],
-    ["query", "draws", "forward", "draws"],
-    ["hdr", "spec", "forward", "colorTarget"],
-    ["depth", "spec", "forward", "depthTarget"],
-    ["depth_config", "config", "forward", "depthStencil"],
-    ["forward", "color", "copy", "source"],
-    ["surface", "surface", "copy", "colorTarget"],
-    ["copy", "color", "present", "surface"],
+    ["mesh", "mesh", "cull", "mesh"],
+    ["mesh", "localAabbs", "cull", "localAabbs"],
+    ["mesh", "mesh", "query", "mesh"],
+    ["mesh", "isVisible", "query", "isVisible"],
+    ["cull", "isFrustumCulled", "query", "isFrustumCulled"],
+    ["mesh", "pipelineIndices", "registry", "pipelineIndices"],
+    ...["ground", "pbr", "pbr_double"].flatMap((pipeline) => [
+      ["mesh", "mesh", pipeline, "mesh"],
+      ["query", "draws", pipeline, "draws"],
+      ["registry", "activation", pipeline, "activation"],
+    ]),
+    ["hdr", "texture", "ground", "colorTarget"],
+    ["depth", "texture", "ground", "depthTarget"],
+    ["ground", "color", "pbr", "colorTarget"],
+    ["ground", "depth", "pbr", "depthTarget"],
+    ["pbr", "color", "pbr_double", "colorTarget"],
+    ["pbr", "depth", "pbr_double", "depthTarget"],
+    ["pbr_double", "color", "frame_out", "color"],
   ];
   for (const [a, as, b, bs] of links) {
     const id = `${a}_${as}_${b}_${bs}`;
@@ -64,34 +63,44 @@ async function seed(root) {
   }
   const authored = await root.getState(),
     depth = authored.nodes.find((node) => node.id === "depth");
-  depth.parameters.texture = {
-    kind: "json",
-    value: {
-      dimension: "d2",
-      format: "depth32_float",
-      extent: {
-        kind: "surface_relative",
-        width: { numerator: 1, denominator: 1 },
-        height: { numerator: 1, denominator: 1 },
-        depthOrArrayLayers: 1,
-      },
-      mipLevelCount: 1,
-      sampleCount: 1,
-      viewFormats: [],
-    },
-  };
+  depth.parameters.format = { kind: "string", value: "depth32_float" };
+  for (const [id, name] of [["ground", "ground_plane"], ["pbr", "gltf_standard"], ["pbr_double", "gltf_standard_double_sided"]])
+    authored.nodes.find((node) => node.id === id).parameters.pipeline = { kind: "string", value: name };
   await root.setState(authored);
 }
 export async function createRenderGraphEditor(canvas) {
   const allocateId = createNodeIdAllocator();
-  let root, view, menu, destroying, dead = false;
-  const requestAddNode = Object.assign(async (request, point, isCurrent = () => true) => {
-    let typeId;
-    try { typeId = await menu?.open(point); } catch (error) { if (!dead && isCurrent()) console.error(error); return; }
-    if (dead || !isCurrent() || !root || !view) return;
-    const alive = () => !dead && isCurrent();
-    try { await spawnRequestedNode(root, view, request, typeId, allocateId, alive); } catch (error) { if (!dead) console.error(error); }
-  }, { close: () => menu?.close() });
+  let root,
+    view,
+    menu,
+    destroying,
+    dead = false;
+  const requestAddNode = Object.assign(
+    async (request, point, isCurrent = () => true) => {
+      let typeId;
+      try {
+        typeId = await menu?.open(point);
+      } catch (error) {
+        if (!dead && isCurrent()) console.error(error);
+        return;
+      }
+      if (dead || !isCurrent() || !root || !view) return;
+      const alive = () => !dead && isCurrent();
+      try {
+        await spawnRequestedNode(
+          root,
+          view,
+          request,
+          typeId,
+          allocateId,
+          alive,
+        );
+      } catch (error) {
+        if (!dead) console.error(error);
+      }
+    },
+    { close: () => menu?.close() },
+  );
   const host = prepareBrowserHost(canvas, { requestAddNode });
   const destroy = () =>
     (destroying ??= (async () => {

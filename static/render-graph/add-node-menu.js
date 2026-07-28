@@ -3,8 +3,9 @@ import { semanticCatalog } from "./catalog.js";
 const GROUPS = Object.freeze([
   ["source", "Source"],
   ["compute", "Compute"],
+  ["cpu_preparation", "CPU preparation"],
   ["render", "Render / post"],
-  ["present", "Present"],
+  ["frame", "Frame"],
 ]);
 
 const title = (typeId) => typeId.replaceAll("_", " ");

@@ -42,10 +42,14 @@ fn mesh_query(@builtin(global_invocation_id) id: vec3<u32>) {
   if (i >= params.count) { return; }
   let draw_meta = metadata[i];
   var selected = true;
-  if (params.visible_predicate != 0u) {
+  if (params.visible_predicate == 3u) {
+    selected = false;
+  } else if (params.visible_predicate != 0u) {
     selected = matches(authored_visible[i], params.visible_predicate);
   }
-  if (params.frustum_predicate != 0u) {
+  if (selected && params.frustum_predicate == 3u) {
+    selected = false;
+  } else if (selected && params.frustum_predicate != 0u) {
     selected = selected && matches(frustum_flags[i], params.frustum_predicate);
   }
   commands[i] = Command(draw_meta.index_count, select(0u, 1u, selected), draw_meta.first_index, draw_meta.base_vertex, 0u);

@@ -33,10 +33,7 @@ pub struct CompiledResource {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourcePlan {
-    SurfaceTarget {
-        family: u32,
-    },
-    TextureSpec {
+    TextureSource {
         family: u32,
         residency: TextureResidency,
         descriptor: NormalizedTextureDescriptor,
@@ -49,20 +46,22 @@ pub enum ResourcePlan {
         stored: bool,
         allocation: Option<AllocationRef>,
     },
-    SceneTable,
+    MeshData,
     LocalAabbBuffer {
-        scene: u32,
+        mesh: u32,
     },
-    CameraFrustum,
     BooleanFlagBuffer {
-        scene: u32,
+        mesh: u32,
         flag: MeshFlag,
     },
-    DrawStream {
-        scene: u32,
+    PipelineIndexStream {
+        mesh: u32,
     },
-    DepthStencilConfig {
-        config: NormalizedDepthStencil,
+    PipelineActivation {
+        pipeline_indices: u32,
+    },
+    DrawStream {
+        mesh: u32,
     },
 }
 
@@ -104,12 +103,12 @@ pub enum ExecutionKind {
         color_attachments: Vec<ColorAttachmentPlan>,
         depth_stencil: Option<DepthStencilAttachmentPlan>,
     },
-    Present {
-        surface: u32,
+    FrameOut {
+        color: u32,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeWork {
     FrustumCull,
@@ -184,29 +183,29 @@ pub enum AccessMode {
         store: StoreOp,
         full_overwrite: bool,
     },
-    Present,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NormalizedParameters {
-    SurfaceTarget,
-    TextureSpec {
+    Texture {
         residency: TextureResidency,
-        texture: NormalizedTextureDescriptor,
+        descriptor: NormalizedTextureDescriptor,
     },
-    SceneTable,
-    LocalAabbBuffer,
-    CameraFrustum,
-    VisibilityFlags,
-    FrustumCull,
+    Mesh,
+    FrustumCull {
+        camera: ActiveCamera,
+    },
     MeshQuery {
-        filters: [NormalizedMeshFilter; 2],
+        visible_predicate: RuntimePredicate,
+        frustum_culled_predicate: RuntimePredicate,
     },
-    DepthStencilConfig {
-        config: NormalizedDepthStencil,
-    },
-    LegacyForward {
+    PipelineRegistry,
+    Pipeline {
+        pipeline: String,
+        depth_compare: CompareFunction,
+        depth_write_enabled: bool,
+        clear_depth: f32,
         clear_color: [f64; 4],
     },
     FullscreenCopy,
@@ -227,22 +226,13 @@ pub enum NormalizedParameters {
     LuminanceEdge {
         strength: f32,
     },
-    Present,
+    FrameOut,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NormalizedMeshFilter {
-    pub flag: MeshFlag,
-    pub predicate: TriStatePredicate,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NormalizedDepthStencil {
-    pub depth_compare: CompareFunction,
-    pub depth_write_enabled: bool,
-    pub clear_depth: f32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveCamera {
+    Active,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -288,9 +278,6 @@ pub struct TextureFamilyKey {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TextureFamilySource {
-    ImportedSurface {
-        resource: u32,
-    },
     AuthoredTexture {
         resource: u32,
         residency: TextureResidency,

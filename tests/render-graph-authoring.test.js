@@ -41,16 +41,23 @@ function fixture() {
         ]),
       ),
       sockets: [
-        ...Object.entries(d.inputs).map(([key, x]) => ({
-          key,
-          id: `${n.id}:${key}`,
-          direction: "input",
-          dataType: x.authoringType ?? x.accepted.types[0],
-          label: key,
-          accepts: socketTypes[x.authoringType ?? x.accepted.types[0]].acceptsFrom,
-          visible: true,
-          maxIncomingLinks: 1,
-        })),
+        ...Object.entries(d.inputs).map(([key, x]) => {
+          const socket = definition.sockets[key];
+          return {
+            key,
+            id: `${n.id}:${key}`,
+            direction: "input",
+            dataType: x.authoringType ?? x.accepted.types[0],
+            label: socket.title,
+            accepts:
+              socketTypes[x.authoringType ?? x.accepted.types[0]].acceptsFrom,
+            ...(socket.value
+              ? { defaultValue: structuredClone(socket.value.default) }
+              : {}),
+            visible: socket.visible,
+            maxIncomingLinks: socket.maxIncomingLinks,
+          };
+        }),
         ...Object.entries(d.outputs).map(([key]) => ({
           key,
           id: `${n.id}:${key}`,
@@ -87,26 +94,22 @@ function fixture() {
 }
 test("catalog exhaustively mirrors all current contracts", () => {
   assert.deepEqual(
-    Object.keys(semanticCatalog).sort(),
+    Object.keys(semanticCatalog),
     [
-      "surface_target",
-      "texture_spec",
-      "scene_table",
-      "local_aabb_buffer",
-      "camera_frustum",
-      "visibility_flags",
+      "mesh",
+      "texture",
       "frustum_cull",
       "mesh_query",
-      "depth_stencil_config",
-      "legacy_forward",
+      "pipeline_registry",
+      "pipeline",
       "fullscreen_copy",
       "tone_map",
       "bloom_extract",
       "bloom_blur",
       "bloom_composite",
       "luminance_edge",
-      "present",
-    ].sort(),
+      "frame_out",
+    ],
   );
   for (const c of Object.values(semanticCatalog)) {
     assert.ok(c.execution);
@@ -114,6 +117,161 @@ test("catalog exhaustively mirrors all current contracts", () => {
     assert.ok(c.outputs);
     assert.ok(c.parameters);
   }
+  for (const [key, contract] of Object.entries(semanticCatalog))
+    assert.deepEqual(
+      Object.keys(nodeDefinitions[key].parameters).sort(),
+      Object.keys(contract.parameters).sort(),
+      key,
+    );
+  assert.equal(CATALOG_VERSION, 4);
+  assert.deepEqual(nodeDefinitions.pipeline.parameters, {
+    pipeline: {
+      type: "string",
+      default: { kind: "string", value: "gltf_standard" },
+    },
+    depthCompare: {
+      type: "string",
+      default: { kind: "string", value: "less_equal" },
+      enum: ["never", "less", "equal", "less_equal", "greater", "not_equal", "greater_equal", "always"],
+    },
+    depthWriteEnabled: {
+      type: "boolean",
+      default: { kind: "boolean", value: true },
+    },
+    clearDepth: {
+      type: "number",
+      default: { kind: "number", value: 1 },
+      minimum: 0,
+      maximum: 1,
+    },
+    clearColor: {
+    type: "color",
+    default: { kind: "color", value: [0.015, 0.02, 0.03, 1] },
+    minimum: 0,
+    maximum: 1,
+    },
+  });
+  assert.deepEqual(nodeDefinitions.bloom_blur.parameters.direction.enum, [
+    "horizontal",
+    "vertical",
+  ]);
+  assert.deepEqual(nodeDefinitions.texture.parameters.residency.enum, [
+    "transient",
+    "persistent",
+  ]);
+  assert.deepEqual(
+    nodeDefinitions.frustum_cull.parameters.cameraSelection.enum,
+    ["active"],
+  );
+  assert.deepEqual(nodeDefinitions.mesh_query.sockets.isVisible.value.default, {
+    kind: "boolean",
+    value: true,
+  });
+  assert.equal(nodeDefinitions.mesh_query.sockets.isVisible.showValue, true);
+});
+
+test("adapter validates and exactly lowers canonical pipeline controls and blur direction", () => {
+  const x = fixture();
+  const pipeline = x.nodes.find((node) => node.id === "ground");
+  assert.equal(pipeline.parameters.clearColor.kind, "color");
+  assert.deepEqual(
+    adaptFxNodeSnapshot(x).nodes.find((node) => node.id === "ground").parameters,
+    {
+      pipeline: "ground_plane",
+      depthCompare: "less_equal",
+      depthWriteEnabled: true,
+      clearDepth: 1,
+      clearColor: [0.015, 0.02, 0.03, 1],
+    },
+  );
+  const schema = nodeDefinitions.bloom_blur.parameters;
+  const blur = structuredClone(x.nodes.find((node) => node.id === "frame_out"));
+  blur.id = "blur";
+  blur.typeId = "bloom_blur";
+  blur.parameters = {
+    direction: { kind: "string", value: "vertical" },
+    radius: structuredClone(schema.radius.default),
+  };
+  blur.sockets = Object.entries(nodeDefinitions.bloom_blur.sockets).map(
+    ([key, socket]) => ({
+      key,
+      id: `blur:${key}`,
+      label: socket.title,
+      direction: socket.direction,
+      dataType: socket.type,
+      accepts:
+        socket.direction === "input"
+          ? socketTypes[socket.type].acceptsFrom
+          : [],
+      maxIncomingLinks: socket.maxIncomingLinks,
+      visible: socket.visible,
+    }),
+  );
+  x.nodes.push(blur);
+  assert.deepEqual(
+    adaptFxNodeSnapshot(x).nodes.find((node) => node.id === "blur").parameters
+      .direction,
+    [0, 1],
+  );
+  pipeline.parameters.clearColor.value[0] = 2;
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_PARAMETER",
+  );
+  pipeline.parameters.clearColor.value = [0.015, 0.02, 0.03, 1];
+  pipeline.parameters.clearColor.value = [0, 0, 0];
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_PARAMETER",
+  );
+  pipeline.parameters.clearColor.value = [0.015, 0.02, 0.03, 1];
+  pipeline.parameters.clearColor.value = [0, 0, Number.NaN, 1];
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_PARAMETER",
+  );
+  pipeline.parameters.clearColor.value = [0.015, 0.02, 0.03, 1];
+  const texture = x.nodes.find((node) => node.id === "hdr");
+  texture.parameters.residency.value = "unknown";
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_PARAMETER",
+  );
+  texture.parameters.residency.value = "transient";
+  pipeline.parameters.clearDepth.value = -1;
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_PARAMETER",
+  );
+});
+
+test("adapter validates and lowers disconnected query socket defaults", () => {
+  const x = fixture();
+  const query = x.nodes.find((node) => node.id === "query");
+  const visible = query.sockets.find((socket) => socket.key === "isVisible");
+  visible.defaultValue.value = false;
+  const ir = adaptFxNodeSnapshot(x);
+  assert.equal(visible.defaultValue.value, false);
+  const parameters = ir.nodes.find((node) => node.id === "query").parameters;
+  assert.equal(parameters.isVisible, undefined);
+  assert.equal(parameters.visibleDefault, false);
+  assert.equal(parameters.frustumCulledDefault, false);
+  visible.defaultValue = { kind: "number", value: 0 };
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_SOCKET",
+  );
+  delete visible.defaultValue;
+  assert.throws(
+    () => adaptFxNodeSnapshot(x),
+    (error) => error.code === "AUTHORING_SOCKET",
+  );
+});
+test("adapter lowers the authoring-safe camera selector to the Rust wire field", () => {
+  const ir = adaptFxNodeSnapshot(fixture());
+  const parameters = ir.nodes.find((node) => node.id === "cull").parameters;
+  assert.deepEqual(parameters, { camera: "active" });
+  assert.equal(parameters.cameraSelection, undefined);
 });
 test("adapter deterministically emits the canonical schema, permits repeated types, omits muted links and maps sources", () => {
   const x = fixture(),
@@ -123,16 +281,14 @@ test("adapter deterministically emits the canonical schema, permits repeated typ
   assert.deepEqual(adaptFxNodeSnapshot(x, 7), a);
   assert.equal(a.schemaVersion, 2);
   assert.equal(a.graphId, GRAPH_ID);
-  assert.equal(
-    a.nodes.filter((n) => n.executor.key === "texture_spec").length,
-    2,
-  );
+  assert.equal(a.nodes.filter((n) => n.executor.key === "texture").length, 2);
   assert.ok(
-    Object.values(getSourceMap(a)).some((source) => source.input === "source"),
+    Object.values(getSourceMap(a)).some((source) => source.input === "color"),
   );
-  x.links.find((l) => l.id === "l_forward_color_copy_source").muted = true;
+  x.links.find((l) => l.id === "l_pbr_double_color_frame_out_color").muted = true;
   assert.equal(
-    adaptFxNodeSnapshot(x, 8).nodes.find((n) => n.id === "copy").inputs.source,
+    adaptFxNodeSnapshot(x, 8).nodes.find((n) => n.id === "frame_out").inputs
+      .color,
     undefined,
   );
 });
@@ -146,50 +302,165 @@ test("adapter rejects hostile shape, IDs, duplicates, catalog, sockets and type 
     );
   };
   reject((x) => (x.graphId = "bad"), "AUTHORING_CATALOG");
+  reject((x) => (x.catalogVersion = 2), "AUTHORING_CATALOG");
   reject((x) => (x.nodes[0].id = "bad id"), "AUTHORING_ID");
   reject((x) => (x.nodes[1].id = x.nodes[0].id), "AUTHORING_ID_DUPLICATE");
   reject((x) => (x.nodes[0].typeId = "wat"), "AUTHORING_NODE_TYPE");
   reject((x) => (x.nodes[0].sockets = []), "AUTHORING_SOCKET_SET");
   reject((x) => (x.links[0].toSocketId = "missing:x"), "AUTHORING_LINK");
   reject((x) => {
-    const link = x.links.find((l) => l.toSocketId === "copy:source");
-    link.fromNodeId = "scene";
-    link.fromSocketId = "scene:scene";
+    const link = x.links.find((l) => l.toSocketId === "frame_out:color");
+    link.fromNodeId = "mesh";
+    link.fromSocketId = "mesh:mesh";
   }, "AUTHORING_LINK_TYPE");
 });
 test("adapter counts only active incoming links and reports socket overflow", () => {
   const x = fixture();
-  const active = x.links.find((link) => link.toSocketId === "copy:source");
-  x.links.push({ ...structuredClone(active), id: "muted_duplicate", muted: true });
+  const active = x.links.find((link) => link.toSocketId === "frame_out:color");
+  x.links.push({
+    ...structuredClone(active),
+    id: "muted_duplicate",
+    muted: true,
+  });
   assert.doesNotThrow(() => adaptFxNodeSnapshot(x));
   x.links.push({ ...structuredClone(active), id: "active_overflow" });
   assert.throws(
     () => adaptFxNodeSnapshot(x),
-    (error) => error.code === "AUTHORING_LINK_INCOMING" && error.details.socketId === "copy:source",
+    (error) =>
+      error.code === "AUTHORING_LINK_INCOMING" &&
+      error.details.socketId === "frame_out:color",
   );
 });
 test("source map covers Rust fields, nested values, every input and is deeply frozen", () => {
   const snapshot = fixture();
-  snapshot.links.find((link) => link.toSocketId === "copy:source").muted = true;
-  const ir = adaptFxNodeSnapshot(snapshot, 9), map = getSourceMap(ir);
-  for (const path of ["schemaVersion", "graphId", "revision", "nodes", "nodes[0].id", "nodes[0].state", "nodes[0].executor.key", "nodes[0].executor.version", "nodes[0].parameters", "nodes[0].inputs"])
+  snapshot.links.find((link) => link.toSocketId === "frame_out:color").muted =
+    true;
+  const ir = adaptFxNodeSnapshot(snapshot, 9),
+    map = getSourceMap(ir);
+  for (const path of [
+    "schemaVersion",
+    "graphId",
+    "revision",
+    "nodes",
+    "nodes[0].id",
+    "nodes[0].state",
+    "nodes[0].executor.key",
+    "nodes[0].executor.version",
+    "nodes[0].parameters",
+    "nodes[0].inputs",
+  ])
     assert.ok(map[path], path);
   for (const [index, node] of ir.nodes.entries())
     for (const input of Object.keys(semanticCatalog[node.executor.key].inputs))
       assert.ok(map[`nodes[${index}].inputs.${input}`]);
-  assert.ok(Object.keys(map).some((path) => /parameters\..+\[|parameters\..+\..+/.test(path)));
+  assert.ok(
+    Object.keys(map).some((path) =>
+      /parameters\..+\[|parameters\..+\..+/.test(path),
+    ),
+  );
   const socket = Object.values(map).find((source) => source.kind === "socket");
-  const unconnected = Object.values(map).find((source) => source.unconnected === true);
+  const unconnected = Object.values(map).find(
+    (source) => source.unconnected === true,
+  );
   const link = Object.values(map).find((source) => source.kind === "link");
   assert.ok(socket?.socketId && unconnected?.socketId);
-  assert.equal(ir.nodes.find((node) => node.id === "copy").inputs.source, undefined);
-  for (const field of ["linkId", "fromNodeId", "fromSocketId", "toNodeId", "toSocketId", "muted"])
+  assert.equal(
+    ir.nodes.find((node) => node.id === "frame_out").inputs.source,
+    undefined,
+  );
+  for (const field of [
+    "linkId",
+    "fromNodeId",
+    "fromSocketId",
+    "toNodeId",
+    "toSocketId",
+    "muted",
+  ])
     assert.ok(Object.hasOwn(link, field), field);
   assert.ok(Object.isFrozen(map) && Object.isFrozen(link));
 });
+test("texture source maps identify every flat authored control", () => {
+  const snapshot = fixture();
+  const hdr = snapshot.nodes.find((node) => node.id === "hdr");
+  hdr.parameters.viewFormat.value = "rgba16_float";
+  const ir = adaptFxNodeSnapshot(snapshot);
+  const index = ir.nodes.findIndex((node) => node.id === "hdr");
+  const root = `nodes[${index}].parameters`;
+  const map = getSourceMap(ir);
+  const source = (parameter) => ({
+    kind: "parameter",
+    nodeId: "hdr",
+    parameter,
+  });
+  assert.deepEqual(map[`${root}.residency`], source("residency"));
+  assert.deepEqual(map[`${root}.texture`], { kind: "node", nodeId: "hdr" });
+  for (const [path, parameter] of [
+    ["dimension", "dimension"],
+    ["format", "format"],
+    ["extent", "extentMode"],
+    ["extent.kind", "extentMode"],
+    ["extent.depthOrArrayLayers", "depthOrArrayLayers"],
+    ["extent.width", "extentMode"],
+    ["extent.width.numerator", "relativeWidthNumerator"],
+    ["extent.width.denominator", "relativeWidthDenominator"],
+    ["extent.height", "extentMode"],
+    ["extent.height.numerator", "relativeHeightNumerator"],
+    ["extent.height.denominator", "relativeHeightDenominator"],
+    ["mipLevelCount", "mipLevelCount"],
+    ["sampleCount", "sampleCount"],
+    ["viewFormats", "viewFormat"],
+    ["viewFormats[0]", "viewFormat"],
+  ])
+    assert.deepEqual(map[`${root}.texture.${path}`], source(parameter), path);
+  assert.ok(!Object.values(map).some((value) => value.parameter === "texture"));
+
+  const absolute = fixture();
+  absolute.nodes.find((node) => node.id === "hdr").parameters.extentMode.value =
+    "absolute";
+  const absoluteIr = adaptFxNodeSnapshot(absolute);
+  const absoluteIndex = absoluteIr.nodes.findIndex((node) => node.id === "hdr");
+  const absoluteMap = getSourceMap(absoluteIr);
+  assert.deepEqual(
+    absoluteMap[`nodes[${absoluteIndex}].parameters.texture.extent.width`],
+    source("absoluteWidth"),
+  );
+  assert.deepEqual(
+    absoluteMap[`nodes[${absoluteIndex}].parameters.texture.extent.height`],
+    source("absoluteHeight"),
+  );
+});
+test("unsupported texture diagnostics map to their exact authored controls", () => {
+  const ir = adaptFxNodeSnapshot(fixture());
+  const index = ir.nodes.findIndex((node) => node.id === "hdr");
+  for (const [suffix, parameter] of [
+    ["dimension", "dimension"],
+    ["mipLevelCount", "mipLevelCount"],
+    ["sampleCount", "sampleCount"],
+    ["extent.depthOrArrayLayers", "depthOrArrayLayers"],
+  ]) {
+    const path = `nodes[${index}].parameters.texture.${suffix}`;
+    const mapped = mapAuthoringDiagnostic(
+      ir,
+      new RendererError("GRAPH_UNSUPPORTED_FEATURE", {
+        message: "unsupported",
+        path,
+      }),
+    );
+    assert.equal(mapped.path, path);
+    assert.deepEqual(mapped.source, {
+      kind: "parameter",
+      nodeId: "hdr",
+      parameter,
+    });
+  }
+});
 test("diagnostic mapper creates a frozen RendererError DTO with fallbacks and prefix matching", () => {
   const ir = adaptFxNodeSnapshot(fixture());
-  const original = new RendererError("GRAPH_INPUT", { message: "bad", field: "nodes[0].executor.key.more", nested: { x: 1 } });
+  const original = new RendererError("GRAPH_INPUT", {
+    message: "bad",
+    field: "nodes[0].executor.key.more",
+    nested: { x: 1 },
+  });
   const mapped = mapAuthoringDiagnostic(ir, original);
   assert.notStrictEqual(mapped, original);
   assert.equal(mapped.code, original.code);
@@ -262,24 +533,44 @@ test("controller shares in-flight apply", async () => {
   await a;
 });
 test("controller retains mapped diagnostic while apply rejects the original and subscriptions agree", async () => {
-  const original = new RendererError("GRAPH_BAD", { path: "nodes[0].id", message: "bad" });
+  const original = new RendererError("GRAPH_BAD", {
+    path: "nodes[0].id",
+    message: "bad",
+  });
   const states = [];
   const c = new AuthoringController({
     adapt: (snapshot, revision) => adaptFxNodeSnapshot(snapshot, revision),
-    renderer: { compileGraph: async () => { throw original; }, switchCompiledGraph: async () => {}, dropCompiledGraph: async () => {} },
+    renderer: {
+      compileGraph: async () => {
+        throw original;
+      },
+      switchCompiledGraph: async () => {},
+      dropCompiledGraph: async () => {},
+    },
   });
   c.subscribe((state) => states.push(state));
   c.markDirty(fixture());
   await assert.rejects(c.apply(), (error) => error === original);
   assert.notStrictEqual(states.at(-1).error, original);
   let subscribed;
-  c.subscribe((state) => { subscribed = state; })();
+  c.subscribe((state) => {
+    subscribed = state;
+  })();
   assert.strictEqual(subscribed.error, states.at(-1).error);
   await c.destroy();
 });
 test("apply after destroy does not compile and destroy returns one strict promise", async () => {
   let compiles = 0;
-  const c = new AuthoringController({ adapt: () => ({}), renderer: { compileGraph: async () => { compiles++; }, dropCompiledGraph: async () => {}, switchCompiledGraph: async () => {} } });
+  const c = new AuthoringController({
+    adapt: () => ({}),
+    renderer: {
+      compileGraph: async () => {
+        compiles++;
+      },
+      dropCompiledGraph: async () => {},
+      switchCompiledGraph: async () => {},
+    },
+  });
   c.markDirty({});
   const first = c.destroy();
   assert.strictEqual(c.destroy(), first);

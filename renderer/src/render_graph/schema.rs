@@ -114,11 +114,13 @@ pub enum TriStatePredicate {
     RequiredFalse,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(deny_unknown_fields)]
-pub struct MeshFilter {
-    pub flag: MeshFlag,
-    pub predicate: TriStatePredicate,
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePredicate {
+    Any,
+    RequiredTrue,
+    RequiredFalse,
+    Never,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]

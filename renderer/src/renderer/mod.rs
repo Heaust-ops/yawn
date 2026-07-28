@@ -35,17 +35,19 @@ struct GpuTextureSlot {
 enum PreparedExecution {
     FrustumCull,
     MeshQuery,
-    LegacyForward {
+    PipelineRegistry,
+    Pipeline {
         execution: usize,
-        variants: Vec<(crate::render_data::PipelineKey, wgpu::RenderPipeline)>,
+        base: crate::render_data::PipelineKey,
+        variant: wgpu::RenderPipeline,
     },
     Fullscreen {
         execution: usize,
+        frame_out: bool,
         bind_group: wgpu::BindGroup,
         pipeline: wgpu::RenderPipeline,
         _uniform: wgpu::Buffer,
     },
-    Present,
 }
 
 struct ActiveCompiledGraph {
@@ -81,7 +83,10 @@ fn resolve_culling_frustum(
     query: crate::render_graph::MeshQueryRuntimeKey,
     read: impl FnOnce() -> Option<Result<[[f32; 4]; 6], crate::camera::FrustumError>>,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
-    if query.frustum_culled == crate::render_graph::TriStatePredicate::Any {
+    if matches!(
+        query.frustum_culled,
+        crate::render_graph::RuntimePredicate::Any | crate::render_graph::RuntimePredicate::Never
+    ) {
         return Ok(None);
     }
     match read() {
@@ -177,18 +182,25 @@ fn resolve_switch_request(
 
 #[cfg(test)]
 mod switch_request_tests {
+    fn valid_compile_graph(graph_id: &str, revision: u64) -> Vec<u8> {
+        let mut graph = crate::render_graph::tests::full_cull_graph();
+        graph["graphId"] = serde_json::json!(graph_id);
+        graph["revision"] = serde_json::json!(revision);
+        serde_json::to_vec(&graph).unwrap()
+    }
+
     use super::*;
 
-    fn query(visible: crate::render_graph::TriStatePredicate) -> UploadGraph {
+    fn query(visible: crate::render_graph::RuntimePredicate) -> UploadGraph {
         UploadGraph::Compiled(crate::render_graph::MeshQueryRuntimeKey {
             visible,
-            frustum_culled: crate::render_graph::TriStatePredicate::Any,
+            frustum_culled: crate::render_graph::RuntimePredicate::Any,
         })
     }
 
     #[test]
     fn upload_selection_follows_the_graph_rendered_for_the_commit_frame() {
-        use crate::render_graph::TriStatePredicate::{Any, RequiredFalse, RequiredTrue};
+        use crate::render_graph::RuntimePredicate::{Any, RequiredFalse, RequiredTrue};
         let selected =
             |pending, active| upload_query_for_render(pending, active).map(|query| query.visible);
         assert_eq!(
@@ -214,7 +226,7 @@ mod switch_request_tests {
 
     #[test]
     fn frustum_preflight_skips_any_and_distinguishes_missing_from_invalid() {
-        use crate::render_graph::TriStatePredicate::{Any, RequiredFalse, RequiredTrue};
+        use crate::render_graph::RuntimePredicate::{Any, RequiredFalse, RequiredTrue};
         let query = |frustum_culled| crate::render_graph::MeshQueryRuntimeKey {
             visible: RequiredTrue,
             frustum_culled,
@@ -245,8 +257,10 @@ mod switch_request_tests {
     #[test]
     fn resolves_at_command_boundary_before_gpu_work() {
         let mut registry = crate::render_graph::Registry::default();
-        let bytes = br#"{"schemaVersion":2,"graphId":"switch","revision":1,"nodes":[]}"#;
-        let (id, _) = registry.compile(bytes).unwrap();
+        let mut graph = crate::render_graph::tests::full_cull_graph();
+        graph["graphId"] = serde_json::json!("switch");
+        let bytes = serde_json::to_vec(&graph).unwrap();
+        let (id, _) = registry.compile(&bytes).unwrap();
         let active = "existing_graph";
         let pending: Option<&str> = None;
         assert_eq!(
@@ -279,9 +293,7 @@ mod switch_request_tests {
     #[test]
     fn resize_restart_snapshot_remains_bound_to_its_immutable_registry_revision() {
         let mut registry = crate::render_graph::Registry::default();
-        let (id, _) = registry
-            .compile(br#"{"schemaVersion":2,"graphId":"resize","revision":1,"nodes":[]}"#)
-            .unwrap();
+        let (id, _) = registry.compile(&valid_compile_graph("resize", 1)).unwrap();
         let revision_one = registry.get(id).unwrap().clone();
         let in_flight = InFlightPreparation {
             token: 1,
@@ -289,9 +301,7 @@ mod switch_request_tests {
             purpose: PreparationPurpose::Resize,
             graph: revision_one,
         };
-        let (revision_two_id, _) = registry
-            .compile(br#"{"schemaVersion":2,"graphId":"resize","revision":2,"nodes":[]}"#)
-            .unwrap();
+        let (revision_two_id, _) = registry.compile(&valid_compile_graph("resize", 2)).unwrap();
         let original = registry.get(id).unwrap();
         let revision_two = registry.get(revision_two_id).unwrap();
         assert_eq!(in_flight.graph.revision, 1);
@@ -728,6 +738,26 @@ impl<T: Scene + 'static> Renderer<T> {
     ) -> Result<ActiveCompiledGraph, crate::render_graph::GraphError> {
         use crate::render_graph::*;
         let fail = |message| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", message);
+        let resolved_pipelines = graph
+            .executions
+            .iter()
+            .enumerate()
+            .map(|(index, execution)| {
+                let NormalizedParameters::Pipeline { pipeline, .. } = &execution.parameters else {
+                    return Ok(None);
+                };
+                self.resources
+                    .find_pipeline(pipeline)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        GraphError::at(
+                            "GRAPH_EXECUTION_UNSUPPORTED",
+                            format!("pipeline '{pipeline}' is not registered"),
+                            format!("executions[{index}].parameters.pipeline"),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut textures = Vec::with_capacity(runtime.allocations.classes.len());
         for class in &runtime.allocations.classes {
             let mut gpu_class = Vec::with_capacity(class.slots.len());
@@ -845,37 +875,53 @@ impl<T: Scene + 'static> Renderer<T> {
             match execution.executor.key.as_str() {
                 "frustum_cull" => executions.push(PreparedExecution::FrustumCull),
                 "mesh_query" => executions.push(PreparedExecution::MeshQuery),
-                "present" => executions.push(PreparedExecution::Present),
-                "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur"
+                "frame_out" | "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur"
                 | "bloom_composite" | "luminance_edge" => {
-                    let sampled: Vec<_> = execution
-                        .accesses
-                        .iter()
-                        .filter(|a| matches!(a.mode, AccessMode::SampledTexture))
-                        .map(|a| a.resource)
-                        .collect();
-                    let source = *sampled
-                        .first()
-                        .ok_or_else(|| fail("fullscreen source missing"))?;
-                    let second = *sampled.get(1).unwrap_or(&source);
-                    let values: [f32; 8] = match execution.parameters {
-                        NormalizedParameters::ToneMap { exposure } => {
-                            [exposure, 0., 0., 0., 0., 0., 0., 0.]
+                    let frame_out = execution.executor.key == "frame_out";
+                    let (source, second) = if frame_out {
+                        let ExecutionKind::FrameOut { color } = execution.kind else {
+                            return Err(fail("frame_out kind mismatch"));
+                        };
+                        (color, color)
+                    } else {
+                        match execution.inputs.as_slice() {
+                            [source, _color_target] => (source.resource, source.resource),
+                            [source, bloom, _color_target]
+                                if execution.executor.key == "bloom_composite" =>
+                            {
+                                (source.resource, bloom.resource)
+                            }
+                            _ => return Err(fail("fullscreen inputs mismatch")),
                         }
-                        NormalizedParameters::BloomExtract { threshold, knee } => {
-                            [threshold, knee, 0., 0., 0., 0., 0., 0.]
-                        }
-                        NormalizedParameters::BloomBlur { direction, radius } => {
-                            [direction[0], direction[1], radius, 0., 0., 0., 0., 0.]
-                        }
-                        NormalizedParameters::BloomComposite { intensity } => {
-                            [intensity, 0., 0., 0., 0., 0., 0., 0.]
-                        }
-                        NormalizedParameters::LuminanceEdge { strength } => {
-                            [strength, 0., 0., 0., 0., 0., 0., 0.]
-                        }
-                        _ => [0.; 8],
                     };
+                    let values: [f32; 8] =
+                        match (execution.executor.key.as_str(), &execution.parameters) {
+                            (
+                                "fullscreen_copy" | "frame_out",
+                                NormalizedParameters::FullscreenCopy
+                                | NormalizedParameters::FrameOut,
+                            ) => [0.; 8],
+                            ("tone_map", NormalizedParameters::ToneMap { exposure }) => {
+                                [*exposure, 0., 0., 0., 0., 0., 0., 0.]
+                            }
+                            (
+                                "bloom_extract",
+                                NormalizedParameters::BloomExtract { threshold, knee },
+                            ) => [*threshold, *knee, 0., 0., 0., 0., 0., 0.],
+                            (
+                                "bloom_blur",
+                                NormalizedParameters::BloomBlur { direction, radius },
+                            ) => [direction[0], direction[1], *radius, 0., 0., 0., 0., 0.],
+                            (
+                                "bloom_composite",
+                                NormalizedParameters::BloomComposite { intensity },
+                            ) => [*intensity, 0., 0., 0., 0., 0., 0., 0.],
+                            (
+                                "luminance_edge",
+                                NormalizedParameters::LuminanceEdge { strength },
+                            ) => [*strength, 0., 0., 0., 0., 0., 0., 0.],
+                            _ => return Err(fail("executor parameters mismatch")),
+                        };
                     use wgpu::util::DeviceExt;
                     let uniform =
                         self.context
@@ -885,17 +931,35 @@ impl<T: Scene + 'static> Renderer<T> {
                                 contents: bytemuck::cast_slice(&values),
                                 usage: wgpu::BufferUsages::UNIFORM,
                             });
-                    let ExecutionKind::Render {
-                        color_attachments, ..
-                    } = &execution.kind
-                    else {
-                        return Err(fail("fullscreen execution is not render"));
+                    let target_format = if frame_out {
+                        runtime.surface.format
+                    } else {
+                        let ExecutionKind::Render {
+                            color_attachments, ..
+                        } = &execution.kind
+                        else {
+                            return Err(fail("fullscreen execution is not render"));
+                        };
+                        let target = color_attachments
+                            .first()
+                            .ok_or_else(|| fail("fullscreen target missing"))?
+                            .resource;
+                        let a = runtime
+                            .allocations
+                            .resource_allocations
+                            .get(target as usize)
+                            .copied()
+                            .flatten()
+                            .ok_or_else(|| fail("fullscreen target allocation missing"))?;
+                        runtime
+                            .allocations
+                            .classes
+                            .get(a.class as usize)
+                            .and_then(|class| class.slots.get(a.slot as usize))
+                            .ok_or_else(|| fail("fullscreen target allocation is invalid"))?
+                            .descriptor
+                            .format
                     };
-                    let target = color_attachments
-                        .first()
-                        .ok_or_else(|| fail("fullscreen target missing"))?
-                        .resource;
-                    let target_format = if graph.resources.get(target as usize).is_some_and(|r| matches!(r.plan, ResourcePlan::Texture { family, .. } if family == runtime.allocations.surface_family)) { runtime.surface.format } else { let a=runtime.allocations.resource_allocations[target as usize].ok_or_else(|| fail("fullscreen target allocation missing"))?; runtime.allocations.classes[a.class as usize].slots[a.slot as usize].descriptor.format };
                     let entry = match execution.executor.key.as_str() {
                         "fullscreen_copy" => "fs_copy",
                         "tone_map" => "fs_tone_map",
@@ -903,7 +967,8 @@ impl<T: Scene + 'static> Renderer<T> {
                         "bloom_blur" => "fs_bloom_blur",
                         "bloom_composite" => "fs_bloom_composite",
                         "luminance_edge" => "fs_luminance_edge",
-                        _ => unreachable!(),
+                        "frame_out" => "fs_copy",
+                        _ => return Err(fail("fullscreen executor mismatch")),
                     };
                     let pipeline = self.context.device.create_render_pipeline(
                         &wgpu::RenderPipelineDescriptor {
@@ -963,36 +1028,25 @@ impl<T: Scene + 'static> Renderer<T> {
                             });
                     executions.push(PreparedExecution::Fullscreen {
                         execution: index,
+                        frame_out,
                         bind_group,
                         pipeline,
                         _uniform: uniform,
                     });
                 }
-                "legacy_forward" => {
+                "pipeline_registry" => executions.push(PreparedExecution::PipelineRegistry),
+                "pipeline" => {
                     let ExecutionKind::Render {
                         color_attachments,
                         depth_stencil,
                     } = &execution.kind
                     else {
-                        return Err(fail("legacy forward is not render"));
+                        return Err(fail("pipeline is not render"));
                     };
                     let color = color_attachments
                         .first()
-                        .ok_or_else(|| fail("legacy color missing"))?;
-                    let color_is_surface = graph
-                        .resources
-                        .get(color.resource as usize)
-                        .is_some_and(|resource| {
-                            matches!(
-                                resource.plan,
-                                ResourcePlan::SurfaceTarget { family }
-                                    | ResourcePlan::Texture { family, .. }
-                                    if family == runtime.allocations.surface_family
-                            )
-                        });
-                    let color_format = if color_is_surface {
-                        runtime.surface.format
-                    } else {
+                        .ok_or_else(|| fail("pipeline color missing"))?;
+                    let color_format = {
                         let a = runtime
                             .allocations
                             .resource_allocations
@@ -1027,19 +1081,21 @@ impl<T: Scene + 'static> Renderer<T> {
                                 .ok_or_else(|| fail("depth allocation invalid"))
                         })
                         .transpose()?;
-                    let config = execution
-                        .inputs
-                        .iter()
-                        .filter_map(|i| graph.resources.get(i.resource as usize))
-                        .find_map(|r| {
-                            if let ResourcePlan::DepthStencilConfig { config } = r.plan {
-                                Some(config)
-                            } else {
-                                None
-                            }
-                        })
-                        .ok_or_else(|| fail("depth config missing"))?;
-                    let compare = match config.depth_compare {
+                    let NormalizedParameters::Pipeline {
+                        pipeline: _,
+                        depth_compare,
+                        depth_write_enabled,
+                        ..
+                    } = &execution.parameters
+                    else {
+                        return Err(fail("pipeline parameters mismatch"));
+                    };
+                    let base = resolved_pipelines
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| fail("resolved pipeline missing"))?;
+                    let compare = match depth_compare {
                         CompareFunction::Never => wgpu::CompareFunction::Never,
                         CompareFunction::Less => wgpu::CompareFunction::Less,
                         CompareFunction::LessEqual => wgpu::CompareFunction::LessEqual,
@@ -1049,25 +1105,21 @@ impl<T: Scene + 'static> Renderer<T> {
                         CompareFunction::NotEqual => wgpu::CompareFunction::NotEqual,
                         CompareFunction::Always => wgpu::CompareFunction::Always,
                     };
-                    let mut variants = Vec::new();
-                    let bases: Vec<_> = self.resources.pipeline_keys().collect();
-                    for base in bases {
-                        let variant = self
-                            .resources
-                            .create_target_variant(
-                                &self.context.device,
-                                base,
-                                color_format,
-                                depth_format,
-                                compare,
-                                config.depth_write_enabled,
-                            )
-                            .map_err(|e| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", e))?;
-                        variants.push((base, variant));
-                    }
-                    executions.push(PreparedExecution::LegacyForward {
+                    let variant = self
+                        .resources
+                        .create_target_variant(
+                            &self.context.device,
+                            base,
+                            color_format,
+                            depth_format,
+                            compare,
+                            *depth_write_enabled,
+                        )
+                        .map_err(|e| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", e))?;
+                    executions.push(PreparedExecution::Pipeline {
                         execution: index,
-                        variants,
+                        base,
+                        variant,
                     });
                 }
                 _ => return Err(fail("unsupported prepared execution")),

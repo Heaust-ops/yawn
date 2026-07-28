@@ -15,15 +15,25 @@ struct TextureParameters {
     texture: TextureDescriptor,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct DepthParameters {
-    depth_compare: CompareFunction,
-    depth_write_enabled: bool,
-    clear_depth: f32,
+#[serde(deny_unknown_fields)]
+struct CullParameters {
+    camera: ActiveCamera,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ForwardParameters {
+struct QueryParameters {
+    visible_predicate: TriStatePredicate,
+    visible_default: bool,
+    frustum_culled_predicate: TriStatePredicate,
+    frustum_culled_default: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct PipelineParameters {
+    pipeline: String,
+    depth_compare: CompareFunction,
+    depth_write_enabled: bool,
+    clear_depth: f32,
     clear_color: [f64; 4],
 }
 #[derive(Deserialize)]
@@ -157,11 +167,12 @@ fn validate_name_grammar(s: &str, path: impl Into<String>) -> Result<(), GraphEr
     }
 }
 
-pub fn mesh_predicate_matches(predicate: TriStatePredicate, flag: bool) -> bool {
+pub fn mesh_predicate_matches(predicate: RuntimePredicate, flag: bool) -> bool {
     match predicate {
-        TriStatePredicate::Any => true,
-        TriStatePredicate::RequiredTrue => flag,
-        TriStatePredicate::RequiredFalse => !flag,
+        RuntimePredicate::Any => true,
+        RuntimePredicate::RequiredTrue => flag,
+        RuntimePredicate::RequiredFalse => !flag,
+        RuntimePredicate::Never => false,
     }
 }
 
@@ -349,12 +360,12 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
         }};
     }
     Ok(match node.executor.key.as_str() {
-        "surface_target" => empty!(NormalizedParameters::SurfaceTarget),
-        "scene_table" => empty!(NormalizedParameters::SceneTable),
-        "local_aabb_buffer" => empty!(NormalizedParameters::LocalAabbBuffer),
-        "camera_frustum" => empty!(NormalizedParameters::CameraFrustum),
-        "visibility_flags" => empty!(NormalizedParameters::VisibilityFlags),
-        "frustum_cull" => empty!(NormalizedParameters::FrustumCull),
+        "mesh" => empty!(NormalizedParameters::Mesh),
+        "frustum_cull" => {
+            let p: CullParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::FrustumCull { camera: p.camera }
+        }
         "fullscreen_copy" => empty!(NormalizedParameters::FullscreenCopy),
         "tone_map" => {
             let p: ToneMapParameters =
@@ -402,8 +413,8 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 strength: range(p.strength, 0.0, 16.0, format!("{base}.strength"))?,
             }
         }
-        "present" => empty!(NormalizedParameters::Present),
-        "texture_spec" => {
+        "frame_out" => empty!(NormalizedParameters::FrameOut),
+        "texture" => {
             let p: TextureParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
             if matches!(
@@ -416,100 +427,86 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                     format!("{base}.residency"),
                 ));
             }
-            NormalizedParameters::TextureSpec {
+            let unsupported = |suffix: &str| {
+                error(
+                    "GRAPH_UNSUPPORTED_FEATURE",
+                    "texture feature is unsupported",
+                    format!("{base}.texture.{suffix}"),
+                )
+            };
+            if p.texture.dimension != TextureDimension::D2 {
+                return Err(unsupported("dimension"));
+            }
+            if p.texture.mip_level_count != 1 {
+                return Err(unsupported("mipLevelCount"));
+            }
+            if p.texture.sample_count != 1 {
+                return Err(unsupported("sampleCount"));
+            }
+            let depth_or_array_layers = match &p.texture.extent {
+                TextureExtent::Absolute {
+                    depth_or_array_layers,
+                    ..
+                }
+                | TextureExtent::SurfaceRelative {
+                    depth_or_array_layers,
+                    ..
+                } => *depth_or_array_layers,
+            };
+            if depth_or_array_layers != 1 {
+                return Err(unsupported("extent.depthOrArrayLayers"));
+            }
+            NormalizedParameters::Texture {
                 residency: p.residency,
-                texture: normalize_texture(p.texture, &base)?,
+                descriptor: normalize_texture(p.texture, &base)?,
             }
         }
         "mesh_query" => {
-            let object = node.parameters.as_object().ok_or_else(|| {
-                error(
-                    "GRAPH_PARAMETERS_INVALID",
-                    "parameters must be an object",
-                    base.clone(),
-                )
-            })?;
-            if object.len() != 1 || !object.contains_key("filters") {
-                return Err(error(
-                    "GRAPH_PARAMETERS_INVALID",
-                    "mesh query parameters must contain only filters",
-                    base.clone(),
-                ));
-            }
-            let filters = object["filters"].as_array().ok_or_else(|| {
-                error(
-                    "GRAPH_PARAMETERS_INVALID",
-                    "filters must be an array",
-                    format!("{base}.filters"),
-                )
-            })?;
-            let mut found = [None, None];
-            for (j, value) in filters.iter().enumerate() {
-                let filter = value.as_object().ok_or_else(|| {
-                    error(
-                        "GRAPH_PARAMETERS_INVALID",
-                        "filter must be an object",
-                        format!("{base}.filters[{j}]"),
-                    )
-                })?;
-                if filter.len() != 2
-                    || !filter.contains_key("flag")
-                    || !filter.contains_key("predicate")
-                {
-                    return Err(error(
-                        "GRAPH_PARAMETERS_INVALID",
-                        "filter must contain flag and predicate",
-                        format!("{base}.filters[{j}]"),
-                    ));
-                }
-                let flag: MeshFlag =
-                    serde_json::from_value(filter["flag"].clone()).map_err(|e| {
-                        error(
-                            "GRAPH_PARAMETERS_INVALID",
-                            &e.to_string(),
-                            format!("{base}.filters[{j}].flag"),
-                        )
-                    })?;
-                let predicate: TriStatePredicate =
-                    serde_json::from_value(filter["predicate"].clone()).map_err(|e| {
-                        error(
-                            "GRAPH_PARAMETERS_INVALID",
-                            &e.to_string(),
-                            format!("{base}.filters[{j}].predicate"),
-                        )
-                    })?;
-                let index = if flag == MeshFlag::IsVisible { 0 } else { 1 };
-                if found[index].replace(predicate).is_some() {
-                    return Err(error(
-                        "GRAPH_PARAMETERS_INVALID",
-                        "duplicate mesh flag",
-                        format!("{base}.filters[{j}].flag"),
-                    ));
-                }
-            }
-            if found.iter().any(Option::is_none) {
-                return Err(error(
-                    "GRAPH_PARAMETERS_INVALID",
-                    "both mesh flags are required",
-                    format!("{base}.filters"),
-                ));
+            let p: QueryParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            let fold = |predicate, default, linked| match (predicate, linked, default) {
+                (TriStatePredicate::Any, _, _) => RuntimePredicate::Any,
+                (TriStatePredicate::RequiredTrue, true, _) => RuntimePredicate::RequiredTrue,
+                (TriStatePredicate::RequiredFalse, true, _) => RuntimePredicate::RequiredFalse,
+                (TriStatePredicate::RequiredTrue, false, true)
+                | (TriStatePredicate::RequiredFalse, false, false) => RuntimePredicate::Any,
+                _ => RuntimePredicate::Never,
+            };
+            let mut visible = fold(
+                p.visible_predicate,
+                p.visible_default,
+                node.inputs.contains_key("isVisible"),
+            );
+            let mut culled = fold(
+                p.frustum_culled_predicate,
+                p.frustum_culled_default,
+                node.inputs.contains_key("isFrustumCulled"),
+            );
+            if visible == RuntimePredicate::Never || culled == RuntimePredicate::Never {
+                visible = RuntimePredicate::Never;
+                culled = RuntimePredicate::Never;
             }
             NormalizedParameters::MeshQuery {
-                filters: [
-                    NormalizedMeshFilter {
-                        flag: MeshFlag::IsVisible,
-                        predicate: found[0].unwrap(),
-                    },
-                    NormalizedMeshFilter {
-                        flag: MeshFlag::IsFrustumCulled,
-                        predicate: found[1].unwrap(),
-                    },
-                ],
+                visible_predicate: visible,
+                frustum_culled_predicate: culled,
             }
         }
-        "depth_stencil_config" => {
-            let p: DepthParameters =
+        "pipeline_registry" => empty!(NormalizedParameters::PipelineRegistry),
+        "pipeline" => {
+            let p: PipelineParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            let valid_name = !p.pipeline.is_empty()
+                && p.pipeline.len() <= 64
+                && p.pipeline.bytes().enumerate().all(|(i, c)| {
+                    c == b'_' || c.is_ascii_alphanumeric() && (i > 0 || c.is_ascii_alphabetic())
+                });
+            if !valid_name {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "pipeline must be a 1-64 byte identifier",
+                    format!("{base}.pipeline"),
+                ));
+            }
             if !p.clear_depth.is_finite() || !(0.0..=1.0).contains(&p.clear_depth) {
                 return Err(error(
                     "GRAPH_PARAMETERS_INVALID",
@@ -517,17 +514,6 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                     format!("{base}.clearDepth"),
                 ));
             }
-            NormalizedParameters::DepthStencilConfig {
-                config: NormalizedDepthStencil {
-                    depth_compare: p.depth_compare,
-                    depth_write_enabled: p.depth_write_enabled,
-                    clear_depth: p.clear_depth,
-                },
-            }
-        }
-        "legacy_forward" => {
-            let p: ForwardParameters =
-                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
             if p.clear_color.iter().any(|x| !x.is_finite()) {
                 return Err(error(
                     "GRAPH_PARAMETERS_INVALID",
@@ -535,7 +521,11 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                     format!("{base}.clearColor"),
                 ));
             }
-            NormalizedParameters::LegacyForward {
+            NormalizedParameters::Pipeline {
+                pipeline: p.pipeline,
+                depth_compare: p.depth_compare,
+                depth_write_enabled: p.depth_write_enabled,
+                clear_depth: p.clear_depth,
                 clear_color: p.clear_color,
             }
         }
@@ -568,19 +558,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 format!("nodes[{i}].inputs"),
             ));
         }
-    }
-    if graph
-        .nodes
-        .iter()
-        .filter(|n| n.executor.key == "present")
-        .count()
-        > 64
-    {
-        return Err(error(
-            "GRAPH_LIMIT_EXCEEDED",
-            "present count exceeds 64",
-            "nodes",
-        ));
     }
     if graph.schema_version != 2 {
         return Err(GraphError::new(
@@ -673,8 +650,21 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         .enumerate()
         .map(|(i, n)| decode(n, i))
         .collect::<Result<_, _>>()?;
+    if graph
+        .nodes
+        .iter()
+        .filter(|node| node.executor.key == "frame_out" && node.state == NodeState::Enabled)
+        .count()
+        != 1
+    {
+        return Err(error(
+            "GRAPH_EXECUTION_UNSUPPORTED",
+            "exactly one frame_out is required",
+            "nodes",
+        ));
+    }
     for (i, n) in graph.nodes.iter().enumerate() {
-        if n.state != NodeState::Enabled {
+        if n.state != NodeState::Enabled && n.executor.key != "frame_out" {
             return Err(error(
                 "GRAPH_NODE_STATE_INVALID",
                 "muted nodes are unsupported",
@@ -710,12 +700,12 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     }
     for (i, n) in graph.nodes.iter().enumerate() {
         for input in contracts[i].inputs {
-            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { filters } if filters.iter().any(|f| f.flag.input_socket() == input.name && f.predicate == TriStatePredicate::Any));
+            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { visible_predicate, frustum_culled_predicate } if (input.name == "isVisible" && matches!(visible_predicate, RuntimePredicate::Any | RuntimePredicate::Never)) || (input.name == "isFrustumCulled" && matches!(frustum_culled_predicate, RuntimePredicate::Any | RuntimePredicate::Never)));
             if !n.inputs.contains_key(input.name) {
                 if input.cardinality == InputCardinality::RequiredOne
                     || (!inactive
                         && matches!(params[i], NormalizedParameters::MeshQuery { .. })
-                        && input.name != "scene")
+                        && input.name != "mesh")
                 {
                     return Err(error(
                         "GRAPH_SOCKET_CARDINALITY",
@@ -730,7 +720,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     let mut bound: Vec<BTreeMap<&str, BoundInput>> = vec![BTreeMap::new(); graph.nodes.len()];
     for (i, n) in graph.nodes.iter().enumerate() {
         for input in contracts[i].inputs {
-            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { filters } if filters.iter().any(|f| f.flag.input_socket() == input.name && f.predicate == TriStatePredicate::Any));
+            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { visible_predicate, frustum_culled_predicate } if (input.name == "isVisible" && matches!(visible_predicate, RuntimePredicate::Any | RuntimePredicate::Never)) || (input.name == "isFrustumCulled" && matches!(frustum_culled_predicate, RuntimePredicate::Any | RuntimePredicate::Never)));
             let Some(r) = n.inputs.get(input.name) else {
                 continue;
             };
@@ -741,10 +731,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 .enumerate()
                 .find(|(_, o)| o.name == r.socket)
                 .expect("producer sockets were globally validated");
-            let attachment_shape_checked_later = contracts[i].key == "legacy_forward"
-                && input.name == "depthTarget"
-                && out.semantic_type == SemanticType::SurfaceTarget;
-            if !accepts(input.accepted, out.semantic_type) && !attachment_shape_checked_later {
+            if !accepts(input.accepted, out.semantic_type) {
                 return Err(error(
                     "GRAPH_SOCKET_TYPE_MISMATCH",
                     "socket type mismatch",
@@ -782,15 +769,26 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             if !seen.insert(k.0) {
                 return None;
             }
-            if contracts[k.0].outputs[k.1 as usize].semantic_type == SemanticType::SceneTable {
+            if contracts[k.0].key == "mesh" {
+                let ordinal = contracts[k.0]
+                    .outputs
+                    .iter()
+                    .position(|output| output.semantic_type == SemanticType::MeshData)?;
+                return Some(OutputKey(k.0, ordinal as u16));
+            }
+            if contracts[k.0].outputs[k.1 as usize].semantic_type == SemanticType::MeshData {
                 return Some(k);
             }
-            k = bound[k.0].get("scene")?.producer;
+            k = bound[k.0]
+                .get("mesh")
+                .or_else(|| bound[k.0].get("pipelineIndices"))
+                .or_else(|| bound[k.0].get("activation"))?
+                .producer;
         }
     };
     for (i, c) in contracts.iter().enumerate() {
         if c.key == "frustum_cull"
-            && root(bound[i]["scene"].producer, &bound, &contracts)
+            && root(bound[i]["mesh"].producer, &bound, &contracts)
                 != root(bound[i]["localAabbs"].producer, &bound, &contracts)
         {
             return Err(error(
@@ -799,11 +797,23 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 format!("nodes[{i}].inputs.localAabbs"),
             ));
         }
-        if matches!(c.key, "mesh_query" | "legacy_forward") {
-            let scene = root(bound[i]["scene"].producer, &bound, &contracts);
+        if matches!(c.key, "mesh_query" | "pipeline_registry" | "pipeline") {
+            let scene_socket = if c.key == "pipeline_registry" {
+                "pipelineIndices"
+            } else {
+                "mesh"
+            };
+            let scene = root(bound[i][scene_socket].producer, &bound, &contracts);
             for (s, b) in &bound[i] {
                 if b.active
-                    && matches!(*s, "isVisible" | "isFrustumCulled" | "draws")
+                    && matches!(
+                        *s,
+                        "isVisible"
+                            | "isFrustumCulled"
+                            | "draws"
+                            | "pipelineIndices"
+                            | "activation"
+                    )
                     && root(b.producer, &bound, &contracts) != scene
                 {
                     return Err(error(
@@ -853,7 +863,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     let mut stack: Vec<_> = contracts
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.inherently_observable)
+        .filter(|(i, c)| c.inherently_observable && graph.nodes[*i].state == NodeState::Enabled)
         .map(|(i, _)| i)
         .collect();
     while let Some(i) = stack.pop() {
@@ -862,13 +872,26 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
     }
     // IDs are independent of scheduling: original node order, then contract output order.
+    // Source nodes expose only outputs that survived active-edge/liveness analysis;
+    // executable nodes retain their complete output shape for runtime lowering.
+    let referenced_outputs: HashSet<_> = edges
+        .iter()
+        .filter(|edge| live.contains(&edge.to_node))
+        .map(|edge| OutputKey(edge.from_node, edge.producer_output_ordinal))
+        .collect();
     let mut output_ids = BTreeMap::new();
     let mut resource_meta = Vec::new();
     for i in 0..graph.nodes.len() {
         if live.contains(&i) {
             for (o, out) in contracts[i].outputs.iter().enumerate() {
+                let key = OutputKey(i, o as u16);
+                if contracts[i].execution == ExecutionClass::Source
+                    && !referenced_outputs.contains(&key)
+                {
+                    continue;
+                }
                 let id = resource_meta.len() as u32;
-                output_ids.insert(OutputKey(i, o as u16), id);
+                output_ids.insert(key, id);
                 resource_meta.push((i, o as u16, *out));
             }
         }
@@ -884,28 +907,10 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
         let source = output_ids.get(&OutputKey(i, 0)).copied();
         match &params[i] {
-            NormalizedParameters::SurfaceTarget => {
-                let id = families.len() as u32;
-                let r = source.unwrap();
-                source_family.insert(OutputKey(i, 0), id);
-                families.push(TextureFamily {
-                    id,
-                    key: TextureFamilyKey {
-                        source_node: i as u32,
-                        source_socket: 0,
-                    },
-                    source: TextureFamilySource::ImportedSurface { resource: r },
-                    lifetime: Lifetime {
-                        first_use: 0,
-                        last_use: 0,
-                    },
-                    versions: vec![],
-                    usage: vec![],
-                    allocation: None,
-                    aliasable: false,
-                });
-            }
-            NormalizedParameters::TextureSpec { residency, texture } => {
+            NormalizedParameters::Texture {
+                residency,
+                descriptor,
+            } => {
                 let id = families.len() as u32;
                 let r = source.unwrap();
                 source_family.insert(OutputKey(i, 0), id);
@@ -918,7 +923,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     source: TextureFamilySource::AuthoredTexture {
                         resource: r,
                         residency: *residency,
-                        descriptor: texture.clone(),
+                        descriptor: descriptor.clone(),
                     },
                     lifetime: Lifetime {
                         first_use: 0,
@@ -940,7 +945,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             continue;
         }
         let transition_sockets: &[(&str, u16)] = match contracts[i].key {
-            "legacy_forward" => &[("colorTarget", 0), ("depthTarget", 1)],
+            "pipeline" => &[("colorTarget", 0), ("depthTarget", 1)],
             "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur" | "bloom_composite"
             | "luminance_edge" => &[("colorTarget", 0)],
             _ => continue,
@@ -1066,7 +1071,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         for input in contract
             .inputs
             .iter()
-            .filter(|input| matches!(input.role, InputRole::Present | InputRole::SampledTexture))
+            .filter(|input| matches!(input.role, InputRole::SampledTexture))
         {
             let key = bound[i][input.name].producer;
             if !version_of.contains_key(&key) {
@@ -1103,7 +1108,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         if !live.contains(&i) {
             continue;
         }
-        if contracts[i].key == "legacy_forward" {
+        if contracts[i].key == "pipeline" {
             if bound[i]["colorTarget"].producer == bound[i]["depthTarget"].producer
                 || matches!((version_of.get(&OutputKey(i, 0)), version_of.get(&OutputKey(i, 1))), (Some((cf, _, _)), Some((df, _, _))) if cf == df)
             {
@@ -1113,10 +1118,11 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     format!("nodes[{i}].inputs"),
                 ));
             }
-        } else if contracts[i]
-            .inputs
-            .iter()
-            .any(|input| matches!(input.role, InputRole::SampledTexture))
+        } else if contracts[i].key != "frame_out"
+            && contracts[i]
+                .inputs
+                .iter()
+                .any(|input| matches!(input.role, InputRole::SampledTexture))
         {
             let hazard = contracts[i].inputs.iter().filter(|input| matches!(input.role, InputRole::SampledTexture)).any(|input| matches!((version_of.get(&bound[i][input.name].producer), version_of.get(&OutputKey(i, 0))), (Some((sf, _, _)), Some((tf, _, _))) if sf == tf));
             if hazard {
@@ -1176,7 +1182,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
 
     // Validate every independently resolved attachment before graph cycle reporting.
     for i in 0..graph.nodes.len() {
-        if !live.contains(&i) || contracts[i].key != "legacy_forward" {
+        if !live.contains(&i) || contracts[i].key != "pipeline" {
             continue;
         }
         let (Some(&(cf, _, _)), Some(&(df, _, _))) = (
@@ -1185,33 +1191,19 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         ) else {
             continue;
         };
-        let cd = match &families[cf as usize].source {
-            TextureFamilySource::AuthoredTexture { descriptor, .. } => Some(descriptor),
-            _ => None,
-        };
-        let dd = match &families[df as usize].source {
-            TextureFamilySource::AuthoredTexture { descriptor, .. } => descriptor,
-            _ => {
-                return Err(error(
-                    "GRAPH_ILLEGAL_ACCESS",
-                    "depth target must be authored",
-                    format!("nodes[{i}].inputs.depthTarget"),
-                ))
-            }
-        };
+        let TextureFamilySource::AuthoredTexture { descriptor: cd, .. } =
+            &families[cf as usize].source;
+        let TextureFamilySource::AuthoredTexture { descriptor: dd, .. } =
+            &families[df as usize].source;
         let ok_depth = dd.dimension == TextureDimension::D2
             && dd.format == TextureFormat::Depth32Float
             && dd.sample_count == 1
             && extent_layers(&dd.extent) == 1;
-        let ok_color = cd.is_none_or(|d| {
-            d.format != TextureFormat::Depth32Float
-                && d.dimension == dd.dimension
-                && d.extent == dd.extent
-                && d.sample_count == 1
-        });
-        let surface_ok = cd.is_some()
-            || matches!(&dd.extent,NormalizedTextureExtent::SurfaceRelative{width,height,..} if *width==Ratio{numerator:1,denominator:1}&&*height==Ratio{numerator:1,denominator:1});
-        if !ok_depth || !ok_color || !surface_ok {
+        let ok_color = cd.format != TextureFormat::Depth32Float
+            && cd.dimension == dd.dimension
+            && cd.extent == dd.extent
+            && cd.sample_count == 1;
+        if !ok_depth || !ok_color {
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
                 "attachments are incompatible",
@@ -1222,6 +1214,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
 
     for i in 0..graph.nodes.len() {
         if !live.contains(&i)
+            || contracts[i].key == "frame_out"
             || !contracts[i]
                 .inputs
                 .iter()
@@ -1242,19 +1235,11 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         };
         let source_descriptor = match &families[source_family_id as usize].source {
             TextureFamilySource::AuthoredTexture { descriptor, .. } => descriptor,
-            TextureFamilySource::ImportedSurface { .. } => {
-                return Err(error(
-                    "GRAPH_ILLEGAL_ACCESS",
-                    "copy source must be an authored texture",
-                    format!("nodes[{i}].inputs.source"),
-                ))
-            }
         };
         let source_ok = source_descriptor.format == TextureFormat::Rgba16Float
             && is_single_view_d2(source_descriptor);
         let target_descriptor = match &families[target_family_id as usize].source {
             TextureFamilySource::AuthoredTexture { descriptor, .. } => Some(descriptor),
-            TextureFamilySource::ImportedSurface { .. } => None,
         };
         let authored_target_ok = target_descriptor.is_some_and(|descriptor| {
             descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
@@ -1272,13 +1257,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 TextureFamilySource::AuthoredTexture { descriptor, .. } => {
                     descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
                 }
-                TextureFamilySource::ImportedSurface { .. } => {
-                    return Err(error(
-                        "GRAPH_ILLEGAL_ACCESS",
-                        "bloom source must be an authored texture",
-                        format!("nodes[{i}].inputs.bloom"),
-                    ))
-                }
             }
         } else {
             true
@@ -1295,7 +1273,12 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                             && descriptor.extent == source_descriptor.extent
                     })
             }
-            "tone_map" => target_descriptor.is_none() && source_is_full_surface,
+            "tone_map" => target_descriptor.is_some_and(|descriptor| {
+                descriptor.format != TextureFormat::Depth32Float
+                    && descriptor.format != TextureFormat::R32Float
+                    && is_single_view_d2(descriptor)
+                    && descriptor.extent == source_descriptor.extent
+            }),
             "bloom_extract" => authored_target_ok,
             "bloom_blur" | "luminance_edge" => authored_target_ok && target_matches_source,
             "bloom_composite" => authored_target_ok && target_matches_source && bloom_input_ok,
@@ -1310,30 +1293,29 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
     }
 
-    // Initialization and presentation legality are later than attachment compatibility.
+    // Frame output must consume an initialized, produced, filterable color texture.
     for (i, contract) in contracts.iter().enumerate() {
-        if !live.contains(&i) || contract.key != "present" {
+        if !live.contains(&i) || contract.key != "frame_out" {
             continue;
         }
-        let key = bound[i]["surface"].producer;
+        let key = bound[i]["color"].producer;
         let Some(&(family, _, _)) = version_of.get(&key) else {
             if !matches!(resolved.get(&key), Some(ResolvedTransition::Cyclic)) {
                 return Err(error(
                     "GRAPH_UNINITIALIZED_RESOURCE",
-                    "present source is not produced",
-                    format!("nodes[{i}].inputs.surface"),
+                    "frame output source is not produced",
+                    format!("nodes[{i}].inputs.color"),
                 ));
             }
             continue;
         };
-        if !matches!(
-            families[family as usize].source,
-            TextureFamilySource::ImportedSurface { .. }
-        ) {
+        let TextureFamilySource::AuthoredTexture { descriptor, .. } =
+            &families[family as usize].source;
+        if !is_filterable_frame_color(descriptor) {
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
-                "offscreen textures cannot be presented",
-                format!("nodes[{i}].inputs.surface"),
+                "frame output requires a filterable single-view d2 color texture",
+                format!("nodes[{i}].inputs.color"),
             ));
         }
     }
@@ -1463,17 +1445,18 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     for (i, o, out) in resource_meta {
         let key = OutputKey(i, o);
         let id = output_ids[&key];
-        let scene = || output_ids[&root(bound[i]["scene"].producer, &bound, &contracts).unwrap()];
+        let mesh = || output_ids[&root(key, &bound, &contracts).unwrap()];
         let plan = match out.semantic_type {
-            SemanticType::SurfaceTarget => ResourcePlan::SurfaceTarget {
-                family: source_family[&key],
-            },
-            SemanticType::TextureSpec => {
-                if let NormalizedParameters::TextureSpec { residency, texture } = &params[i] {
-                    ResourcePlan::TextureSpec {
+            SemanticType::Texture if matches!(params[i], NormalizedParameters::Texture { .. }) => {
+                if let NormalizedParameters::Texture {
+                    residency,
+                    descriptor,
+                } = &params[i]
+                {
+                    ResourcePlan::TextureSource {
                         family: source_family[&key],
                         residency: *residency,
-                        descriptor: texture.clone(),
+                        descriptor: descriptor.clone(),
                     }
                 } else {
                     unreachable!()
@@ -1490,27 +1473,20 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     allocation: None,
                 }
             }
-            SemanticType::SceneTable => ResourcePlan::SceneTable,
-            SemanticType::LocalAabbBuffer => ResourcePlan::LocalAabbBuffer { scene: scene() },
-            SemanticType::CameraFrustum => ResourcePlan::CameraFrustum,
+            SemanticType::MeshData => ResourcePlan::MeshData,
+            SemanticType::LocalAabbBuffer => ResourcePlan::LocalAabbBuffer { mesh: mesh() },
             SemanticType::BooleanFlagBuffer => {
                 if let OutputMetadata::BooleanFlag { flag } = out.metadata {
-                    ResourcePlan::BooleanFlagBuffer {
-                        scene: scene(),
-                        flag,
-                    }
+                    ResourcePlan::BooleanFlagBuffer { mesh: mesh(), flag }
                 } else {
                     unreachable!()
                 }
             }
-            SemanticType::DrawStream => ResourcePlan::DrawStream { scene: scene() },
-            SemanticType::DepthStencilConfig => {
-                if let NormalizedParameters::DepthStencilConfig { config } = &params[i] {
-                    ResourcePlan::DepthStencilConfig { config: *config }
-                } else {
-                    unreachable!()
-                }
-            }
+            SemanticType::PipelineIndexStream => ResourcePlan::PipelineIndexStream { mesh: mesh() },
+            SemanticType::PipelineActivation => ResourcePlan::PipelineActivation {
+                pipeline_indices: output_ids[&bound[i]["pipelineIndices"].producer],
+            },
+            SemanticType::DrawStream => ResourcePlan::DrawStream { mesh: mesh() },
         };
         resources.push(CompiledResource {
             original_node_index: i as u32,
@@ -1557,9 +1533,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let kind = match contracts[i].key {
             "frustum_cull" => {
                 for (s, m) in [
-                    ("scene", AccessMode::StorageRead),
+                    ("mesh", AccessMode::StorageRead),
                     ("localAabbs", AccessMode::StorageRead),
-                    ("frustum", AccessMode::UniformRead),
                 ] {
                     accesses.push(CompiledAccess {
                         socket: s.into(),
@@ -1569,7 +1544,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 }
                 let r = output_ids[&OutputKey(i, 0)];
                 accesses.push(CompiledAccess {
-                    socket: "flags".into(),
+                    socket: "isFrustumCulled".into(),
                     resource: r,
                     mode: AccessMode::StorageWrite {
                         full_overwrite: true,
@@ -1580,7 +1555,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 }
             }
             "mesh_query" => {
-                for s in ["scene", "isVisible", "isFrustumCulled"] {
+                for s in ["mesh", "isVisible", "isFrustumCulled"] {
                     if let Some(b) = bound[i].get(s).filter(|b| b.active) {
                         accesses.push(CompiledAccess {
                             socket: s.into(),
@@ -1600,23 +1575,38 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     work: ComputeWork::MeshQuery,
                 }
             }
-            "legacy_forward" => {
+            "pipeline_registry" => {
+                accesses.push(CompiledAccess {
+                    socket: "pipelineIndices".into(),
+                    resource: input_resource("pipelineIndices"),
+                    mode: AccessMode::SemanticRead,
+                });
+                ExecutionKind::CpuPreparation
+            }
+            "pipeline" => {
                 let color = output_ids[&OutputKey(i, 0)];
                 let depth = output_ids[&OutputKey(i, 1)];
                 let clear = match params[i] {
-                    NormalizedParameters::LegacyForward { clear_color } => clear_color,
+                    NormalizedParameters::Pipeline { clear_color, .. } => clear_color,
                     _ => unreachable!(),
                 };
-                let config_node = bound[i]["depthStencil"].producer.0;
-                let dc = match params[config_node] {
-                    NormalizedParameters::DepthStencilConfig { config } => config,
+                let clear_depth = match &params[i] {
+                    NormalizedParameters::Pipeline { clear_depth, .. } => *clear_depth,
                     _ => unreachable!(),
                 };
-                let cl = NormalizedColorLoad::Clear { value: clear };
-                let dl = NormalizedDepthLoad::Clear {
-                    value: dc.clear_depth,
+                let first_color = version_of[&OutputKey(i, 0)].1 == 0;
+                let first_depth = version_of[&OutputKey(i, 1)].1 == 0;
+                let cl = if first_color {
+                    NormalizedColorLoad::Clear { value: clear }
+                } else {
+                    NormalizedColorLoad::Load
                 };
-                for s in ["scene", "draws"] {
+                let dl = if first_depth {
+                    NormalizedDepthLoad::Clear { value: clear_depth }
+                } else {
+                    NormalizedDepthLoad::Load
+                };
+                for s in ["mesh", "draws", "activation"] {
                     accesses.push(CompiledAccess {
                         socket: s.into(),
                         resource: input_resource(s),
@@ -1634,7 +1624,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                         location: 0,
                         load: cl,
                         store: StoreOp::Store,
-                        full_overwrite: true,
+                        full_overwrite: first_color,
                     },
                 });
                 accesses.push(CompiledAccess {
@@ -1643,7 +1633,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     mode: AccessMode::DepthAttachment {
                         load: dl,
                         store: StoreOp::Store,
-                        full_overwrite: true,
+                        full_overwrite: first_depth,
                     },
                 });
                 ExecutionKind::Render {
@@ -1698,14 +1688,14 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     depth_stencil: None,
                 }
             }
-            "present" => {
-                let r = input_resource("surface");
+            "frame_out" => {
+                let r = input_resource("color");
                 accesses.push(CompiledAccess {
-                    socket: "surface".into(),
+                    socket: "color".into(),
                     resource: r,
-                    mode: AccessMode::Present,
+                    mode: AccessMode::SampledTexture,
                 });
-                ExecutionKind::Present { surface: r }
+                ExecutionKind::FrameOut { color: r }
             }
             _ => unreachable!(),
         };
@@ -1803,13 +1793,27 @@ fn extent_layers(e: &NormalizedTextureExtent) -> u32 {
         } => *depth_or_array_layers,
     }
 }
-fn is_single_view_d2(descriptor: &NormalizedTextureDescriptor) -> bool {
+pub(super) fn is_single_view_d2(descriptor: &NormalizedTextureDescriptor) -> bool {
     descriptor.dimension == TextureDimension::D2
         && descriptor.sample_count == 1
         && descriptor.mip_level_count == 1
         && extent_layers(&descriptor.extent) == 1
 }
-fn texture_usage(f: &TextureFamily, executions: &[CompiledExecution]) -> Vec<TextureUsage> {
+pub(super) fn is_filterable_frame_color(descriptor: &NormalizedTextureDescriptor) -> bool {
+    is_single_view_d2(descriptor)
+        && matches!(
+            descriptor.format,
+            TextureFormat::Rgba8Unorm
+                | TextureFormat::Rgba8UnormSrgb
+                | TextureFormat::Bgra8Unorm
+                | TextureFormat::Bgra8UnormSrgb
+                | TextureFormat::Rgba16Float
+        )
+}
+pub(super) fn texture_usage(
+    f: &TextureFamily,
+    executions: &[CompiledExecution],
+) -> Vec<TextureUsage> {
     let rs: HashSet<_> = f.versions.iter().map(|v| v.resource).collect();
     let mut u = BTreeSet::new();
     for e in executions {
@@ -1842,19 +1846,18 @@ fn allocate(
 ) -> (Vec<AllocationClass>, u32) {
     let mut grouped: BTreeMap<TextureCompatibilityKey, Vec<usize>> = BTreeMap::new();
     for (i, f) in families.iter().enumerate() {
-        if let TextureFamilySource::AuthoredTexture { descriptor, .. } = &f.source {
-            grouped
-                .entry(TextureCompatibilityKey {
-                    dimension: descriptor.dimension,
-                    format: descriptor.format,
-                    extent: descriptor.extent.clone(),
-                    mip_level_count: descriptor.mip_level_count,
-                    sample_count: descriptor.sample_count,
-                    view_formats: descriptor.view_formats.clone(),
-                })
-                .or_default()
-                .push(i);
-        }
+        let TextureFamilySource::AuthoredTexture { descriptor, .. } = &f.source;
+        grouped
+            .entry(TextureCompatibilityKey {
+                dimension: descriptor.dimension,
+                format: descriptor.format,
+                extent: descriptor.extent.clone(),
+                mip_level_count: descriptor.mip_level_count,
+                sample_count: descriptor.sample_count,
+                view_formats: descriptor.view_formats.clone(),
+            })
+            .or_default()
+            .push(i);
     }
     let mut classes = Vec::new();
     let mut transient = 0;

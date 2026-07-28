@@ -1,3 +1,3 @@
-mod legacy_forward;
+mod pipeline;
 
-pub(super) use legacy_forward::{encode_compiled, encode_immediate};
+pub(super) use pipeline::{encode_compiled, encode_immediate};

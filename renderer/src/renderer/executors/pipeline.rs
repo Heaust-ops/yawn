@@ -56,25 +56,8 @@ pub(crate) fn encode_compiled<T: Scene>(
     materials: &MaterialResources,
     mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) -> Result<(), &'static str> {
-    use crate::render_graph::{
-        ExecutionKind, NormalizedColorLoad, NormalizedDepthLoad, ResourcePlan, StoreOp,
-    };
+    use crate::render_graph::{ExecutionKind, NormalizedColorLoad, NormalizedDepthLoad, StoreOp};
     let view = |resource: u32| -> Result<&wgpu::TextureView, &'static str> {
-        let is_surface = active
-            .graph
-            .resources
-            .get(resource as usize)
-            .is_some_and(|resource| {
-                matches!(
-                    resource.plan,
-                    ResourcePlan::SurfaceTarget { family }
-                        | ResourcePlan::Texture { family, .. }
-                        if family == active.runtime.allocations.surface_family
-                )
-            });
-        if is_surface {
-            return Ok(surface);
-        }
         let a = active
             .runtime
             .allocations
@@ -93,15 +76,16 @@ pub(crate) fn encode_compiled<T: Scene>(
     for (execution_index, prepared) in active.executions.iter().enumerate() {
         let profile_id = &active.graph.executions[execution_index].id;
         match prepared {
+            PreparedExecution::PipelineRegistry => {}
             PreparedExecution::FrustumCull => {
                 gpu.encode_frustum_cull(encoder, profile.as_deref_mut(), profile_id);
             }
             PreparedExecution::MeshQuery => {
                 gpu.encode_mesh_query(encoder, profile.as_deref_mut(), profile_id);
             }
-            PreparedExecution::Present => {}
             PreparedExecution::Fullscreen {
                 execution,
+                frame_out,
                 bind_group,
                 pipeline,
                 ..
@@ -111,22 +95,30 @@ pub(crate) fn encode_compiled<T: Scene>(
                     .executions
                     .get(*execution)
                     .ok_or(" execution out of bounds")?;
-                let ExecutionKind::Render {
-                    color_attachments, ..
-                } = &execution.kind
-                else {
-                    return Err("fullscreen is not render");
-                };
-                let color = color_attachments
-                    .first()
-                    .ok_or("fullscreen target missing")?;
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&execution.id),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: view(color.resource)?,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
+                let (target, operations) = if *frame_out {
+                    let ExecutionKind::FrameOut { .. } = execution.kind else {
+                        return Err("frame_out kind mismatch");
+                    };
+                    (
+                        surface,
+                        wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    )
+                } else {
+                    let ExecutionKind::Render {
+                        color_attachments, ..
+                    } = &execution.kind
+                    else {
+                        return Err("fullscreen is not render");
+                    };
+                    let color = color_attachments
+                        .first()
+                        .ok_or("fullscreen target missing")?;
+                    (
+                        view(color.resource)?,
+                        wgpu::Operations {
                             load: match color.load {
                                 NormalizedColorLoad::Load => wgpu::LoadOp::Load,
                                 NormalizedColorLoad::Clear { value } => {
@@ -144,6 +136,15 @@ pub(crate) fn encode_compiled<T: Scene>(
                                 wgpu::StoreOp::Discard
                             },
                         },
+                    )
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(&execution.id),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: operations,
                     })],
                     depth_stencil_attachment: None,
                     occlusion_query_set: None,
@@ -155,9 +156,10 @@ pub(crate) fn encode_compiled<T: Scene>(
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
-            PreparedExecution::LegacyForward {
+            PreparedExecution::Pipeline {
                 execution,
-                variants,
+                base,
+                variant,
             } => {
                 let execution = active
                     .graph
@@ -169,10 +171,10 @@ pub(crate) fn encode_compiled<T: Scene>(
                     depth_stencil,
                 } = &execution.kind
                 else {
-                    return Err("legacy forward is not render");
+                    return Err("pipeline is not render");
                 };
-                let color = color_attachments.first().ok_or("legacy color missing")?;
-                let depth = depth_stencil.as_ref().ok_or("legacy depth missing")?;
+                let color = color_attachments.first().ok_or("pipeline color missing")?;
+                let depth = depth_stencil.as_ref().ok_or("pipeline depth missing")?;
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some(&execution.id),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -235,16 +237,14 @@ pub(crate) fn encode_compiled<T: Scene>(
                     pass.set_vertex_buffer(4, t.slice(..));
                     pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
                     for draw in &gpu.draws {
+                        if draw.pipeline != *base {
+                            continue;
+                        }
                         let slot = draw.instances.start as u64;
                         let start = slot
                             * std::mem::size_of::<crate::renderer::gpu_scene::GpuInstance>() as u64;
                         pass.set_vertex_buffer(3, inst.slice(start..start + 112));
-                        let key = variants
-                            .iter()
-                            .find(|(base, _)| *base == draw.pipeline)
-                            .map(|x| &x.1)
-                            .ok_or("pipeline variant missing")?;
-                        pass.set_pipeline(key);
+                        pass.set_pipeline(variant);
                         if pipelines.requires_material(draw.pipeline) {
                             pass.set_bind_group(2, materials.group(draw.material), &[]);
                         }
@@ -274,7 +274,7 @@ pub(crate) fn encode_immediate<T: Scene>(
     profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Render pass"),
+        label: Some("Immediate pipeline pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             depth_slice: None,
             view: color,
@@ -298,7 +298,7 @@ pub(crate) fn encode_immediate<T: Scene>(
             stencil_ops: None,
         }),
         occlusion_query_set: None,
-        timestamp_writes: profile.and_then(|p| p.render_writes("immediate.forward")),
+        timestamp_writes: profile.and_then(|p| p.render_writes("immediate.pipeline")),
     });
     encode_scene(&mut pass, scene, gpu, pipelines, materials);
 }

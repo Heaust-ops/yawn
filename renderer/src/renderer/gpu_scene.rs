@@ -85,8 +85,8 @@ impl GpuScenePlan {
         self::GpuScenePlan::build_with_query(
             data,
             crate::render_graph::MeshQueryRuntimeKey {
-                visible: crate::render_graph::TriStatePredicate::RequiredTrue,
-                frustum_culled: crate::render_graph::TriStatePredicate::Any,
+                visible: crate::render_graph::RuntimePredicate::RequiredTrue,
+                frustum_culled: crate::render_graph::RuntimePredicate::Any,
             },
         )
     }
@@ -277,7 +277,6 @@ pub struct BufferSlot {
 #[derive(Default)]
 pub struct GpuSceneCache {
     revision: Option<u64>,
-    query: Option<crate::render_graph::MeshQueryRuntimeKey>,
     pub positions: BufferSlot,
     pub normals: BufferSlot,
     pub uvs: BufferSlot,
@@ -310,11 +309,12 @@ struct CullingParams {
     _pad: u32,
 }
 
-fn predicate_code(value: crate::render_graph::TriStatePredicate) -> u32 {
+fn predicate_code(value: crate::render_graph::RuntimePredicate) -> u32 {
     match value {
-        crate::render_graph::TriStatePredicate::Any => 0,
-        crate::render_graph::TriStatePredicate::RequiredTrue => 1,
-        crate::render_graph::TriStatePredicate::RequiredFalse => 2,
+        crate::render_graph::RuntimePredicate::Any => 0,
+        crate::render_graph::RuntimePredicate::RequiredTrue => 1,
+        crate::render_graph::RuntimePredicate::RequiredFalse => 2,
+        crate::render_graph::RuntimePredicate::Never => 3,
     }
 }
 
@@ -330,8 +330,8 @@ impl GpuSceneCache {
             queue,
             data,
             crate::render_graph::MeshQueryRuntimeKey {
-                visible: crate::render_graph::TriStatePredicate::RequiredTrue,
-                frustum_culled: crate::render_graph::TriStatePredicate::Any,
+                visible: crate::render_graph::RuntimePredicate::RequiredTrue,
+                frustum_culled: crate::render_graph::RuntimePredicate::Any,
             },
         )
     }
@@ -343,14 +343,13 @@ impl GpuSceneCache {
         data: &SceneFramePlan,
         query: crate::render_graph::MeshQueryRuntimeKey,
     ) -> Result<(), String> {
-        if self.revision == Some(data.revision) && self.query == Some(query) {
+        if self.revision == Some(data.revision) {
             return Ok(());
         }
         let plan = GpuScenePlan::build_with_query(data, query).map_err(str::to_owned)?;
         if plan.draws.is_empty() {
             self.draws.clear();
             self.revision = Some(data.revision);
-            self.query = Some(query);
             return Ok(());
         }
         let maximum = device.limits().max_buffer_size;
@@ -485,7 +484,6 @@ impl GpuSceneCache {
         self.draws = plan.draws;
         self.rebuild_compute(device)?;
         self.revision = Some(data.revision);
-        self.query = Some(query);
         Ok(())
     }
 
@@ -642,11 +640,28 @@ mod tests {
     #[test]
     fn mesh_query_source_guards_optional_flag_buffer_reads() {
         let source = include_str!("culling.wgsl");
-        let visible_guard = source.find("if (params.visible_predicate != 0u)").unwrap();
+        let visible_never = source.find("if (params.visible_predicate == 3u)").unwrap();
+        let visible_guard = source
+            .find("else if (params.visible_predicate != 0u)")
+            .unwrap();
         let visible_load = source.find("matches(authored_visible[i]").unwrap();
-        let frustum_guard = source.find("if (params.frustum_predicate != 0u)").unwrap();
+        let frustum_never = source
+            .find("if (selected && params.frustum_predicate == 3u)")
+            .unwrap();
+        let frustum_guard = source
+            .find("else if (selected && params.frustum_predicate != 0u)")
+            .unwrap();
         let frustum_load = source.find("matches(frustum_flags[i]").unwrap();
-        assert!(visible_guard < visible_load && frustum_guard < frustum_load);
+        assert!(visible_never < visible_guard && visible_guard < visible_load);
+        assert!(frustum_never < frustum_guard && frustum_guard < frustum_load);
+        assert!(
+            visible_load < frustum_load,
+            "visible rejection must precede the frustum load"
+        );
+        assert!(
+            source.contains("predicate == 0u ||"),
+            "predicate zero is handled without a load by the guards"
+        );
         for binding in 0..=6 {
             assert!(source.contains(&format!("@binding({binding})")));
         }

@@ -372,36 +372,6 @@ impl PipelineLibrary {
             && self.specs[key.get() as usize].layout == self.material_layout
     }
 
-    pub fn pipeline_keys(&self) -> impl Iterator<Item = PipelineKey> + '_ {
-        let mut keys = self
-            .pipeline_registry
-            .values()
-            .map(|entry| entry.0)
-            .collect::<Vec<_>>();
-        keys.sort_by_key(|key| key.get());
-        keys.dedup();
-        keys.into_iter()
-    }
-
-    pub fn get_or_create_target_variant(
-        &mut self,
-        device: &wgpu::Device,
-        base: PipelineKey,
-        color_format: wgpu::TextureFormat,
-        depth_format: Option<wgpu::TextureFormat>,
-        depth_compare: wgpu::CompareFunction,
-        depth_write: bool,
-    ) -> Result<PipelineKey, String> {
-        let spec = self
-            .specs
-            .get(base.get() as usize)
-            .cloned()
-            .ok_or_else(|| "unknown base pipeline".to_owned())?;
-        let spec =
-            target_variant_spec(spec, color_format, depth_format, depth_compare, depth_write);
-        Ok(self.get_or_create_from_spec(device, &spec, Some("target variant")))
-    }
-
     pub fn create_target_variant(
         &self,
         device: &wgpu::Device,

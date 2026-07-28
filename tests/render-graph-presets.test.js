@@ -1,91 +1,295 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  culling,
-  ember,
-  hdr,
-  midnight,
-  renderGraphPresets,
-} from "../static/render-graph/presets.js";
-test("presets use canonical node graphs", () => {
-  assert.deepEqual(Object.keys(renderGraphPresets), [
-    "midnight",
-    "ember",
-    "hdr",
-    "culling",
-    "tone",
-    "edges",
-    "bloom",
-    "combined",
-  ]);
+import * as presets from "../static/render-graph/presets.js";
+
+const order = [
+  "midnight",
+  "ember",
+  "hdr",
+  "culling",
+  "tone",
+  "edges",
+  "bloom",
+  "combined",
+];
+const sequences = {
+  midnight: [
+    ["ldr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["frame_out", "frame_out"],
+  ],
+  ember: [
+    ["ldr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["frame_out", "frame_out"],
+  ],
+  hdr: [
+    ["hdr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["frame_out", "frame_out"],
+  ],
+  culling: [
+    ["hdr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["cull", "frustum_cull"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["frame_out", "frame_out"],
+  ],
+  tone: [
+    ["ldr", "texture"],
+    ["hdr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["tone", "tone_map"],
+    ["frame_out", "frame_out"],
+  ],
+  edges: [
+    ["ldr", "texture"],
+    ["edge_hdr", "texture"],
+    ["hdr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["edges", "luminance_edge"],
+    ["tone", "tone_map"],
+    ["frame_out", "frame_out"],
+  ],
+  bloom: [
+    ["ldr", "texture"],
+    ["half_a", "texture"],
+    ["half_b", "texture"],
+    ["half_c", "texture"],
+    ["composite_hdr", "texture"],
+    ["hdr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["extract", "bloom_extract"],
+    ["blur_h", "bloom_blur"],
+    ["blur_v", "bloom_blur"],
+    ["composite", "bloom_composite"],
+    ["tone", "tone_map"],
+    ["frame_out", "frame_out"],
+  ],
+  combined: [
+    ["ldr", "texture"],
+    ["edge_hdr", "texture"],
+    ["half_a", "texture"],
+    ["half_b", "texture"],
+    ["half_c", "texture"],
+    ["composite_hdr", "texture"],
+    ["hdr", "texture"],
+    ["depth", "texture"],
+    ["mesh", "mesh"],
+    ["query", "mesh_query"],
+    ["registry", "pipeline_registry"],
+    ["ground", "pipeline"],
+    ["pbr", "pipeline"],
+    ["pbr_double", "pipeline"],
+    ["extract", "bloom_extract"],
+    ["blur_h", "bloom_blur"],
+    ["blur_v", "bloom_blur"],
+    ["composite", "bloom_composite"],
+    ["edges", "luminance_edge"],
+    ["tone", "tone_map"],
+    ["frame_out", "frame_out"],
+  ],
+};
+
+test("presets have the exact canonical pipeline identities, schemas, and node sequences", () => {
+  assert.deepEqual(Object.keys(presets.renderGraphPresets), order);
   assert.deepEqual(
-    [midnight.graphId, ember.graphId],
-    ["preset_midnight", "preset_ember"],
-  );
-  assert.notDeepEqual(midnight.nodes[6].parameters.clearColor, ember.nodes[6].parameters.clearColor);
-  for (const graph of [midnight, ember]) {
-    assert.equal(graph.schemaVersion, 2);
-    assert.equal(graph.revision, 1);
-    assert.equal(graph.nodes[6].executor.key, "legacy_forward");
-    assert.deepEqual(graph.nodes[6].inputs.colorTarget, { node: "surface", socket: "surface" });
-    assert.equal(graph.nodes.at(-1).executor.key, "present");
-  }
-  assert.equal(hdr.schemaVersion, 2);
-  assert.equal(hdr.revision, 1);
-  assert.equal(hdr.graphId, "preset_hdr_fullscreen");
-  assert.equal(
-    new Set(Object.values(renderGraphPresets).map((graph) => graph.graphId))
-      .size,
-    8,
-  );
-  assert.deepEqual(
-    hdr.nodes.map((node) => [node.id, node.executor.key]),
+    order.map((name) => presets[name].graphId),
     [
-      ["surface", "surface_target"],
-      ["hdr", "texture_spec"],
-      ["depth", "texture_spec"],
-      ["scene", "scene_table"],
-      ["visible", "visibility_flags"],
-      ["query", "mesh_query"],
-      ["depth_config", "depth_stencil_config"],
-      ["forward", "legacy_forward"],
-      ["copy", "fullscreen_copy"],
-      ["present", "present"],
+      "preset_midnight",
+      "preset_ember",
+      "preset_hdr_fullscreen",
+      "preset_gpu_culling",
+      "preset_tone",
+      "preset_edges",
+      "preset_bloom",
+      "preset_combined",
     ],
   );
-  const byId = Object.fromEntries(hdr.nodes.map((node) => [node.id, node]));
-  assert.equal(byId.hdr.parameters.texture.format, "rgba16_float");
-  assert.deepEqual(byId.query.inputs, {
-    scene: { node: "scene", socket: "scene" },
-    isVisible: { node: "visible", socket: "flags" },
-  });
-  assert.deepEqual(byId.query.parameters.filters, [
-    { flag: "isVisible", predicate: "required_true" },
-    { flag: "isFrustumCulled", predicate: "any" },
-  ]);
-  assert.deepEqual(byId.forward.inputs.colorTarget, {
-    node: "hdr",
-    socket: "spec",
-  });
-  assert.deepEqual(byId.copy.executor, { key: "fullscreen_copy", version: 1 });
-  assert.deepEqual(byId.copy.inputs, {
-    source: { node: "forward", socket: "color" },
-    colorTarget: { node: "surface", socket: "surface" },
-  });
-  assert.deepEqual(byId.present.inputs.surface, {
-    node: "copy",
-    socket: "color",
-  });
-  assert.deepEqual(
-    culling.nodes
-      .filter((node) => ["frustum_cull", "mesh_query"].includes(node.executor.key))
-      .map((node) => node.executor.key),
-    ["frustum_cull", "mesh_query"],
+  for (const name of order) {
+    const graph = presets[name];
+    assert.deepEqual([graph.schemaVersion, graph.revision], [2, 1]);
+    assert.equal(
+      new Set(graph.nodes.map((node) => node.id)).size,
+      graph.nodes.length,
+    );
+    assert.deepEqual(
+      graph.nodes.map((node) => [node.id, node.executor.key]),
+      sequences[name],
+    );
+    assert.equal(
+      graph.nodes.filter((node) => node.executor.key === "frame_out").length,
+      1,
+    );
+    assert.ok(
+      graph.nodes.every(
+        (node) => !["surface_target", "present"].includes(node.executor.key),
+      ),
+    );
+    assert.ok(!graph.nodes.some((node) => node.id === "copy"));
+  }
+});
+
+test("presets preserve common mesh, texture, query, pipeline, culling and post wiring", () => {
+  const removed = [
+    "texture_spec",
+    "scene_table",
+    "local_aabb_buffer",
+    "camera_frustum",
+    "visibility_flags",
+  ];
+  for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
+    const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
+    assert.deepEqual(byId.query.parameters, {
+      visiblePredicate: "required_true",
+      visibleDefault: true,
+      frustumCulledPredicate: name === "culling" ? "required_false" : "any",
+      frustumCulledDefault: false,
+    });
+    assert.deepEqual(byId.query.inputs.mesh, { node: "mesh", socket: "mesh" });
+    assert.deepEqual(byId.query.inputs.isVisible, {
+      node: "mesh",
+      socket: "isVisible",
+    });
+    assert.deepEqual(byId.ground.inputs.mesh, {
+      node: "mesh",
+      socket: "mesh",
+    });
+    assert.deepEqual(byId.ground.inputs.draws, {
+      node: "query",
+      socket: "draws",
+    });
+    assert.deepEqual(byId.ground.inputs.depthTarget, {
+      node: "depth",
+      socket: "texture",
+    });
+    assert.equal(
+      graph.nodes.filter((node) => node.executor.key === "pipeline_registry")
+        .length,
+      1,
+    );
+    const pipelines = graph.nodes.filter(
+      (node) => node.executor.key === "pipeline",
+    );
+    assert.deepEqual(
+      pipelines.map((node) => node.parameters.pipeline),
+      ["ground_plane", "gltf_standard", "gltf_standard_double_sided"],
+    );
+    for (const pipeline of pipelines)
+      assert.deepEqual(pipeline.inputs.activation, {
+        node: "registry",
+        socket: "activation",
+      });
+    assert.deepEqual(byId.pbr.inputs.colorTarget, {
+      node: "ground",
+      socket: "color",
+    });
+    assert.deepEqual(byId.pbr.inputs.depthTarget, {
+      node: "ground",
+      socket: "depth",
+    });
+    assert.deepEqual(byId.pbr_double.inputs.colorTarget, {
+      node: "pbr",
+      socket: "color",
+    });
+    assert.deepEqual(byId.pbr_double.inputs.depthTarget, {
+      node: "pbr",
+      socket: "depth",
+    });
+    assert.ok(
+      graph.nodes
+        .filter((node) => node.executor.key === "texture")
+        .every((node) => node.parameters.texture.dimension === "d2"),
+    );
+    assert.ok(
+      graph.nodes.every((node) => !removed.includes(node.executor.key)),
+    );
+  }
+  const cull = Object.fromEntries(
+    presets.culling.nodes.map((node) => [node.id, node]),
   );
-  const cullingQuery = culling.nodes.find((node) => node.id === "query");
-  assert.equal(cullingQuery.parameters.filters[1].predicate, "required_false");
-  assert.deepEqual(cullingQuery.inputs.isFrustumCulled, {
-    node: "cull",
-    socket: "flags",
+  assert.deepEqual(cull.cull.parameters, { camera: "active" });
+  assert.deepEqual(cull.cull.inputs, {
+    mesh: { node: "mesh", socket: "mesh" },
+    localAabbs: { node: "mesh", socket: "localAabbs" },
   });
+  assert.deepEqual(cull.query.inputs.isFrustumCulled, {
+    node: "cull",
+    socket: "isFrustumCulled",
+  });
+  for (const name of ["tone", "edges", "bloom", "combined"])
+    assert.ok(!presets[name].nodes.some((node) => node.id === "copy"));
+  const finalSource = {
+    hdr: "pbr_double",
+    culling: "pbr_double",
+    tone: "tone",
+    edges: "tone",
+    bloom: "tone",
+    combined: "tone",
+    midnight: "pbr_double",
+    ember: "pbr_double",
+  };
+  for (const name of order)
+    assert.deepEqual(presets[name].nodes.at(-1).inputs.color, {
+      node: finalSource[name],
+      socket: "color",
+    });
+  assert.equal(
+    presets.tone.nodes.find((node) => node.id === "tone").inputs.source.node,
+    "pbr_double",
+  );
+  assert.equal(
+    presets.edges.nodes.find((node) => node.id === "tone").inputs.source.node,
+    "edges",
+  );
+  assert.equal(
+    presets.bloom.nodes.find((node) => node.id === "tone").inputs.source.node,
+    "composite",
+  );
+  assert.equal(
+    presets.combined.nodes.find((node) => node.id === "tone").inputs.source
+      .node,
+    "edges",
+  );
 });

@@ -1,7 +1,6 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 2;
+export const CATALOG_VERSION = 4;
 const exact = (type) => ({ kind: "exact", types: [type] });
-const oneOf = (...types) => ({ kind: "one_of", types });
 const i = (type, required = true, authoringType) => ({
   accepted: typeof type === "string" ? exact(type) : type,
   required,
@@ -25,104 +24,91 @@ const texture = {
   },
 };
 export const semanticCatalog = Object.freeze({
-  surface_target: {
+  mesh: {
     execution: "source",
     inputs: {},
-    outputs: { surface: o("surface_target") },
-    parameters: {},
-  },
-  texture_spec: {
-    execution: "source",
-    inputs: {},
-    outputs: { spec: o("texture_spec") },
-    parameters: structuredClone(texture),
-  },
-  scene_table: {
-    execution: "source",
-    inputs: {},
-    outputs: { scene: o("scene_table") },
-    parameters: {},
-  },
-  local_aabb_buffer: {
-    execution: "source",
-    inputs: { scene: i("scene_table") },
-    outputs: { localAabbs: o("local_aabb_buffer") },
-    parameters: {},
-  },
-  camera_frustum: {
-    execution: "source",
-    inputs: {},
-    outputs: { frustum: o("camera_frustum") },
-    parameters: {},
-  },
-  visibility_flags: {
-    execution: "source",
-    inputs: { scene: i("scene_table") },
     outputs: {
-      flags: {
+      mesh: o("mesh_data"),
+      localAabbs: o("local_aabb_buffer"),
+      isVisible: {
         ...o("boolean_flag_buffer"),
         authoringType: "visibility_flag_buffer",
       },
+      pipelineIndices: o("pipeline_index_stream"),
     },
     parameters: {},
+  },
+  texture: {
+    execution: "source",
+    inputs: {},
+    outputs: { texture: o("texture") },
+    parameters: {
+      residency: "transient",
+      format: "rgba16_float",
+      dimension: "d2",
+      extentMode: "surface_relative",
+      absoluteWidth: 1,
+      absoluteHeight: 1,
+      relativeWidthNumerator: 1,
+      relativeWidthDenominator: 1,
+      relativeHeightNumerator: 1,
+      relativeHeightDenominator: 1,
+      depthOrArrayLayers: 1,
+      mipLevelCount: 1,
+      sampleCount: "1",
+      viewFormat: "none",
+    },
   },
   frustum_cull: {
     execution: "compute",
     inputs: {
-      scene: i("scene_table"),
+      mesh: i("mesh_data"),
       localAabbs: i("local_aabb_buffer"),
-      frustum: i("camera_frustum"),
     },
     outputs: {
-      flags: {
+      isFrustumCulled: {
         ...o("boolean_flag_buffer"),
         authoringType: "frustum_flag_buffer",
       },
     },
-    parameters: {},
+    parameters: { cameraSelection: "active" },
   },
   mesh_query: {
     execution: "compute",
     inputs: {
-      scene: i("scene_table"),
+      mesh: i("mesh_data"),
       isVisible: i("boolean_flag_buffer", false, "visibility_flag_buffer"),
       isFrustumCulled: i("boolean_flag_buffer", false, "frustum_flag_buffer"),
     },
     outputs: { draws: o("draw_stream") },
     parameters: {
-      filters: [
-        { flag: "isVisible", predicate: "required_true" },
-        { flag: "isFrustumCulled", predicate: "required_false" },
-      ],
+      visiblePredicate: "required_true",
+      frustumCulledPredicate: "required_false",
     },
   },
-  depth_stencil_config: {
-    execution: "source",
-    inputs: {},
-    outputs: { config: o("depth_stencil_config") },
-    parameters: {
-      depthCompare: "less_equal",
-      depthWriteEnabled: true,
-      clearDepth: 1,
-    },
+  pipeline_registry: {
+    execution: "cpu_preparation",
+    inputs: { pipelineIndices: i("pipeline_index_stream") },
+    outputs: { activation: o("pipeline_activation") },
+    parameters: {},
   },
-  legacy_forward: {
+  pipeline: {
     execution: "render",
     inputs: {
-      scene: i("scene_table"),
+      mesh: i("mesh_data"),
       draws: i("draw_stream"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
-      depthTarget: i(oneOf("texture_spec", "texture")),
-      depthStencil: i("depth_stencil_config"),
+      activation: i("pipeline_activation"),
+      colorTarget: i("texture"),
+      depthTarget: i("texture"),
     },
     outputs: { color: o("texture"), depth: o("texture") },
-    parameters: { clearColor: [0.015, 0.02, 0.03, 1] },
+    parameters: { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] },
   },
   fullscreen_copy: {
     execution: "render",
     inputs: {
       source: i("texture"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
+      colorTarget: i("texture"),
     },
     outputs: { color: o("texture") },
     parameters: {},
@@ -131,7 +117,7 @@ export const semanticCatalog = Object.freeze({
     execution: "render",
     inputs: {
       source: i("texture"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
+      colorTarget: i("texture"),
     },
     outputs: { color: o("texture") },
     parameters: { exposure: 1 },
@@ -140,7 +126,7 @@ export const semanticCatalog = Object.freeze({
     execution: "render",
     inputs: {
       source: i("texture"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
+      colorTarget: i("texture"),
     },
     outputs: { color: o("texture") },
     parameters: { threshold: 1, knee: 0.5 },
@@ -149,7 +135,7 @@ export const semanticCatalog = Object.freeze({
     execution: "render",
     inputs: {
       source: i("texture"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
+      colorTarget: i("texture"),
     },
     outputs: { color: o("texture") },
     parameters: { direction: [1, 0], radius: 1 },
@@ -159,7 +145,7 @@ export const semanticCatalog = Object.freeze({
     inputs: {
       source: i("texture"),
       bloom: i("texture"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
+      colorTarget: i("texture"),
     },
     outputs: { color: o("texture") },
     parameters: { intensity: 1 },
@@ -168,14 +154,14 @@ export const semanticCatalog = Object.freeze({
     execution: "render",
     inputs: {
       source: i("texture"),
-      colorTarget: i(oneOf("surface_target", "texture_spec", "texture")),
+      colorTarget: i("texture"),
     },
     outputs: { color: o("texture") },
     parameters: { strength: 2 },
   },
-  present: {
-    execution: "present",
-    inputs: { surface: i("texture") },
+  frame_out: {
+    execution: "frame",
+    inputs: { color: i("texture") },
     outputs: {},
     parameters: {},
   },
@@ -193,15 +179,13 @@ const socketColors = [
 ];
 export const socketTypes = Object.fromEntries(
   [
-    "surface_target",
-    "texture_spec",
     "texture",
-    "scene_table",
+    "mesh_data",
     "local_aabb_buffer",
-    "camera_frustum",
     "boolean_flag_buffer",
+    "pipeline_index_stream",
     "draw_stream",
-    "depth_stencil_config",
+    "pipeline_activation",
     "visibility_flag_buffer",
     "frustum_flag_buffer",
   ].map((type, index) => [
@@ -213,12 +197,6 @@ export const socketTypes = Object.fromEntries(
     },
   ]),
 );
-socketTypes.surface_target.acceptsFrom = [
-  "surface_target",
-  "texture_spec",
-  "texture",
-];
-socketTypes.texture_spec.acceptsFrom = ["texture_spec", "texture"];
 socketTypes.boolean_flag_buffer.acceptsFrom = [
   "boolean_flag_buffer",
   "visibility_flag_buffer",
@@ -259,33 +237,138 @@ export const theme = {
 export const styles = {
   source: { header: "#3977a8" },
   compute: { header: "#725a9b" },
+  cpu_preparation: { header: "#8a6d3b" },
   render: { header: "#426b43" },
-  present: { header: "#a75d37" },
+  frame: { header: "#a75d37" },
 };
-const socket = (title, direction, type) => ({
+const socket = (title, direction, type, value = null) => ({
   title,
   direction,
   type,
   maxIncomingLinks: direction === "input" ? 1 : 0,
   visible: true,
-  value: null,
-  showValue: false,
+  value,
+  showValue: value !== null,
 });
-const parameterSchema = (value) =>
-  typeof value === "number"
-    ? { type: "number", default: { kind: "number", value } }
-    : typeof value === "string"
-      ? { type: "string", default: { kind: "string", value } }
-      : typeof value === "boolean"
-        ? { type: "boolean", default: { kind: "boolean", value } }
-        : { type: "json", default: { kind: "json", value } };
+const tagged = (kind, value) => ({ kind, value: structuredClone(value) });
+const number = (value, minimum, maximum) => ({
+  type: "number",
+  default: tagged("number", value),
+  minimum,
+  maximum,
+});
+const enumeration = (value, values) => ({
+  type: "string",
+  default: tagged("string", value),
+  enum: values,
+});
+const string = (value) => ({ type: "string", default: tagged("string", value) });
+const boolean = (value) => ({
+  type: "boolean",
+  default: tagged("boolean", value),
+});
+const color = (value) => ({
+  type: "color",
+  default: tagged("color", value),
+  minimum: 0,
+  maximum: 1,
+});
+const json = (value) => ({ type: "json", default: tagged("json", value) });
+const parameterSchemas = {
+  texture: {
+    residency: enumeration("transient", ["transient", "persistent"]),
+    format: enumeration("rgba16_float", [
+      "rgba8_unorm",
+      "rgba8_unorm_srgb",
+      "bgra8_unorm",
+      "bgra8_unorm_srgb",
+      "rgba16_float",
+      "r32_float",
+      "depth32_float",
+    ]),
+    dimension: enumeration("d2", ["d1", "d2", "d3"]),
+    extentMode: enumeration("surface_relative", [
+      "surface_relative",
+      "absolute",
+    ]),
+    absoluteWidth: { ...number(1, 1, 0xffffffff), integer: true },
+    absoluteHeight: { ...number(1, 1, 0xffffffff), integer: true },
+    relativeWidthNumerator: { ...number(1, 1, 0xffffffff), integer: true },
+    relativeWidthDenominator: { ...number(1, 1, 0xffffffff), integer: true },
+    relativeHeightNumerator: { ...number(1, 1, 0xffffffff), integer: true },
+    relativeHeightDenominator: { ...number(1, 1, 0xffffffff), integer: true },
+    depthOrArrayLayers: { ...number(1, 1, 0xffffffff), integer: true },
+    mipLevelCount: { ...number(1, 1, 0xffffffff), integer: true },
+    sampleCount: enumeration("1", ["1", "4"]),
+    viewFormat: enumeration("none", [
+      "none",
+      "rgba8_unorm",
+      "rgba8_unorm_srgb",
+      "bgra8_unorm",
+      "bgra8_unorm_srgb",
+      "rgba16_float",
+      "r32_float",
+      "depth32_float",
+    ]),
+  },
+  mesh: {},
+  frustum_cull: { cameraSelection: enumeration("active", ["active"]) },
+  mesh_query: {
+    visiblePredicate: enumeration("required_true", [
+      "any",
+      "required_true",
+      "required_false",
+    ]),
+    frustumCulledPredicate: enumeration("required_false", [
+      "any",
+      "required_true",
+      "required_false",
+    ]),
+  },
+  pipeline_registry: {},
+  pipeline: {
+    pipeline: string("gltf_standard"),
+    depthCompare: enumeration("less_equal", [
+      "never",
+      "less",
+      "equal",
+      "less_equal",
+      "greater",
+      "not_equal",
+      "greater_equal",
+      "always",
+    ]),
+    depthWriteEnabled: boolean(true),
+    clearDepth: number(1, 0, 1),
+    clearColor: color([0.015, 0.02, 0.03, 1]),
+  },
+  fullscreen_copy: {},
+  tone_map: { exposure: number(1, 0, 32) },
+  bloom_extract: { threshold: number(1, 0, 64), knee: number(0.5, 0, 1) },
+  bloom_blur: {
+    direction: enumeration("horizontal", ["horizontal", "vertical"]),
+    radius: number(1, 1, 16),
+  },
+  bloom_composite: { intensity: number(1, 0, 16) },
+  luminance_edge: { strength: number(2, 0, 16) },
+  frame_out: {},
+};
 export const nodeDefinitions = Object.fromEntries(
   Object.entries(semanticCatalog).map(([key, c]) => {
     const sockets = {
         ...Object.fromEntries(
           Object.entries(c.inputs).map(([n, v]) => [
             n,
-            socket(n, "input", v.authoringType ?? v.accepted.types[0]),
+            socket(
+              n,
+              "input",
+              v.authoringType ?? v.accepted.types[0],
+              key === "mesh_query" && n === "isVisible"
+                ? boolean(true)
+                : key === "mesh_query" && n === "isFrustumCulled"
+                  ? boolean(false)
+                  : null,
+            ),
           ]),
         ),
         ...Object.fromEntries(
@@ -295,12 +378,15 @@ export const nodeDefinitions = Object.fromEntries(
           ]),
         ),
       },
-      parameters = Object.fromEntries(
-        Object.entries(c.parameters).map(([name, value]) => [
-          name,
-          parameterSchema(value),
-        ]),
-      );
+      parameters = parameterSchemas[key];
+    if (
+      !parameters ||
+      Object.keys(parameters).length !== Object.keys(c.parameters).length ||
+      !Object.keys(c.parameters).every((name) =>
+        Object.hasOwn(parameters, name),
+      )
+    )
+      throw new Error(`parameter schema mismatch for ${key}`);
     return [
       key,
       {
@@ -314,6 +400,9 @@ export const nodeDefinitions = Object.fromEntries(
           ...Object.keys(parameters).map((parameter) => ({
             kind: "parameter",
             parameter,
+            ...(key === "frustum_cull" && parameter === "cameraSelection"
+              ? { title: "Camera" }
+              : {}),
           })),
           ...Object.keys(sockets).map((socket) => ({ kind: "socket", socket })),
         ],
