@@ -25,7 +25,7 @@ test("presets classify visibility and material through type.words[0] predicates"
     assert.deepEqual(byId.pbr_double.inputs.predicate, { node: name === "culling" ? "pbr_double_final" : "double_class", socket: "value" }, name);
     for (const pipeline of [byId.ground, byId.pbr, byId.pbr_double]) {
       assert.deepEqual(pipeline.inputs.mesh, { node: "mesh", socket: "mesh" });
-      assert.equal(pipeline.executor.version, 2);
+      assert.equal(pipeline.executor.version, 3);
     }
   }
 });
@@ -38,4 +38,16 @@ test("culling adds a local-AABB expression to each material predicate", () => {
   assert.deepEqual(byId.not_culled.inputs.operand, { node: "cull", socket: "isFrustumCulled" });
   for (const id of ["ground", "pbr", "pbr_double"])
     assert.equal(byId[id].inputs.predicate.node.endsWith("_final"), true);
+});
+
+test("implicit presets start disconnected and then chain both attachments", () => {
+  for (const name of ["hdr", "culling", "grading"]) {
+    const byId = Object.fromEntries(presets[name].nodes.map((node) => [node.id, node]));
+    assert.equal("colorTarget" in byId.ground.inputs, false, name);
+    assert.equal("depthTarget" in byId.ground.inputs, false, name);
+    assert.deepEqual(byId.pbr.inputs.colorTarget, { node: "ground", socket: "color" }, name);
+    assert.deepEqual(byId.pbr.inputs.depthTarget, { node: "ground", socket: "depth" }, name);
+  }
+  const midnight = Object.fromEntries(presets.midnight.nodes.map((node) => [node.id, node]));
+  assert.deepEqual(midnight.ground.inputs.colorTarget, { node: "ldr", socket: "texture" });
 });

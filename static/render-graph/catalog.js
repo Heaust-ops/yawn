@@ -1,10 +1,11 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 8;
+export const CATALOG_VERSION = 9;
 const exact = (type) => ({ kind: "exact", types: [type] });
-const i = (type, required = true, authoringType) => ({
+const i = (type, required = true, authoringType, defaultPolicy = required ? "none" : "parameter_literal") => ({
   accepted: typeof type === "string" ? exact(type) : type,
   required,
   ...(authoringType ? { authoringType } : {}),
+  defaultPolicy,
 });
 const o = (type) => ({ type });
 const expression = (inputs, outputs) => ({
@@ -107,13 +108,13 @@ export const semanticCatalog = Object.freeze({
     parameters: { cameraSelection: "active" },
   },
   pipeline: {
-    version: 2,
+    version: 3,
     execution: "render",
     inputs: {
       mesh: i("mesh_data"),
       predicate: i("bool", false),
-      colorTarget: i("texture"),
-      depthTarget: i("texture"),
+      colorTarget: i("texture", false, undefined, "compiler_texture"),
+      depthTarget: i("texture", false, undefined, "compiler_texture"),
     },
     outputs: { color: o("texture"), depth: o("texture") },
     parameters: { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] },
@@ -427,7 +428,7 @@ export const nodeDefinitions = Object.fromEntries(
               n,
               "input",
               v.authoringType ?? v.accepted.types[0],
-              !v.required ? socketDefault(v.accepted.types[0], defaultForInput(key, n, v.accepted.types[0])) : null,
+              v.defaultPolicy === "parameter_literal" ? socketDefault(v.accepted.types[0], defaultForInput(key, n, v.accepted.types[0])) : null,
             ),
           ]),
         ),

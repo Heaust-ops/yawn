@@ -44,6 +44,13 @@ pub enum InputCardinality {
     OptionalOne,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputDefaultPolicy {
+    None,
+    ParameterLiteral,
+    CompilerTexture,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", content = "types", rename_all = "snake_case")]
 pub enum TypeConstraint {
     Exact(SemanticType),
@@ -67,6 +74,7 @@ pub struct InputSocketContract {
     pub name: &'static str,
     pub accepted: TypeConstraint,
     pub cardinality: InputCardinality,
+    pub default_policy: InputDefaultPolicy,
     pub role: InputRole,
 }
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -97,10 +105,20 @@ const fn i(
     cardinality: InputCardinality,
     role: InputRole,
 ) -> InputSocketContract {
+    let default_policy = match cardinality {
+        InputCardinality::RequiredOne => InputDefaultPolicy::None,
+        InputCardinality::OptionalOne => match role {
+            InputRole::ColorTarget { .. } | InputRole::DepthTarget => {
+                InputDefaultPolicy::CompilerTexture
+            }
+            _ => InputDefaultPolicy::ParameterLiteral,
+        },
+    };
     InputSocketContract {
         name,
         accepted: TypeConstraint::Exact(ty),
         cardinality,
+        default_policy,
         role,
     }
 }
@@ -124,10 +142,10 @@ const PIPE_I: &[InputSocketContract] = &[
     i(
         "colorTarget",
         Texture,
-        R,
+        O,
         InputRole::ColorTarget { location: 0 },
     ),
-    i("depthTarget", Texture, R, InputRole::DepthTarget),
+    i("depthTarget", Texture, O, InputRole::DepthTarget),
 ];
 const PIPE_O: &[OutputSocketContract] = &[o("color", Texture), o("depth", Texture)];
 const CULL_I: &[InputSocketContract] = &[
@@ -181,7 +199,7 @@ pub static CONTRACTS: &[Contract] = &[
     c!("mesh", 2, Source, NONE_I, MESH_O, false, None),
     c!("texture", 1, Source, NONE_I, TEXTURE_O, false, None),
     c!("frustum_cull", 2, Expression, CULL_I, CULL_O, false, None),
-    c!("pipeline", 2, Render, PIPE_I, PIPE_O, false, None),
+    c!("pipeline", 3, Render, PIPE_I, PIPE_O, false, None),
     ex!("and", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
     ex!("or", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
     ex!("not", ins!("operand":Bool), outs!("value":Bool)),

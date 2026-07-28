@@ -136,6 +136,14 @@ fn color(value: [f32; 4], min: f32, max: f32, base: &str) -> Result<[f32; 3], Gr
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct OutputKey(usize, u16);
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum TransitionTargetKey {
+    Authored(OutputKey),
+    CompilerDefaultInput {
+        owner_node: usize,
+        input_ordinal: u16,
+    },
+}
 #[derive(Clone, Copy)]
 struct BoundInput {
     producer: OutputKey,
@@ -155,7 +163,7 @@ struct DependencyEdge {
 struct TextureTransition {
     writer_node: usize,
     input_socket: &'static str,
-    target: OutputKey,
+    target: TransitionTargetKey,
     output: OutputKey,
 }
 
@@ -164,9 +172,72 @@ enum ResolvedTransition {
     Resolved {
         family: u32,
         version: u32,
-        target: OutputKey,
+        target: TransitionTargetKey,
     },
     Cyclic,
+}
+
+#[derive(Clone)]
+struct DefaultDraft {
+    key: TransitionTargetKey,
+    resource: u32,
+    family: u32,
+    owner_node: usize,
+    input_ordinal: u16,
+    socket: &'static str,
+    role: CompilerTextureRole,
+    format: TextureFormat,
+    descriptor: DraftDescriptor,
+}
+
+#[derive(Clone)]
+enum DraftDescriptor {
+    Deferred,
+    Known(NormalizedTextureDescriptor),
+}
+
+enum SampledDescriptor<'a> {
+    Known(&'a NormalizedTextureDescriptor),
+    Deferred,
+    Unproduced,
+}
+
+fn known_family_descriptor<'a>(
+    family: u32,
+    authored_families: &'a [TextureFamily],
+    drafts: &'a [DefaultDraft],
+) -> Option<&'a NormalizedTextureDescriptor> {
+    if let Some(family) = authored_families.get(family as usize) {
+        return Some(family_descriptor(family));
+    }
+    let draft = drafts.get(family as usize - authored_families.len())?;
+    match &draft.descriptor {
+        DraftDescriptor::Known(descriptor) => Some(descriptor),
+        DraftDescriptor::Deferred => None,
+    }
+}
+
+fn sampled_descriptor<'a>(
+    key: OutputKey,
+    version_of: &HashMap<OutputKey, (u32, u32, u32)>,
+    resolved: &HashMap<OutputKey, ResolvedTransition>,
+    authored_families: &'a [TextureFamily],
+    drafts: &'a [DefaultDraft],
+) -> Result<SampledDescriptor<'a>, GraphError> {
+    if let Some(&(family, _, _)) = version_of.get(&key) {
+        return Ok(known_family_descriptor(family, authored_families, drafts)
+            .map(SampledDescriptor::Known)
+            .unwrap_or(SampledDescriptor::Deferred));
+    }
+    match resolved.get(&key) {
+        Some(ResolvedTransition::Cyclic) => Ok(SampledDescriptor::Deferred),
+        Some(ResolvedTransition::Resolved { .. }) => Err(error(
+            "GRAPH_RESOURCE_VERSION_INVALID",
+            "resolved texture has no version",
+            "resources",
+        )),
+        None => Ok(SampledDescriptor::Unproduced),
+    }
 }
 
 fn reaches(
@@ -1037,7 +1108,12 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             }
         }
     }
-    let all_outputs: usize = contracts.iter().map(|c| c.outputs.len()).sum();
+    let all_outputs: usize = contracts
+        .iter()
+        .flat_map(|contract| contract.outputs)
+        .filter(|output| !output.semantic_type.is_virtual())
+        .count();
+    let authored_materialized_output_count = output_ids.len();
 
     // Establish families and transitions without relying on a schedule.
     let mut families = Vec::new();
@@ -1054,7 +1130,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             } => {
                 let id = families.len() as u32;
                 let r = source.unwrap();
-                source_family.insert(OutputKey(i, 0), id);
+                source_family.insert(TransitionTargetKey::Authored(OutputKey(i, 0)), id);
                 families.push(TextureFamily {
                     id,
                     key: TextureFamilyKey {
@@ -1079,8 +1155,72 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             _ => {}
         }
     }
+
+    // Reserve compiler-owned roots without exposing incomplete public plan entries.
+    // IDs remain stable while effective families and descriptors are resolved.
+    let full_extent = NormalizedTextureExtent::SurfaceRelative {
+        width: Ratio {
+            numerator: 1,
+            denominator: 1,
+        },
+        height: Ratio {
+            numerator: 1,
+            denominator: 1,
+        },
+        depth_or_array_layers: 1,
+    };
+    let authored_family_count = families.len();
+    let mut default_roots: Vec<DefaultDraft> = Vec::new();
+    let mut default_targets = HashMap::new();
+    for i in 0..graph.nodes.len() {
+        if !live.contains(&i) || contracts[i].key != "pipeline" {
+            continue;
+        }
+        for (input_ordinal, (socket, role, format, opposite)) in [
+            (
+                "colorTarget",
+                CompilerTextureRole::ColorTarget,
+                TextureFormat::Rgba16Float,
+                "depthTarget",
+            ),
+            (
+                "depthTarget",
+                CompilerTextureRole::DepthTarget,
+                TextureFormat::Depth32Float,
+                "colorTarget",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if bound[i].contains_key(socket) {
+                continue;
+            }
+            let input_ordinal = input_ordinal as u16 + 2;
+            let key = TransitionTargetKey::CompilerDefaultInput {
+                owner_node: i,
+                input_ordinal,
+            };
+            let resource = (authored_materialized_output_count + default_roots.len()) as u32;
+            let family = (authored_family_count + default_roots.len()) as u32;
+            default_targets.insert((i, socket), key);
+            source_family.insert(key, family);
+            let _ = opposite;
+            default_roots.push(DefaultDraft {
+                key,
+                resource,
+                family,
+                owner_node: i,
+                input_ordinal,
+                socket,
+                role,
+                format,
+                descriptor: DraftDescriptor::Deferred,
+            });
+        }
+    }
     let mut transitions: Vec<TextureTransition> = Vec::new();
-    let mut transitions_by_target: BTreeMap<OutputKey, Vec<usize>> = BTreeMap::new();
+    let mut transitions_by_target: BTreeMap<TransitionTargetKey, Vec<usize>> = BTreeMap::new();
     for i in 0..graph.nodes.len() {
         if !live.contains(&i) {
             continue;
@@ -1094,7 +1234,10 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             let transition = TextureTransition {
                 writer_node: i,
                 input_socket,
-                target: bound[i][input_socket].producer,
+                target: bound[i]
+                    .get(input_socket)
+                    .map(|b| TransitionTargetKey::Authored(b.producer))
+                    .unwrap_or_else(|| default_targets[&(i, input_socket)]),
                 output: OutputKey(i, output_ordinal),
             };
             let index = transitions.len();
@@ -1110,7 +1253,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         output: OutputKey,
         transitions: &[TextureTransition],
         transition_for_output: &HashMap<OutputKey, usize>,
-        source_family: &HashMap<OutputKey, u32>,
+        source_family: &HashMap<TransitionTargetKey, u32>,
         colors: &mut HashMap<OutputKey, u8>,
         resolved: &mut HashMap<OutputKey, ResolvedTransition>,
     ) -> ResolvedTransition {
@@ -1128,23 +1271,27 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 version: 0,
                 target: transition.target,
             }
-        } else if transition_for_output.contains_key(&transition.target) {
-            match resolve_transition(
-                transition.target,
-                transitions,
-                transition_for_output,
-                source_family,
-                colors,
-                resolved,
-            ) {
-                ResolvedTransition::Resolved {
-                    family, version, ..
-                } => ResolvedTransition::Resolved {
-                    family,
-                    version: version + 1,
-                    target: transition.target,
-                },
-                ResolvedTransition::Cyclic => ResolvedTransition::Cyclic,
+        } else if let TransitionTargetKey::Authored(target_output) = transition.target {
+            if !transition_for_output.contains_key(&target_output) {
+                ResolvedTransition::Cyclic
+            } else {
+                match resolve_transition(
+                    target_output,
+                    transitions,
+                    transition_for_output,
+                    source_family,
+                    colors,
+                    resolved,
+                ) {
+                    ResolvedTransition::Resolved {
+                        family, version, ..
+                    } => ResolvedTransition::Resolved {
+                        family,
+                        version: version + 1,
+                        target: transition.target,
+                    },
+                    ResolvedTransition::Cyclic => ResolvedTransition::Cyclic,
+                }
             }
         } else {
             ResolvedTransition::Cyclic
@@ -1179,7 +1326,16 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             target,
         } = resolved[&transition.output]
         {
-            let target_id = output_ids[&target];
+            let target_id = match target {
+                TransitionTargetKey::Authored(key) => output_ids[&key],
+                TransitionTargetKey::CompilerDefaultInput { .. } => {
+                    default_roots
+                        .iter()
+                        .find(|root| root.key == target)
+                        .unwrap()
+                        .resource
+                }
+            };
             version_of.insert(transition.output, (family, version, target_id));
         }
     }
@@ -1217,7 +1373,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             if !version_of.contains_key(&key) {
                 continue;
             }
-            let Some(next_indices) = transitions_by_target.get(&key) else {
+            let Some(next_indices) = transitions_by_target.get(&TransitionTargetKey::Authored(key))
+            else {
                 continue;
             };
             let [next_index] = next_indices.as_slice() else {
@@ -1249,7 +1406,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             continue;
         }
         if contracts[i].key == "pipeline" {
-            if bound[i]["colorTarget"].producer == bound[i]["depthTarget"].producer
+            if bound[i].get("colorTarget").map(|b| b.producer)
+                == bound[i].get("depthTarget").map(|b| b.producer)
+                && bound[i].contains_key("colorTarget")
                 || matches!((version_of.get(&OutputKey(i, 0)), version_of.get(&OutputKey(i, 1))), (Some((cf, _, _)), Some((df, _, _))) if cf == df)
             {
                 return Err(error(
@@ -1286,32 +1445,48 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
     }
 
-    // Materialize versions only after hazard and writer precedence has been settled.
-    for transition in &transitions {
-        if let Some(&(family, version, target)) = version_of.get(&transition.output) {
-            families[family as usize].versions.push(TextureVersion {
-                version,
-                resource: output_ids[&transition.output],
-                target,
-                initialized: true,
-                stored: true,
-                lifetime: Lifetime {
-                    first_use: 0,
-                    last_use: 0,
-                },
-            });
-        }
-    }
-    for family in &mut families {
-        family.versions.sort_by_key(|version| version.version);
-        for (index, version) in family.versions.iter().enumerate() {
-            if version.version != index as u32 {
-                return Err(error(
-                    "GRAPH_RESOURCE_VERSION_INVALID",
-                    "texture versions must form a dense linear chain",
-                    "resources",
-                ));
+    // Infer draft descriptors without recursion. Unknown and invalid dependencies
+    // remain deferred so descriptor diagnostics never steal cycle diagnostics.
+    for _ in 0..default_roots.len() {
+        let mut changed = false;
+        for index in 0..default_roots.len() {
+            if matches!(default_roots[index].descriptor, DraftDescriptor::Known(_)) {
+                continue;
             }
+            let owner = default_roots[index].owner_node;
+            let opposite_output = if default_roots[index].role == CompilerTextureRole::ColorTarget {
+                OutputKey(owner, 1)
+            } else {
+                OutputKey(owner, 0)
+            };
+            let Some(&(opposite_family, _, _)) = version_of.get(&opposite_output) else {
+                continue;
+            };
+            let extent = if opposite_family as usize >= authored_family_count
+                && default_roots
+                    .get(opposite_family as usize - authored_family_count)
+                    .is_some_and(|draft| draft.owner_node == owner)
+            {
+                Some(full_extent.clone())
+            } else {
+                known_family_descriptor(opposite_family, &families, &default_roots)
+                    .map(|descriptor| descriptor.extent.clone())
+            };
+            if let Some(extent) = extent {
+                default_roots[index].descriptor =
+                    DraftDescriptor::Known(NormalizedTextureDescriptor {
+                        dimension: TextureDimension::D2,
+                        format: default_roots[index].format,
+                        extent,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        view_formats: vec![],
+                    });
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -1320,30 +1495,53 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         if !live.contains(&i) || contracts[i].key != "pipeline" {
             continue;
         }
-        let (Some(&(cf, _, _)), Some(&(df, _, _))) = (
-            version_of.get(&OutputKey(i, 0)),
-            version_of.get(&OutputKey(i, 1)),
-        ) else {
-            continue;
-        };
-        let TextureFamilySource::AuthoredTexture { descriptor: cd, .. } =
-            &families[cf as usize].source;
-        let TextureFamilySource::AuthoredTexture { descriptor: dd, .. } =
-            &families[df as usize].source;
-        let ok_depth = dd.dimension == TextureDimension::D2
-            && dd.format == TextureFormat::Depth32Float
-            && dd.sample_count == 1
-            && extent_layers(&dd.extent) == 1;
-        let ok_color = cd.format != TextureFormat::Depth32Float
-            && cd.dimension == dd.dimension
-            && cd.extent == dd.extent
-            && cd.sample_count == 1;
-        if !ok_depth || !ok_color {
+        let cd = version_of
+            .get(&OutputKey(i, 0))
+            .and_then(|&(family, _, _)| known_family_descriptor(family, &families, &default_roots));
+        let dd = version_of
+            .get(&OutputKey(i, 1))
+            .and_then(|&(family, _, _)| known_family_descriptor(family, &families, &default_roots));
+        let ok_depth = dd.is_none_or(|dd| {
+            dd.dimension == TextureDimension::D2
+                && dd.format == TextureFormat::Depth32Float
+                && dd.sample_count == 1
+                && dd.mip_level_count == 1
+                && dd.view_formats.is_empty()
+                && extent_layers(&dd.extent) == 1
+        });
+        let ok_color = cd.is_none_or(|cd| {
+            cd.dimension == TextureDimension::D2
+                && cd.format != TextureFormat::Depth32Float
+                && cd.sample_count == 1
+                && cd.mip_level_count == 1
+                && cd.view_formats.is_empty()
+                && extent_layers(&cd.extent) == 1
+        });
+        if !ok_color {
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
-                "attachments are incompatible",
-                format!("nodes[{i}].inputs"),
+                "color attachment is invalid",
+                format!("nodes[{i}].inputs.colorTarget"),
             ));
+        }
+        if !ok_depth {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "depth attachment is invalid",
+                format!("nodes[{i}].inputs.depthTarget"),
+            ));
+        }
+        if let (Some(cd), Some(dd)) = (cd, dd) {
+            if cd.dimension != dd.dimension
+                || cd.extent != dd.extent
+                || cd.sample_count != dd.sample_count
+            {
+                return Err(error(
+                    "GRAPH_ILLEGAL_ACCESS",
+                    "attachments are incompatible",
+                    format!("nodes[{i}].inputs"),
+                ));
+            }
         }
     }
 
@@ -1351,71 +1549,92 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         if !live.contains(&i) || contracts[i].fullscreen_policy.is_none() {
             continue;
         }
-        let source_key = bound[i]["source"].producer;
-        let Some(&(source_family_id, _, _)) = version_of.get(&source_key) else {
+        let source = sampled_descriptor(
+            bound[i]["source"].producer,
+            &version_of,
+            &resolved,
+            &families,
+            &default_roots,
+        )?;
+        let source_descriptor = match source {
+            SampledDescriptor::Known(descriptor) => Some(descriptor),
+            SampledDescriptor::Deferred | SampledDescriptor::Unproduced => None,
+        };
+        let target_family_id = version_of
+            .get(&OutputKey(i, 0))
+            .map(|&(family, _, _)| family)
+            .or_else(|| {
+                source_family
+                    .get(&TransitionTargetKey::Authored(
+                        bound[i]["colorTarget"].producer,
+                    ))
+                    .copied()
+            });
+        let target_descriptor = target_family_id
+            .and_then(|family| known_family_descriptor(family, &families, &default_roots));
+        let bloom = if contracts[i].fullscreen_policy == Some(FullscreenPolicy::BloomComposite) {
+            Some(sampled_descriptor(
+                bound[i]["bloom"].producer,
+                &version_of,
+                &resolved,
+                &families,
+                &default_roots,
+            )?)
+        } else {
+            None
+        };
+        let bloom_descriptor = match &bloom {
+            Some(SampledDescriptor::Known(descriptor)) => Some(*descriptor),
+            _ => None,
+        };
+        let source_ok = source_descriptor.is_none_or(|descriptor| {
+            descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
+        });
+        let target_ok = target_descriptor.is_none_or(|descriptor| {
+            is_single_view_d2(descriptor)
+                && match contracts[i].fullscreen_policy {
+                    Some(FullscreenPolicy::Copy) => {
+                        descriptor.format != TextureFormat::Depth32Float
+                    }
+                    Some(FullscreenPolicy::BloomExtract)
+                    | Some(FullscreenPolicy::HdrSameExtent)
+                    | Some(FullscreenPolicy::BloomComposite) => {
+                        descriptor.format == TextureFormat::Rgba16Float
+                    }
+                    _ => false,
+                }
+        });
+        let bloom_ok = bloom_descriptor.is_none_or(|descriptor| {
+            descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
+        });
+        let extent_ok = match contracts[i].fullscreen_policy {
+            Some(FullscreenPolicy::Copy)
+            | Some(FullscreenPolicy::HdrSameExtent)
+            | Some(FullscreenPolicy::BloomComposite) => {
+                !matches!((source_descriptor, target_descriptor), (Some(source), Some(target)) if source.extent != target.extent)
+            }
+            Some(FullscreenPolicy::BloomExtract) => true,
+            _ => false,
+        };
+        if !source_ok || !target_ok || !bloom_ok || !extent_ok {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "fullscreen textures are incompatible",
+                format!("nodes[{i}].inputs"),
+            ));
+        }
+        if matches!(source, SampledDescriptor::Unproduced) {
             return Err(error(
                 "GRAPH_UNINITIALIZED_RESOURCE",
                 "copy source is not produced",
                 format!("nodes[{i}].inputs.source"),
             ));
-        };
-        let Some(&(target_family_id, _, _)) = version_of.get(&OutputKey(i, 0)) else {
-            continue;
-        };
-        let source_descriptor = match &families[source_family_id as usize].source {
-            TextureFamilySource::AuthoredTexture { descriptor, .. } => descriptor,
-        };
-        let source_ok = source_descriptor.format == TextureFormat::Rgba16Float
-            && is_single_view_d2(source_descriptor);
-        let target_descriptor = match &families[target_family_id as usize].source {
-            TextureFamilySource::AuthoredTexture { descriptor, .. } => Some(descriptor),
-        };
-        let authored_target_ok = target_descriptor.is_some_and(|descriptor| {
-            descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
-        });
-        let bloom_input_ok = if contracts[i].fullscreen_policy
-            == Some(FullscreenPolicy::BloomComposite)
-        {
-            let bloom_key = bound[i]["bloom"].producer;
-            let Some(&(bloom_family_id, _, _)) = version_of.get(&bloom_key) else {
-                return Err(error(
-                    "GRAPH_UNINITIALIZED_RESOURCE",
-                    "bloom source is not produced",
-                    format!("nodes[{i}].inputs.bloom"),
-                ));
-            };
-            match &families[bloom_family_id as usize].source {
-                TextureFamilySource::AuthoredTexture { descriptor, .. } => {
-                    descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
-                }
-            }
-        } else {
-            true
-        };
-        let source_is_full_surface = matches!(&source_descriptor.extent, NormalizedTextureExtent::SurfaceRelative { width, height, depth_or_array_layers: 1 } if *width == Ratio { numerator:1, denominator:1 } && *height == Ratio { numerator:1, denominator:1 });
-        let target_matches_source = target_descriptor
-            .is_some_and(|descriptor| descriptor.extent == source_descriptor.extent);
-        let descriptor_ok = match contracts[i].fullscreen_policy {
-            Some(FullscreenPolicy::Copy) => {
-                target_descriptor.is_none() && source_is_full_surface
-                    || target_descriptor.is_some_and(|descriptor| {
-                        descriptor.format != TextureFormat::Depth32Float
-                            && is_single_view_d2(descriptor)
-                            && descriptor.extent == source_descriptor.extent
-                    })
-            }
-            Some(FullscreenPolicy::BloomExtract) => authored_target_ok,
-            Some(FullscreenPolicy::HdrSameExtent) => authored_target_ok && target_matches_source,
-            Some(FullscreenPolicy::BloomComposite) => {
-                authored_target_ok && target_matches_source && bloom_input_ok
-            }
-            _ => false,
-        };
-        if !source_ok || !descriptor_ok {
+        }
+        if matches!(bloom, Some(SampledDescriptor::Unproduced)) {
             return Err(error(
-                "GRAPH_ILLEGAL_ACCESS",
-                "fullscreen textures are incompatible",
-                format!("nodes[{i}].inputs"),
+                "GRAPH_UNINITIALIZED_RESOURCE",
+                "bloom source is not produced",
+                format!("nodes[{i}].inputs.bloom"),
             ));
         }
     }
@@ -1436,8 +1655,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             }
             continue;
         };
-        let TextureFamilySource::AuthoredTexture { descriptor, .. } =
-            &families[family as usize].source;
+        let Some(descriptor) = known_family_descriptor(family, &families, &default_roots) else {
+            continue;
+        };
         let NormalizedParameters::FrameOut { dynamic_range, .. } = &params[i] else {
             unreachable!()
         };
@@ -1569,12 +1789,73 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     if transitions
         .iter()
         .any(|transition| matches!(resolved[&transition.output], ResolvedTransition::Cyclic))
+        || default_roots
+            .iter()
+            .any(|draft| matches!(draft.descriptor, DraftDescriptor::Deferred))
     {
         return Err(error(
             "GRAPH_RESOURCE_VERSION_INVALID",
             "texture predecessor is unresolved in an acyclic graph",
             "resources",
         ));
+    }
+
+    for draft in &default_roots {
+        let DraftDescriptor::Known(descriptor) = &draft.descriptor else {
+            unreachable!("deferred drafts rejected above")
+        };
+        families.push(TextureFamily {
+            id: draft.family,
+            key: TextureFamilyKey {
+                source_node: draft.owner_node as u32,
+                source_socket: draft.input_ordinal,
+            },
+            source: TextureFamilySource::CompilerDefaultInput {
+                resource: draft.resource,
+                owner_node_index: draft.owner_node as u32,
+                input_ordinal: draft.input_ordinal,
+                role: draft.role,
+                descriptor: descriptor.clone(),
+            },
+            lifetime: Lifetime {
+                first_use: 0,
+                last_use: 0,
+            },
+            versions: vec![],
+            usage: vec![],
+            allocation: None,
+            aliasable: false,
+        });
+    }
+    for transition in &transitions {
+        if let Some(&(family, version, target)) = version_of.get(&transition.output) {
+            families[family as usize].versions.push(TextureVersion {
+                version,
+                resource: output_ids[&transition.output],
+                target,
+                initialized: true,
+                stored: true,
+                lifetime: Lifetime {
+                    first_use: 0,
+                    last_use: 0,
+                },
+            });
+        }
+    }
+    for family in &mut families {
+        family.versions.sort_by_key(|version| version.version);
+        if family
+            .versions
+            .iter()
+            .enumerate()
+            .any(|(index, version)| version.version != index as u32)
+        {
+            return Err(error(
+                "GRAPH_RESOURCE_VERSION_INVALID",
+                "texture versions must form a dense linear chain",
+                "resources",
+            ));
+        }
     }
 
     let mut resources = Vec::new();
@@ -1589,7 +1870,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 } = &params[i]
                 {
                     ResourcePlan::TextureSource {
-                        family: source_family[&key],
+                        family: source_family[&TransitionTargetKey::Authored(key)],
                         residency: *residency,
                         descriptor: descriptor.clone(),
                     }
@@ -1625,10 +1906,10 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         };
         resources.push(CompiledResource {
             original_node_index: i as u32,
-            output_ordinal: o,
-            origin: NodeOutputRef {
+            origin: ResourceOrigin::AuthoredOutput {
                 node: graph.nodes[i].id.clone(),
                 socket: out.name.into(),
+                output_ordinal: o,
             },
             semantic_type: out.semantic_type,
             producer_execution: None,
@@ -1636,6 +1917,28 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             plan,
         });
         let _ = id;
+    }
+    for draft in &default_roots {
+        let DraftDescriptor::Known(descriptor) = &draft.descriptor else {
+            unreachable!("deferred drafts rejected above")
+        };
+        resources.push(CompiledResource {
+            original_node_index: draft.owner_node as u32,
+            origin: ResourceOrigin::CompilerDefaultInput {
+                owner_node_index: draft.owner_node as u32,
+                input_ordinal: draft.input_ordinal,
+                socket: draft.socket.into(),
+                role: draft.role,
+            },
+            semantic_type: SemanticType::Texture,
+            producer_execution: None,
+            lifetime: None,
+            plan: ResourcePlan::TextureSource {
+                family: draft.family,
+                residency: TextureResidency::Transient,
+                descriptor: descriptor.clone(),
+            },
+        });
     }
     let mut executions = Vec::new();
     for &i in &order {
@@ -1647,14 +1950,26 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
         let input_resource = |s: &str| output_ids[&bound[i][s].producer];
         let mut inputs = Vec::new();
-        for s in contracts[i].inputs {
+        for (input_ordinal, s) in contracts[i].inputs.iter().enumerate() {
             if s.role != InputRole::Expression {
-                let Some(b) = bound[i].get(s.name) else {
+                let resource = if let Some(b) = bound[i].get(s.name) {
+                    output_ids[&b.producer]
+                } else if s.default_policy == InputDefaultPolicy::CompilerTexture {
+                    let key = TransitionTargetKey::CompilerDefaultInput {
+                        owner_node: i,
+                        input_ordinal: input_ordinal as u16,
+                    };
+                    default_roots
+                        .iter()
+                        .find(|root| root.key == key)
+                        .expect("default policy materialized a root")
+                        .resource
+                } else {
                     continue;
                 };
                 inputs.push(CompiledSocketInput {
                     socket: s.name.into(),
-                    resource: output_ids[&b.producer],
+                    resource,
                 });
             }
         }
@@ -2095,13 +2410,13 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             last_use: last,
         };
         f.usage = texture_usage(f, &executions);
-        f.aliasable = matches!(
-            f.source,
-            TextureFamilySource::AuthoredTexture {
-                residency: TextureResidency::Transient,
-                ..
+        let transient = match f.source {
+            TextureFamilySource::AuthoredTexture { residency, .. } => {
+                residency == TextureResidency::Transient
             }
-        ) && f.versions.iter().all(|v| v.initialized);
+            TextureFamilySource::CompilerDefaultInput { .. } => true,
+        };
+        f.aliasable = transient && f.versions.iter().all(|v| v.initialized);
     }
     let (classes, transient) = allocate(&mut families, &mut resources);
     if resources.len() > 1024 {
@@ -2121,7 +2436,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         texture_families: families,
         allocation_classes: classes,
         culled_node_count: (graph.nodes.len() - live.len()) as u32,
-        culled_resource_count: (all_outputs - output_ids.len()) as u32,
+        culled_resource_count: (all_outputs - authored_materialized_output_count) as u32,
         transient_slot_count: transient,
         instance_traversal,
     })
@@ -2137,6 +2452,12 @@ fn extent_layers(e: &NormalizedTextureExtent) -> u32 {
             depth_or_array_layers,
             ..
         } => *depth_or_array_layers,
+    }
+}
+pub(super) fn family_descriptor(family: &TextureFamily) -> &NormalizedTextureDescriptor {
+    match &family.source {
+        TextureFamilySource::AuthoredTexture { descriptor, .. }
+        | TextureFamilySource::CompilerDefaultInput { descriptor, .. } => descriptor,
     }
 }
 pub(super) fn is_single_view_d2(descriptor: &NormalizedTextureDescriptor) -> bool {
@@ -2195,7 +2516,7 @@ fn allocate(
 ) -> (Vec<AllocationClass>, u32) {
     let mut grouped: BTreeMap<TextureCompatibilityKey, Vec<usize>> = BTreeMap::new();
     for (i, f) in families.iter().enumerate() {
-        let TextureFamilySource::AuthoredTexture { descriptor, .. } = &f.source;
+        let descriptor = family_descriptor(f);
         grouped
             .entry(TextureCompatibilityKey {
                 dimension: descriptor.dimension,

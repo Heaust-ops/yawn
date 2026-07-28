@@ -395,7 +395,8 @@ fn texture_descriptor<'a>(
         _ => return None,
     };
     match &graph.texture_families.get(family as usize)?.source {
-        TextureFamilySource::AuthoredTexture { descriptor, .. } => Some(descriptor),
+        TextureFamilySource::AuthoredTexture { descriptor, .. }
+        | TextureFamilySource::CompilerDefaultInput { descriptor, .. } => Some(descriptor),
     }
 }
 
@@ -682,6 +683,19 @@ fn validate_fullscreen_execution(
 }
 
 fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
+    fn texture_family_for_resource<'a>(
+        graph: &'a CompiledGraph,
+        resource: u32,
+    ) -> Option<&'a TextureFamily> {
+        let resource = graph.resources.get(resource as usize)?;
+        let family = match resource.plan {
+            ResourcePlan::TextureSource { family, .. } | ResourcePlan::Texture { family, .. } => {
+                family
+            }
+            _ => return None,
+        };
+        graph.texture_families.get(family as usize)
+    }
     for (i, resource) in graph.resources.iter().enumerate() {
         if resource.semantic_type.is_virtual() {
             return Err(invalid(
@@ -795,27 +809,220 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
         }
     }
 
+    let mut family_keys = HashSet::new();
+    let mut source_claims = vec![0u8; graph.resources.len()];
     for (fi, family) in graph.texture_families.iter().enumerate() {
-        let TextureFamilySource::AuthoredTexture {
-            resource: source,
-            residency,
-            descriptor,
-        } = &family.source;
-        let source_resource = graph.resources.get(*source as usize).ok_or_else(|| {
+        if family.id as usize != fi || !family_keys.insert(family.key.clone()) {
+            return Err(invalid(
+                "texture family id/key is not unique and canonical",
+                format!("textureFamilies[{fi}]"),
+            ));
+        }
+        let (source, residency, descriptor) = match &family.source {
+            TextureFamilySource::AuthoredTexture {
+                resource,
+                residency,
+                descriptor,
+            } => (*resource, *residency, descriptor),
+            TextureFamilySource::CompilerDefaultInput {
+                resource,
+                descriptor,
+                ..
+            } => (*resource, TextureResidency::Transient, descriptor),
+        };
+        let source_resource = graph.resources.get(source as usize).ok_or_else(|| {
             invalid(
                 "texture source resource is out of bounds",
                 format!("textureFamilies[{fi}].source.resource"),
             )
         })?;
+        source_claims[source as usize] = source_claims[source as usize].saturating_add(1);
         if source_resource.semantic_type != SemanticType::Texture
             || source_resource.producer_execution.is_some()
             || !matches!(&source_resource.plan, ResourcePlan::TextureSource { family: f, residency: r, descriptor: d }
-                if *f == family.id && r == residency && d == descriptor)
+                if *f == family.id && *r == residency && d == descriptor)
         {
             return Err(invalid(
                 "texture family source is not canonical",
                 format!("textureFamilies[{fi}].source"),
             ));
+        }
+        let origin_ok = match (&family.source, &source_resource.origin) {
+            (
+                TextureFamilySource::AuthoredTexture { resource, .. },
+                ResourceOrigin::AuthoredOutput {
+                    node: _,
+                    socket,
+                    output_ordinal,
+                },
+            ) => {
+                family.key.source_node == source_resource.original_node_index
+                    && family.key.source_socket == 0
+                    && *output_ordinal == 0
+                    && *socket == "texture"
+                    && *resource == source
+                    && source_resource.producer_execution.is_none()
+            }
+            (
+                TextureFamilySource::CompilerDefaultInput {
+                    owner_node_index,
+                    input_ordinal,
+                    role,
+                    ..
+                },
+                ResourceOrigin::CompilerDefaultInput {
+                    owner_node_index: owner,
+                    input_ordinal: input,
+                    socket,
+                    role: origin_role,
+                },
+            ) => {
+                let owner_executions: Vec<_> = graph
+                    .executions
+                    .iter()
+                    .filter(|execution| execution.original_node_index == *owner_node_index)
+                    .collect();
+                let owner_input_ok = owner_executions
+                    .as_slice()
+                    .first()
+                    .is_some_and(|execution| {
+                        execution
+                            .inputs
+                            .iter()
+                            .filter(|input| input.socket == *socket && input.resource == source)
+                            .count()
+                            == 1
+                    })
+                    && owner_executions[0].executor.key == "pipeline"
+                    && owner_executions[0].executor.version == 3
+                    && graph
+                        .executions
+                        .iter()
+                        .flat_map(|execution| &execution.inputs)
+                        .filter(|input| input.resource == source)
+                        .count()
+                        == 1
+                    && contract("pipeline")
+                        .and_then(|contract| contract.inputs.get(*input_ordinal as usize))
+                        .is_some_and(|input| {
+                            input.name == *socket
+                                && matches!(
+                                    (input.role, role),
+                                    (
+                                        InputRole::ColorTarget { location: 0 },
+                                        CompilerTextureRole::ColorTarget
+                                    ) | (InputRole::DepthTarget, CompilerTextureRole::DepthTarget)
+                                )
+                        });
+                owner == owner_node_index
+                    && owner_executions.len() == 1
+                    && input == input_ordinal
+                    && origin_role == role
+                    && owner_input_ok
+                    && socket
+                        == if *role == CompilerTextureRole::ColorTarget {
+                            "colorTarget"
+                        } else {
+                            "depthTarget"
+                        }
+            }
+            _ => false,
+        };
+        if !origin_ok {
+            return Err(invalid(
+                "texture source origin is not canonical",
+                format!("resources[{source}].origin"),
+            ));
+        }
+        if let TextureFamilySource::CompilerDefaultInput {
+            owner_node_index,
+            input_ordinal,
+            role,
+            descriptor,
+            ..
+        } = &family.source
+        {
+            let fixed = descriptor.dimension == TextureDimension::D2
+                && descriptor.format
+                    == if *role == CompilerTextureRole::ColorTarget {
+                        TextureFormat::Rgba16Float
+                    } else {
+                        TextureFormat::Depth32Float
+                    }
+                && descriptor.mip_level_count == 1
+                && descriptor.sample_count == 1
+                && descriptor.view_formats.is_empty()
+                && matches!(
+                    descriptor.extent,
+                    NormalizedTextureExtent::Absolute {
+                        depth_or_array_layers: 1,
+                        ..
+                    } | NormalizedTextureExtent::SurfaceRelative {
+                        depth_or_array_layers: 1,
+                        ..
+                    }
+                )
+                && family.key.source_node == *owner_node_index
+                && family.key.source_socket == *input_ordinal
+                && source_resource.original_node_index == *owner_node_index;
+            if !fixed {
+                return Err(invalid(
+                    "compiler default descriptor is not canonical",
+                    format!("textureFamilies[{fi}].source.descriptor"),
+                ));
+            }
+            let owner = graph
+                .executions
+                .iter()
+                .find(|execution| execution.original_node_index == *owner_node_index)
+                .expect("origin validation found owner");
+            let opposite_socket = if *role == CompilerTextureRole::ColorTarget {
+                "depthTarget"
+            } else {
+                "colorTarget"
+            };
+            let opposite_resource = owner
+                .inputs
+                .iter()
+                .find(|input| input.socket == opposite_socket)
+                .map(|input| input.resource)
+                .ok_or_else(|| {
+                    invalid(
+                        "compiler default opposite input is missing",
+                        format!("executions[{owner_node_index}].inputs"),
+                    )
+                })?;
+            let opposite_family = texture_family_for_resource(graph, opposite_resource)
+                .ok_or_else(|| {
+                    invalid(
+                        "compiler default opposite input is invalid",
+                        format!("executions[{owner_node_index}].inputs"),
+                    )
+                })?;
+            let both_defaults = matches!(&opposite_family.source, TextureFamilySource::CompilerDefaultInput { owner_node_index: opposite_owner, .. } if opposite_owner == owner_node_index);
+            let expected_extent = if both_defaults {
+                NormalizedTextureExtent::SurfaceRelative {
+                    width: Ratio {
+                        numerator: 1,
+                        denominator: 1,
+                    },
+                    height: Ratio {
+                        numerator: 1,
+                        denominator: 1,
+                    },
+                    depth_or_array_layers: 1,
+                }
+            } else {
+                super::compiler::family_descriptor(opposite_family)
+                    .extent
+                    .clone()
+            };
+            if descriptor.extent != expected_extent {
+                return Err(invalid(
+                    "compiler default extent is not canonical",
+                    format!("textureFamilies[{fi}].source.descriptor.extent"),
+                ));
+            }
         }
         if family.versions.is_empty() {
             return Err(invalid(
@@ -828,7 +1035,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
         let mut all_initialized = true;
         for (vi, version) in family.versions.iter().enumerate() {
             let expected_target = if vi == 0 {
-                *source
+                source
             } else {
                 family.versions[vi - 1].resource
             };
@@ -870,11 +1077,20 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                 format!("textureFamilies[{fi}].lifetime"),
             ));
         }
-        let expected_aliasable = *residency == TextureResidency::Transient && all_initialized;
+        let expected_aliasable = residency == TextureResidency::Transient && all_initialized;
         if family.aliasable != expected_aliasable {
             return Err(invalid(
                 "texture family aliasability is not canonical",
                 format!("textureFamilies[{fi}].aliasable"),
+            ));
+        }
+    }
+    for (ri, resource) in graph.resources.iter().enumerate() {
+        let is_source = matches!(resource.plan, ResourcePlan::TextureSource { .. });
+        if is_source != (source_claims[ri] == 1) {
+            return Err(invalid(
+                "texture source must be claimed by exactly one family",
+                format!("resources[{ri}].plan"),
             ));
         }
     }
@@ -1590,7 +1806,7 @@ pub fn prepare_runtime_plan(
             format!("resources[{color}].plan.family"),
         )
     })?;
-    let TextureFamilySource::AuthoredTexture { descriptor, .. } = &family.source;
+    let descriptor = super::compiler::family_descriptor(family);
     if !super::compiler::frame_out_source_compatible(descriptor, dynamic_range) {
         return Err(invalid(
             "frame_out texture descriptor is incompatible",
@@ -1645,6 +1861,14 @@ pub fn prepare_runtime_plan(
                     return Err(invalid(
                         "authored family has no allocation",
                         format!("textureFamilies[{fi}].allocation"),
+                    ));
+                }
+            }
+            TextureFamilySource::CompilerDefaultInput { descriptor, .. } => {
+                if !super::compiler::is_single_view_d2(descriptor) || family.allocation.is_none() {
+                    return Err(invalid(
+                        "compiler default family is not canonical",
+                        format!("textureFamilies[{fi}]"),
                     ));
                 }
             }
@@ -1755,24 +1979,29 @@ pub fn prepare_runtime_plan(
                         format!("allocationClasses[{ci}].slots[{si}].occupants"),
                     ));
                 }
-                let TextureFamilySource::AuthoredTexture {
-                    descriptor,
-                    residency,
-                    ..
-                } = &family.source;
+                let (descriptor, residency) = match &family.source {
+                    TextureFamilySource::AuthoredTexture {
+                        descriptor,
+                        residency,
+                        ..
+                    } => (descriptor, *residency),
+                    TextureFamilySource::CompilerDefaultInput { descriptor, .. } => {
+                        (descriptor, TextureResidency::Transient)
+                    }
+                };
                 expected_usage.extend(family.usage.iter().copied());
                 let kind_valid = match slot.kind {
                     AllocationKind::AliasedTransient => {
-                        *residency == TextureResidency::Transient && family.aliasable
+                        residency == TextureResidency::Transient && family.aliasable
                     }
                     AllocationKind::DedicatedTransient => {
                         slot.occupants.len() == 1
-                            && *residency == TextureResidency::Transient
+                            && residency == TextureResidency::Transient
                             && !family.aliasable
                     }
                     AllocationKind::Persistent => {
                         slot.occupants.len() == 1
-                            && *residency == TextureResidency::Persistent
+                            && residency == TextureResidency::Persistent
                             && !family.aliasable
                     }
                 };

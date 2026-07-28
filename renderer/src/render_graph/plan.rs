@@ -24,12 +24,34 @@ pub struct CompiledGraph {
 #[serde(rename_all = "camelCase")]
 pub struct CompiledResource {
     pub original_node_index: u32,
-    pub output_ordinal: u16,
-    pub origin: NodeOutputRef,
+    pub origin: ResourceOrigin,
     pub semantic_type: SemanticType,
     pub producer_execution: Option<u32>,
     pub lifetime: Option<Lifetime>,
     pub plan: ResourcePlan,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResourceOrigin {
+    AuthoredOutput {
+        node: String,
+        socket: String,
+        output_ordinal: u16,
+    },
+    CompilerDefaultInput {
+        owner_node_index: u32,
+        input_ordinal: u16,
+        socket: String,
+        role: CompilerTextureRole,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompilerTextureRole {
+    ColorTarget,
+    DepthTarget,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -331,7 +353,7 @@ pub struct Lifetime {
     pub last_use: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextureFamilyKey {
     pub source_node: u32,
@@ -344,6 +366,13 @@ pub enum TextureFamilySource {
     AuthoredTexture {
         resource: u32,
         residency: TextureResidency,
+        descriptor: NormalizedTextureDescriptor,
+    },
+    CompilerDefaultInput {
+        resource: u32,
+        owner_node_index: u32,
+        input_ordinal: u16,
+        role: CompilerTextureRole,
         descriptor: NormalizedTextureDescriptor,
     },
 }
