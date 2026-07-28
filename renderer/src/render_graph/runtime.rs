@@ -26,7 +26,131 @@ pub struct RuntimeSurfaceContract {
     pub width: u32,
     pub height: u32,
     pub usage: wgpu::TextureUsages,
+    pub present_mode: wgpu::PresentMode,
+    pub alpha_mode: wgpu::CompositeAlphaMode,
     pub view_formats: Vec<wgpu::TextureFormat>,
+    pub desired_maximum_frame_latency: u32,
+}
+
+fn frame_out_surface_request(
+    graph: &CompiledGraph,
+) -> Result<(SurfaceFormatRequest, u32), GraphError> {
+    graph
+        .executions
+        .iter()
+        .find_map(|execution| match execution.parameters {
+            NormalizedParameters::FrameOut { surface_format, .. } => {
+                Some((surface_format, execution.original_node_index))
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            error(
+                "GRAPH_EXECUTION_UNSUPPORTED",
+                "exactly one frame_out is required",
+                "executions",
+            )
+        })
+}
+
+fn surface_format_path(original_node_index: u32) -> String {
+    format!("nodes[{original_node_index}].parameters.surfaceFormat")
+}
+
+pub fn resolve_graph_surface_contract(
+    graph: &CompiledGraph,
+    capabilities: &wgpu::SurfaceCapabilities,
+    width: u32,
+    height: u32,
+) -> Result<RuntimeSurfaceContract, GraphError> {
+    let (request, frame_out_index) = frame_out_surface_request(graph)?;
+    resolve_surface_contract(
+        request,
+        capabilities,
+        width,
+        height,
+        &surface_format_path(frame_out_index),
+    )
+}
+
+/// Resolves the authored surface request against current adapter/surface capabilities.
+/// The presentation policy is intentionally fixed and is not graph-authored.
+pub fn resolve_surface_contract(
+    request: SurfaceFormatRequest,
+    capabilities: &wgpu::SurfaceCapabilities,
+    width: u32,
+    height: u32,
+    authored_path: &str,
+) -> Result<RuntimeSurfaceContract, GraphError> {
+    if width == 0 || height == 0 {
+        return Err(error(
+            "GRAPH_SURFACE_INCOMPATIBLE",
+            "surface extent is zero",
+            "surface",
+        ));
+    }
+    if !capabilities
+        .usages
+        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+    {
+        return Err(error(
+            "GRAPH_SURFACE_INCOMPATIBLE",
+            "surface lacks render attachment usage",
+            "surface.usage",
+        ));
+    }
+    if !capabilities
+        .present_modes
+        .contains(&wgpu::PresentMode::Fifo)
+    {
+        return Err(error(
+            "GRAPH_SURFACE_INCOMPATIBLE",
+            "fixed surface present mode is unsupported",
+            "surface",
+        ));
+    }
+    if !capabilities
+        .alpha_modes
+        .contains(&wgpu::CompositeAlphaMode::Opaque)
+    {
+        return Err(error(
+            "GRAPH_SURFACE_INCOMPATIBLE",
+            "fixed surface alpha mode is unsupported",
+            "surface",
+        ));
+    }
+    let requested = match request {
+        SurfaceFormatRequest::Preferred => capabilities.formats.iter().copied().find(|format| {
+            matches!(
+                format,
+                wgpu::TextureFormat::Rgba8Unorm
+                    | wgpu::TextureFormat::Bgra8Unorm
+                    | wgpu::TextureFormat::Rgba16Float
+            )
+        }),
+        SurfaceFormatRequest::Rgba8Unorm => Some(wgpu::TextureFormat::Rgba8Unorm),
+        SurfaceFormatRequest::Bgra8Unorm => Some(wgpu::TextureFormat::Bgra8Unorm),
+        SurfaceFormatRequest::Rgba16Float => Some(wgpu::TextureFormat::Rgba16Float),
+    };
+    let format = requested
+        .filter(|format| capabilities.formats.contains(format))
+        .ok_or_else(|| {
+            error(
+                "GRAPH_SURFACE_INCOMPATIBLE",
+                "requested surface format is unsupported",
+                authored_path,
+            )
+        })?;
+    Ok(RuntimeSurfaceContract {
+        format,
+        width,
+        height,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1467,6 +1591,7 @@ pub fn prepare_runtime_plan(
 
     let frame_out = &graph.executions[frame_out_index];
     let NormalizedParameters::FrameOut {
+        surface_format,
         dynamic_range,
         output_transfer,
         scale_mode: _,
@@ -1479,6 +1604,22 @@ pub fn prepare_runtime_plan(
             format!("executions[{frame_out_index}].parameters"),
         ));
     };
+    let requested_format = match surface_format {
+        SurfaceFormatRequest::Preferred => None,
+        SurfaceFormatRequest::Rgba8Unorm => Some(wgpu::TextureFormat::Rgba8Unorm),
+        SurfaceFormatRequest::Bgra8Unorm => Some(wgpu::TextureFormat::Bgra8Unorm),
+        SurfaceFormatRequest::Rgba16Float => Some(wgpu::TextureFormat::Rgba16Float),
+    };
+    if requested_format.is_some_and(|format| format != surface.format) {
+        return Err(error(
+            "GRAPH_SURFACE_INCOMPATIBLE",
+            "resolved surface format does not match frame output request",
+            format!(
+                "nodes[{}].parameters.surfaceFormat",
+                frame_out.original_node_index
+            ),
+        ));
+    }
     let parameters_valid = background_color
         .iter()
         .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
@@ -1836,12 +1977,39 @@ pub fn prepare_runtime_plan(
 }
 
 pub fn validate_activatable(graph: &CompiledGraph) -> Result<(), GraphError> {
-    let surface = RuntimeSurfaceContract {
-        format: wgpu::TextureFormat::Bgra8Unorm,
-        width: 1,
-        height: 1,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: Vec::new(),
+    // Runtime validation must diagnose noncanonical compiled plans before the
+    // live-capability resolver. The validator below remains authoritative for
+    // missing or duplicated Frame Out work, so a missing request gets a
+    // harmless synthetic default solely for constructing test capabilities.
+    let (request, frame_out_index) = graph
+        .executions
+        .iter()
+        .find_map(|execution| match execution.parameters {
+            NormalizedParameters::FrameOut { surface_format, .. } => {
+                Some((surface_format, execution.original_node_index))
+            }
+            _ => None,
+        })
+        .unwrap_or((SurfaceFormatRequest::Preferred, 0));
+    let format = match request {
+        SurfaceFormatRequest::Preferred | SurfaceFormatRequest::Bgra8Unorm => {
+            wgpu::TextureFormat::Bgra8Unorm
+        }
+        SurfaceFormatRequest::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        SurfaceFormatRequest::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
     };
+    let capabilities = wgpu::SurfaceCapabilities {
+        formats: vec![format],
+        present_modes: vec![wgpu::PresentMode::Fifo],
+        alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+        usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+    };
+    let surface = resolve_surface_contract(
+        request,
+        &capabilities,
+        1,
+        1,
+        &surface_format_path(frame_out_index),
+    )?;
     prepare_runtime_plan(graph, surface, None).map(|_| ())
 }

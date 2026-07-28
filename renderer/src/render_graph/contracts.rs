@@ -408,7 +408,7 @@ pub static CONTRACTS: &[Contract] = &[
     },
     Contract {
         key: "frame_out",
-        version: 2,
+        version: 3,
         execution: ExecutionClass::Frame,
         inputs: FRAME_OUT_IN,
         outputs: NONE_OUT,

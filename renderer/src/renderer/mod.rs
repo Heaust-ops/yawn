@@ -154,6 +154,7 @@ fn pack_frame_out_uniforms(
 ) -> Option<FullscreenUniforms> {
     use crate::render_graph::*;
     let NormalizedParameters::FrameOut {
+        surface_format: _,
         dynamic_range,
         output_transfer,
         scale_mode,
@@ -301,7 +302,10 @@ mod fullscreen_tests {
             width: 1920,
             height: 1080,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         }
     }
 
@@ -312,6 +316,7 @@ mod fullscreen_tests {
         filter: FrameFilter,
     ) -> NormalizedParameters {
         NormalizedParameters::FrameOut {
+            surface_format: SurfaceFormatRequest::Preferred,
             dynamic_range,
             output_transfer: transfer,
             scale_mode,
@@ -775,6 +780,57 @@ enum UploadGraph {
     Compiled(crate::render_graph::MeshQueryRuntimeKey),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameTargetSource {
+    PendingSwitch,
+    PendingResize,
+    Active,
+    Immediate,
+}
+
+fn select_frame_target_source(
+    pending_switch: bool,
+    pending_resize: bool,
+    active: bool,
+) -> FrameTargetSource {
+    if pending_switch {
+        FrameTargetSource::PendingSwitch
+    } else if pending_resize {
+        FrameTargetSource::PendingResize
+    } else if active {
+        FrameTargetSource::Active
+    } else {
+        FrameTargetSource::Immediate
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcquisitionAction {
+    RejectSwitch,
+    DropResize,
+    ReconfigureAndSkip,
+    Skip,
+    Halt,
+}
+
+fn acquisition_action(source: FrameTargetSource, error: &wgpu::SurfaceError) -> AcquisitionAction {
+    if matches!(error, wgpu::SurfaceError::OutOfMemory) {
+        return AcquisitionAction::Halt;
+    }
+    match source {
+        FrameTargetSource::PendingSwitch => AcquisitionAction::RejectSwitch,
+        FrameTargetSource::PendingResize => AcquisitionAction::DropResize,
+        FrameTargetSource::Active | FrameTargetSource::Immediate => match error {
+            wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                AcquisitionAction::ReconfigureAndSkip
+            }
+            wgpu::SurfaceError::Timeout => AcquisitionAction::Skip,
+            wgpu::SurfaceError::Other => AcquisitionAction::Halt,
+            wgpu::SurfaceError::OutOfMemory => unreachable!(),
+        },
+    }
+}
+
 fn classify_upload_graph(graph: &ActiveCompiledGraph) -> UploadGraph {
     UploadGraph::Compiled(graph.runtime.allocations.query)
 }
@@ -890,6 +946,29 @@ fn resolve_switch_request(
     }
 }
 
+fn drop_graph_request(
+    registry: &mut crate::render_graph::Registry,
+    id: crate::render_graph::CompiledGraphId,
+    active: Option<crate::render_graph::CompiledGraphId>,
+    pending_switch: Option<crate::render_graph::CompiledGraphId>,
+    pending_resize: Option<crate::render_graph::CompiledGraphId>,
+    in_flight: Option<crate::render_graph::CompiledGraphId>,
+) -> Result<(), crate::render_graph::GraphError> {
+    if active == Some(id) {
+        Err(crate::render_graph::GraphError::new(
+            "GRAPH_ACTIVE",
+            "compiled graph is active",
+        ))
+    } else if [pending_switch, pending_resize, in_flight].contains(&Some(id)) {
+        Err(crate::render_graph::GraphError::new(
+            "GRAPH_SWITCH_PENDING",
+            "compiled graph switch is pending",
+        ))
+    } else {
+        registry.drop_graph(id)
+    }
+}
+
 #[cfg(test)]
 mod switch_request_tests {
     fn valid_compile_graph(graph_id: &str, revision: u64) -> Vec<u8> {
@@ -932,6 +1011,55 @@ mod switch_request_tests {
         assert_eq!(selected(None, Some(UploadGraph::Immediate)), None);
         assert_eq!(selected(None, None), None);
         assert_eq!(selected(Some(query(Any)), None), Some(Any));
+    }
+
+    #[test]
+    fn frame_target_precedence_and_pending_resize_upload_are_exact() {
+        use crate::render_graph::RuntimePredicate::{RequiredFalse, RequiredTrue};
+        assert_eq!(
+            select_frame_target_source(true, true, true),
+            FrameTargetSource::PendingSwitch
+        );
+        assert_eq!(
+            select_frame_target_source(false, true, true),
+            FrameTargetSource::PendingResize
+        );
+        assert_eq!(
+            select_frame_target_source(false, false, true),
+            FrameTargetSource::Active
+        );
+        assert_eq!(
+            select_frame_target_source(false, false, false),
+            FrameTargetSource::Immediate
+        );
+        let pending_resize = query(RequiredFalse);
+        let active = query(RequiredTrue);
+        assert_eq!(
+            upload_query_for_render(Some(pending_resize), Some(active))
+                .unwrap()
+                .visible,
+            RequiredFalse
+        );
+    }
+
+    #[test]
+    fn acquisition_policy_covers_every_source_and_surface_error() {
+        use wgpu::SurfaceError::*;
+        use AcquisitionAction::*;
+        use FrameTargetSource::*;
+        for error in [Lost, Outdated, Timeout, Other] {
+            assert_eq!(acquisition_action(PendingSwitch, &error), RejectSwitch);
+            assert_eq!(acquisition_action(PendingResize, &error), DropResize);
+        }
+        for source in [Active, Immediate] {
+            assert_eq!(acquisition_action(source, &Lost), ReconfigureAndSkip);
+            assert_eq!(acquisition_action(source, &Outdated), ReconfigureAndSkip);
+            assert_eq!(acquisition_action(source, &Timeout), Skip);
+            assert_eq!(acquisition_action(source, &Other), Halt);
+        }
+        for source in [PendingSwitch, PendingResize, Active, Immediate] {
+            assert_eq!(acquisition_action(source, &OutOfMemory), Halt);
+        }
     }
 
     #[test]
@@ -998,6 +1126,24 @@ mod switch_request_tests {
 
         registry.drop_graph(id).unwrap();
         assert_eq!(registry.get(id).unwrap_err().code, "STALE_GRAPH_ID");
+    }
+
+    #[test]
+    fn pending_resize_keeps_registry_ownership_through_commit() {
+        let mut registry = crate::render_graph::Registry::default();
+        let (id, _) = registry.compile(&valid_compile_graph("resize", 1)).unwrap();
+
+        let error = drop_graph_request(&mut registry, id, None, None, Some(id), None)
+            .expect_err("a completed resize candidate still owns its registry entry");
+        assert_eq!(error.code, "GRAPH_SWITCH_PENDING");
+        assert!(registry.contains(id));
+
+        let active = Some(id);
+        assert_eq!(registry.get(active.unwrap()).unwrap().revision, 1);
+
+        let (other, _) = registry.compile(&valid_compile_graph("other", 1)).unwrap();
+        drop_graph_request(&mut registry, other, active, None, None, None).unwrap();
+        assert_eq!(registry.get(other).unwrap_err().code, "STALE_GRAPH_ID");
     }
 
     #[test]
@@ -1098,10 +1244,12 @@ fn render_data_error_code(error: &crate::render_data::RenderDataError) -> &'stat
 }
 
 pub struct RendererContext {
+    pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub surface_config: wgpu::SurfaceConfiguration,
     pub surface: wgpu::Surface<'static>,
+    initial_surface_config: wgpu::SurfaceConfiguration,
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
 }
@@ -1125,6 +1273,7 @@ pub struct Renderer<T: scene::Scene> {
     graph_registry: crate::render_graph::Registry,
     active_compiled: Option<ActiveCompiledGraph>,
     pending_switch: Option<PendingSwitch>,
+    pending_resize: Option<ActiveCompiledGraph>,
     in_flight: Option<InFlightPreparation>,
     next_preparation_token: u64,
     preparation_completions: Rc<RefCell<Vec<PreparationCompletion>>>,
@@ -1133,6 +1282,28 @@ pub struct Renderer<T: scene::Scene> {
 }
 
 impl<T: Scene + 'static> Renderer<T> {
+    fn surface_config(
+        contract: &crate::render_graph::RuntimeSurfaceContract,
+    ) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: contract.usage,
+            format: contract.format,
+            width: contract.width,
+            height: contract.height,
+            present_mode: contract.present_mode,
+            alpha_mode: contract.alpha_mode,
+            view_formats: contract.view_formats.clone(),
+            desired_maximum_frame_latency: contract.desired_maximum_frame_latency,
+        }
+    }
+
+    fn configure_surface(&mut self, config: wgpu::SurfaceConfiguration) {
+        self.context
+            .surface
+            .configure(&self.context.device, &config);
+        self.context.surface_config = config;
+    }
+
     fn reply(&mut self, request: u32, result: Result<JsValue, CommandError>) {
         let (ok, code, value, details) = match result {
             Ok(value) => (true, "OK", value, JsValue::UNDEFINED),
@@ -1187,23 +1358,20 @@ impl<T: Scene + 'static> Renderer<T> {
                     slot: words[2],
                     generation: words[3],
                 };
-                let outcome =
-                    if self.active_compiled.as_ref().is_some_and(|a| a.id() == id) {
-                        Err(crate::render_graph::GraphError::new(
-                            "GRAPH_ACTIVE",
-                            "compiled graph is active",
-                        ))
-                    } else if self.pending_switch.as_ref().is_some_and(
-                        |p| matches!(&p.target, SwitchTarget::Compiled(a) if a.id() == id),
-                    ) || self.in_flight.as_ref().is_some_and(|p| p.id == id)
-                    {
-                        Err(crate::render_graph::GraphError::new(
-                            "GRAPH_SWITCH_PENDING",
-                            "compiled graph switch is pending",
-                        ))
-                    } else {
-                        self.graph_registry.drop_graph(id)
-                    };
+                let outcome = drop_graph_request(
+                    &mut self.graph_registry,
+                    id,
+                    self.active_compiled.as_ref().map(ActiveCompiledGraph::id),
+                    self.pending_switch.as_ref().and_then(|pending| {
+                        if let SwitchTarget::Compiled(active) = &pending.target {
+                            Some(active.id())
+                        } else {
+                            None
+                        }
+                    }),
+                    self.pending_resize.as_ref().map(ActiveCompiledGraph::id),
+                    self.in_flight.as_ref().map(|preparation| preparation.id),
+                );
                 match outcome {
                     Ok(()) => self.reply(request, Ok(JsValue::UNDEFINED)),
                     Err(error) => self.reply(request, Err(error.into())),
@@ -1411,14 +1579,14 @@ impl<T: Scene + 'static> Renderer<T> {
             "gltf_standard",
             &layout,
             include_str!("../gltf.wgsl"),
-            context.surface_config.format,
+            context.initial_surface_config.format,
         );
         let double_sided = resources.get_or_create_pipeline(
             &context.device,
             "gltf_standard_double_sided",
             &layout,
             include_str!("../gltf.wgsl"),
-            context.surface_config.format,
+            context.initial_surface_config.format,
         );
         [culled, double_sided]
     }
@@ -1426,16 +1594,19 @@ impl<T: Scene + 'static> Renderer<T> {
     fn plan_compiled(
         &self,
         graph: &crate::render_graph::CompiledGraph,
+        width: u32,
+        height: u32,
     ) -> Result<crate::render_graph::RuntimePlan, crate::render_graph::GraphError> {
+        let capabilities = self.context.surface.get_capabilities(&self.context.adapter);
+        let surface = crate::render_graph::resolve_graph_surface_contract(
+            graph,
+            &capabilities,
+            width,
+            height,
+        )?;
         crate::render_graph::prepare_runtime_plan(
             graph,
-            crate::render_graph::RuntimeSurfaceContract {
-                format: self.context.surface_config.format,
-                width: self.context.surface_config.width,
-                height: self.context.surface_config.height,
-                usage: self.context.surface_config.usage,
-                view_formats: self.context.surface_config.view_formats.clone(),
-            },
+            surface,
             Some(&self.context.device.limits()),
         )
     }
@@ -1860,7 +2031,21 @@ impl<T: Scene + 'static> Renderer<T> {
         graph: crate::render_graph::CompiledGraph,
         purpose: PreparationPurpose,
     ) -> Result<(), crate::render_graph::GraphError> {
-        let runtime = self.plan_compiled(&graph)?;
+        let runtime = self.plan_compiled(
+            &graph,
+            self.context.surface_config.width,
+            self.context.surface_config.height,
+        )?;
+        self.begin_compiled_preparation_with_runtime(id, graph, runtime, purpose)
+    }
+
+    fn begin_compiled_preparation_with_runtime(
+        &mut self,
+        id: crate::render_graph::CompiledGraphId,
+        graph: crate::render_graph::CompiledGraph,
+        runtime: crate::render_graph::RuntimePlan,
+        purpose: PreparationPurpose,
+    ) -> Result<(), crate::render_graph::GraphError> {
         // Candidate construction allocates GPU resources, so the live scene preflight
         // belongs here: this is the earliest boundary with both the runtime query and
         // scene access, and precedes GPU work and all pending/in-flight mutation.
@@ -1932,7 +2117,7 @@ impl<T: Scene + 'static> Renderer<T> {
                     self.reply(request, Err(error.into()));
                 }
                 (PreparationPurpose::Resize, Ok(candidate)) => {
-                    self.active_compiled = Some(candidate);
+                    self.pending_resize = Some(candidate);
                 }
                 (PreparationPurpose::Resize, Err(error)) => {
                     log::error!(
@@ -2012,16 +2197,15 @@ impl<T: Scene + 'static> Renderer<T> {
         }));
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_caps.formats[0],
-            width: canvas.clone().width().max(1),
-            height: canvas.clone().height().max(1),
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
+        let initial_contract = crate::render_graph::resolve_surface_contract(
+            crate::render_graph::SurfaceFormatRequest::Preferred,
+            &surface_caps,
+            canvas.clone().width().max(1),
+            canvas.clone().height().max(1),
+            "initialSurfaceFormat",
+        )
+        .expect("surface must support the fixed presentation contract");
+        let surface_config = Self::surface_config(&initial_contract);
         info!(
             "suface size: {} x {}",
             surface_config.width, surface_config.height
@@ -2032,9 +2216,11 @@ impl<T: Scene + 'static> Renderer<T> {
 
         let mut resources = PipelineLibrary::new();
         let context = RendererContext {
+            adapter,
             surface,
             device,
             queue,
+            initial_surface_config: surface_config.clone(),
             surface_config,
             depth_texture,
             depth_view,
@@ -2066,6 +2252,7 @@ impl<T: Scene + 'static> Renderer<T> {
             graph_registry: Default::default(),
             active_compiled: None,
             pending_switch: None,
+            pending_resize: None,
             in_flight: None,
             next_preparation_token: 0,
             preparation_completions: Default::default(),
@@ -2128,20 +2315,38 @@ impl<T: Scene + 'static> Renderer<T> {
             SwitchTarget::Immediate => UploadGraph::Immediate,
             SwitchTarget::Compiled(graph) => classify_upload_graph(graph),
         });
-        let query = upload_query_for_render(
-            pending,
-            self.active_compiled.as_ref().map(classify_upload_graph),
+        let target_source = select_frame_target_source(
+            self.pending_switch.is_some(),
+            self.pending_resize.is_some(),
+            self.active_compiled.is_some(),
         );
+        let selected = match target_source {
+            FrameTargetSource::PendingSwitch => pending,
+            FrameTargetSource::PendingResize => {
+                self.pending_resize.as_ref().map(classify_upload_graph)
+            }
+            FrameTargetSource::Active => self.active_compiled.as_ref().map(classify_upload_graph),
+            FrameTargetSource::Immediate => Some(UploadGraph::Immediate),
+        };
+        let query = upload_query_for_render(selected, None);
         // Resolve again immediately before every active frame. Do this before scene
         // upload so an invalid camera cannot mutate GPU state or produce a frame.
         let planes = match update_validate_write_scene(&mut self.scene, &self.context.queue, query)
         {
             Ok(planes) => planes,
             Err(error) => {
-                if let Some(pending) = self.pending_switch.take() {
-                    self.reply(pending.request, Err(error.into()));
-                } else {
-                    self.post_fatal("GRAPH_EXECUTION_FAILED", &error.message);
+                match target_source {
+                    FrameTargetSource::PendingSwitch => {
+                        let pending = self.pending_switch.take().unwrap();
+                        self.reply(pending.request, Err(error.into()));
+                    }
+                    FrameTargetSource::PendingResize => {
+                        self.pending_resize = None;
+                        log::error!("compiled graph resize preflight failed: {}", error.message);
+                    }
+                    FrameTargetSource::Active | FrameTargetSource::Immediate => {
+                        self.post_fatal("GRAPH_EXECUTION_FAILED", &error.message);
+                    }
                 }
                 return;
             }
@@ -2167,10 +2372,68 @@ impl<T: Scene + 'static> Renderer<T> {
                 .write_culling_params(&self.context.queue, planes, query);
         }
 
+        // Candidate publication is transactional: configure its complete contract at
+        // the last possible point before acquisition, but retain the known-good
+        // configuration and active graph identity until presentation succeeds.
+        let candidate_config = match target_source {
+            FrameTargetSource::PendingSwitch => match &self.pending_switch.as_ref().unwrap().target
+            {
+                SwitchTarget::Compiled(active) => Self::surface_config(&active.runtime.surface),
+                SwitchTarget::Immediate => {
+                    let mut config = self.context.initial_surface_config.clone();
+                    config.width = self.context.surface_config.width;
+                    config.height = self.context.surface_config.height;
+                    config
+                }
+            },
+            FrameTargetSource::PendingResize => {
+                Self::surface_config(&self.pending_resize.as_ref().unwrap().runtime.surface)
+            }
+            FrameTargetSource::Active | FrameTargetSource::Immediate => {
+                self.context.surface_config.clone()
+            }
+        };
+        let restore_config = (candidate_config != self.context.surface_config)
+            .then(|| self.context.surface_config.clone());
+        if restore_config.is_some() {
+            self.configure_surface(candidate_config);
+        }
         let surface_texture = match self.context.surface.get_current_texture() {
             Ok(value) => value,
             Err(error) => {
-                self.post_fatal("SURFACE_FRAME_FAILED", &error.to_string());
+                match acquisition_action(target_source, &error) {
+                    AcquisitionAction::RejectSwitch => {
+                        if let Some(config) = restore_config {
+                            self.configure_surface(config);
+                        }
+                        let pending = self.pending_switch.take().unwrap();
+                        self.reply(
+                            pending.request,
+                            Err(crate::render_graph::GraphError::new(
+                                "GRAPH_SURFACE_RECONFIGURE_FAILED",
+                                error.to_string(),
+                            )
+                            .into()),
+                        );
+                    }
+                    AcquisitionAction::DropResize => {
+                        if let Some(config) = restore_config {
+                            self.configure_surface(config);
+                        }
+                        self.pending_resize = None;
+                        log::error!("compiled graph resize acquisition failed: {error}");
+                    }
+                    AcquisitionAction::ReconfigureAndSkip => {
+                        self.context
+                            .surface
+                            .configure(&self.context.device, &self.context.surface_config);
+                    }
+                    AcquisitionAction::Skip => log::warn!("surface acquisition timed out"),
+                    AcquisitionAction::Halt => {
+                        self.halted = true;
+                        self.post_fatal("SURFACE_FRAME_FAILED", &error.to_string());
+                    }
+                }
                 return;
             }
         };
@@ -2182,10 +2445,15 @@ impl<T: Scene + 'static> Renderer<T> {
                     label: Some("Render command encoder"),
                 });
 
-        let rendering_compiled = match self.pending_switch.as_ref().map(|p| &p.target) {
-            Some(SwitchTarget::Compiled(active)) => Some(active),
-            Some(SwitchTarget::Immediate) => None,
-            None => self.active_compiled.as_ref(),
+        let rendering_compiled = match target_source {
+            FrameTargetSource::PendingSwitch => match &self.pending_switch.as_ref().unwrap().target
+            {
+                SwitchTarget::Compiled(active) => Some(active),
+                SwitchTarget::Immediate => None,
+            },
+            FrameTargetSource::PendingResize => self.pending_resize.as_ref(),
+            FrameTargetSource::Active => self.active_compiled.as_ref(),
+            FrameTargetSource::Immediate => None,
         };
         let mut profile_frame = self.profiler.begin(|| match rendering_compiled {
             None => "immediate".to_owned(),
@@ -2222,7 +2490,15 @@ impl<T: Scene + 'static> Renderer<T> {
             if let Some(frame) = profile_frame.take() {
                 self.profiler.cancel(frame);
             }
+            // A surface must have no acquired texture (or objects retaining its view)
+            // when configure is called to roll back a transactional candidate.
+            drop(encoder);
+            drop(texture_view);
+            drop(surface_texture);
             if let Some(pending) = self.pending_switch.take() {
+                if let Some(config) = restore_config {
+                    self.configure_surface(config);
+                }
                 self.reply(
                     pending.request,
                     Err(
@@ -2230,6 +2506,10 @@ impl<T: Scene + 'static> Renderer<T> {
                             .into(),
                     ),
                 );
+            } else if self.pending_resize.take().is_some() {
+                if let Some(config) = restore_config {
+                    self.configure_surface(config);
+                }
             }
             return;
         }
@@ -2240,6 +2520,10 @@ impl<T: Scene + 'static> Renderer<T> {
         }
         surface_texture.present();
         if let Some(pending) = self.pending_switch.take() {
+            // A successful user switch supersedes any resize recreation of the
+            // previously active graph. Retain that resize candidate only as a
+            // fallback while the switch is being prepared or attempted.
+            self.pending_resize = None;
             let result = match pending.target {
                 SwitchTarget::Immediate => {
                     self.active_compiled = None;
@@ -2258,6 +2542,8 @@ impl<T: Scene + 'static> Renderer<T> {
                 }
             };
             self.reply(pending.request, Ok(result));
+        } else if let Some(candidate) = self.pending_resize.take() {
+            self.active_compiled = Some(candidate);
         }
         let global = js_sys::global().unchecked_into::<DedicatedWorkerGlobalScope>();
         for reply in self.pending_replies.drain(..) {
@@ -2288,6 +2574,16 @@ impl<T: Scene + 'static> Renderer<T> {
             ("indices", index_count.into()),
             ("width", self.context.surface_config.width.into()),
             ("height", self.context.surface_config.height.into()),
+            (
+                "surfaceFormat",
+                match self.context.surface_config.format {
+                    wgpu::TextureFormat::Rgba8Unorm => "rgba8_unorm",
+                    wgpu::TextureFormat::Bgra8Unorm => "bgra8_unorm",
+                    wgpu::TextureFormat::Rgba16Float => "rgba16_float",
+                    _ => "unknown",
+                }
+                .into(),
+            ),
             ("framingRadius", self.framing_radius.into()),
             (
                 "renderMode",
@@ -2540,14 +2836,6 @@ impl<T: Scene + 'static> Renderer<T> {
         if new_width != self.context.surface_config.width
             || new_height != self.context.surface_config.height
         {
-            self.context.surface_config.width = new_width;
-            self.context.surface_config.height = new_height;
-            self.context
-                .surface
-                .configure(&self.context.device, &self.context.surface_config);
-            self.recreate_depth_texture();
-            // The executable subset uses surface-relative transients exclusively.
-            // Dropping old buckets prevents stale-size reuse and bounds resize growth.
             if let Some(pending) = self.pending_switch.take() {
                 self.reply(
                     pending.request,
@@ -2575,38 +2863,80 @@ impl<T: Scene + 'static> Renderer<T> {
                         }
                         PreparationPurpose::Resize => Some((preparation.id, preparation.graph)),
                     });
-            let mut restarted = false;
-            if let Some(old) = self.active_compiled.take() {
-                let id = old.id();
-                // Keep immediate resources live and fall back for this frame if recreation fails.
-                restarted = true;
-                self.begin_compiled_preparation(id, old.graph, PreparationPurpose::Resize)
-                    .unwrap_or_else(|error| {
-                        log::error!(
-                            "compiled graph resize preparation failed: {}",
-                            error.message
-                        )
-                    });
-            }
-            if !restarted {
-                if let Some((id, graph)) = interrupted_resize {
-                    if let Err(error) =
-                        self.begin_compiled_preparation(id, graph, PreparationPurpose::Resize)
-                    {
-                        log::error!(
-                            "compiled graph resize preparation failed: {}",
-                            error.message
-                        );
-                    }
-                }
-            }
+            let restore = self
+                .active_compiled
+                .take()
+                .map(|active| (active.id(), active.graph))
+                .or_else(|| {
+                    self.pending_resize
+                        .take()
+                        .map(|active| (active.id(), active.graph))
+                })
+                .or(interrupted_resize);
 
+            self.context.initial_surface_config.width = new_width;
+            self.context.initial_surface_config.height = new_height;
+            let initial_request = match self.context.initial_surface_config.format {
+                wgpu::TextureFormat::Rgba8Unorm => {
+                    crate::render_graph::SurfaceFormatRequest::Rgba8Unorm
+                }
+                wgpu::TextureFormat::Bgra8Unorm => {
+                    crate::render_graph::SurfaceFormatRequest::Bgra8Unorm
+                }
+                wgpu::TextureFormat::Rgba16Float => {
+                    crate::render_graph::SurfaceFormatRequest::Rgba16Float
+                }
+                _ => {
+                    self.halted = true;
+                    self.post_fatal(
+                        "SURFACE_FRAME_FAILED",
+                        "immediate surface format is unsupported",
+                    );
+                    return;
+                }
+            };
+            let capabilities = self.context.surface.get_capabilities(&self.context.adapter);
+            if let Err(error) = crate::render_graph::resolve_surface_contract(
+                initial_request,
+                &capabilities,
+                new_width,
+                new_height,
+                "surface",
+            ) {
+                self.halted = true;
+                self.post_fatal("SURFACE_FRAME_FAILED", &error.message);
+                return;
+            }
+            // Resize always establishes the exact immediate fallback first. Compiled
+            // configuration is transactional and is applied only by the commit frame.
+            self.configure_surface(self.context.initial_surface_config.clone());
+            self.recreate_depth_texture();
             self.scene.resize(
                 new_width as f64,
                 new_height as f64,
                 msg.scale_factor,
                 &self.context.queue,
             );
+            if let Some((id, graph)) = restore {
+                match self.plan_compiled(&graph, new_width, new_height) {
+                    Ok(runtime) => {
+                        if let Err(error) = self.begin_compiled_preparation_with_runtime(
+                            id,
+                            graph,
+                            runtime,
+                            PreparationPurpose::Resize,
+                        ) {
+                            log::error!(
+                                "compiled graph resize preparation failed: {}",
+                                error.message
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::error!("compiled graph resize planning failed: {}", error.message)
+                    }
+                }
+            }
 
             info!(
                 "Resized: ({}, {}), scale: {}",

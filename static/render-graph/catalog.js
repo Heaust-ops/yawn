@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 6;
+export const CATALOG_VERSION = 7;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, required = true, authoringType) => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -188,11 +188,11 @@ export const semanticCatalog = Object.freeze({
     parameters: { strength: 2 },
   },
   frame_out: {
-    version: 2,
+    version: 3,
     execution: "frame",
     inputs: { color: i("texture") },
     outputs: {},
-    parameters: { hdrEnabled: true, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1] },
+    parameters: { surfaceFormat: "preferred", hdrEnabled: true, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1] },
   },
 });
 const socketColors = [
@@ -389,6 +389,7 @@ const parameterSchemas = {
   bloom_composite: { intensity: number(1, 0, 16) },
   luminance_edge: { strength: number(2, 0, 16) },
   frame_out: {
+    surfaceFormat: enumeration("preferred", ["preferred", "rgba8_unorm", "bgra8_unorm", "rgba16_float"]),
     hdrEnabled: boolean(true),
     toneMapper: enumeration("aces", ["aces", "reinhard", "none"]),
     exposureStops: number(0, -10, 10),
@@ -469,6 +470,8 @@ nodeDefinitions.color_balance.ui = [
   { kind: "socket", socket: "source" }, { kind: "socket", socket: "colorTarget" }, { kind: "socket", socket: "color" },
 ];
 nodeDefinitions.frame_out.ui = [
+  { kind: "text", variant: "section", title: "Canvas Presentation" },
+  { kind: "parameter", parameter: "surfaceFormat", title: "Surface Format" },
   { kind: "text", variant: "section", title: "Display Transform" },
   { kind: "parameter", parameter: "hdrEnabled", title: "HDR" },
   { kind: "parameter", parameter: "toneMapper", title: "Tone Mapper", visibleWhen: { parameter: "hdrEnabled", equals: true } },

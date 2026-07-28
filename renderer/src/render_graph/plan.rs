@@ -256,12 +256,22 @@ pub enum NormalizedParameters {
         strength: f32,
     },
     FrameOut {
+        surface_format: SurfaceFormatRequest,
         dynamic_range: FrameDynamicRange,
         output_transfer: OutputTransfer,
         scale_mode: ScaleMode,
         filter: FrameFilter,
         background_color: [f32; 4],
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceFormatRequest {
+    Preferred,
+    Rgba8Unorm,
+    Bgra8Unorm,
+    Rgba16Float,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]

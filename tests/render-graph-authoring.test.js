@@ -96,7 +96,7 @@ function fixture() {
 test("catalog exhaustively mirrors all current contracts", () => {
   for (const [key, semantic] of Object.entries(semanticCatalog)) {
     assert.ok(Object.hasOwn(semantic, "version"));
-    assert.equal(semantic.version, key === "frame_out" ? 2 : 1);
+    assert.equal(semantic.version, key === "frame_out" ? 3 : 1);
     assert.equal(nodeDefinitions[key].version, semantic.version);
     assert.equal(descriptors[key].version, semantic.version);
   }
@@ -133,7 +133,7 @@ test("catalog exhaustively mirrors all current contracts", () => {
       Object.keys(contract.parameters).sort(),
       key,
     );
-  assert.equal(CATALOG_VERSION, 6);
+  assert.equal(CATALOG_VERSION, 7);
   assert.deepEqual(nodeDefinitions.pipeline.parameters, {
     pipeline: {
       type: "string",
@@ -346,14 +346,15 @@ test("adapter rejects hostile shape, IDs, duplicates, catalog, sockets and type 
     link.fromSocketId = "mesh:mesh";
   }, "AUTHORING_LINK_TYPE");
 });
-test("Frame Out has the exact v2 schema, defaults, UI, and strict authoring validation", () => {
-  const fields = ["hdrEnabled", "toneMapper", "exposureStops", "outputTransfer", "scaleMode", "filter", "backgroundColor"];
-  assert.equal(CATALOG_VERSION, 6);
+test("Frame Out has the exact v3 schema, defaults, UI, and strict authoring validation", () => {
+  const fields = ["surfaceFormat", "hdrEnabled", "toneMapper", "exposureStops", "outputTransfer", "scaleMode", "filter", "backgroundColor"];
+  assert.equal(CATALOG_VERSION, 7);
   assert.deepEqual(semanticCatalog.frame_out, {
-    version: 2, execution: "frame", inputs: { color: semanticCatalog.frame_out.inputs.color }, outputs: {},
-    parameters: { hdrEnabled: true, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1] },
+    version: 3, execution: "frame", inputs: { color: semanticCatalog.frame_out.inputs.color }, outputs: {},
+    parameters: { surfaceFormat: "preferred", hdrEnabled: true, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1] },
   });
   assert.deepEqual(nodeDefinitions.frame_out.parameters, {
+    surfaceFormat: { type: "string", default: { kind: "string", value: "preferred" }, enum: ["preferred", "rgba8_unorm", "bgra8_unorm", "rgba16_float"] },
     hdrEnabled: { type: "boolean", default: { kind: "boolean", value: true } },
     toneMapper: { type: "string", default: { kind: "string", value: "aces" }, enum: ["aces", "reinhard", "none"] },
     exposureStops: { type: "number", default: { kind: "number", value: 0 }, minimum: -10, maximum: 10 },
@@ -363,6 +364,8 @@ test("Frame Out has the exact v2 schema, defaults, UI, and strict authoring vali
     backgroundColor: { type: "color", default: { kind: "color", value: [0, 0, 0, 1] }, minimum: 0, maximum: 1 },
   });
   assert.deepEqual(nodeDefinitions.frame_out.ui, [
+    { kind: "text", variant: "section", title: "Canvas Presentation" },
+    { kind: "parameter", parameter: "surfaceFormat", title: "Surface Format" },
     { kind: "text", variant: "section", title: "Display Transform" },
     { kind: "parameter", parameter: "hdrEnabled", title: "HDR" },
     { kind: "parameter", parameter: "toneMapper", title: "Tone Mapper", visibleWhen: { parameter: "hdrEnabled", equals: true } },
@@ -379,11 +382,11 @@ test("Frame Out has the exact v2 schema, defaults, UI, and strict authoring vali
     assert.throws(() => adaptFxNodeSnapshot(x), (e) => e instanceof AuthoringGraphError && e.code === code && (!parameter || e.details.nodeId === n.id && e.details.parameter === parameter));
   };
   reject((x) => x.catalogVersion = 5, "AUTHORING_CATALOG");
-  reject((x, n) => n.typeVersion = 1, "AUTHORING_NODE_INVALID");
+  reject((x, n) => n.typeVersion = 2, "AUTHORING_NODE_INVALID");
   for (const field of fields) reject((x, n) => delete n.parameters[field], "AUTHORING_PARAMETER_SET");
   reject((x, n) => n.parameters.extra = { kind: "number", value: 0 }, "AUTHORING_PARAMETER_SET");
   for (const [field, value] of [
-    ["hdrEnabled", 1], ["toneMapper", "bad"], ["outputTransfer", "bad"], ["scaleMode", "bad"], ["filter", "bad"],
+    ["surfaceFormat", "bad"], ["hdrEnabled", 1], ["toneMapper", "bad"], ["outputTransfer", "bad"], ["scaleMode", "bad"], ["filter", "bad"],
     ["exposureStops", NaN], ["exposureStops", -10.01], ["exposureStops", 10.01],
     ["backgroundColor", [0, 0, 0]], ["backgroundColor", [0, 0, Infinity, 1]], ["backgroundColor", [-0.01, 0, 0, 1]], ["backgroundColor", [0, 0, 0, 1.01]],
   ]) reject((x, n) => n.parameters[field].value = value, "AUTHORING_PARAMETER", field);

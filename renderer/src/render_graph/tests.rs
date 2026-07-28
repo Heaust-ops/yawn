@@ -8,9 +8,9 @@ fn input(node: &str, socket: &str) -> Value {
 }
 fn node(id: &str, key: &str, mut parameters: Value, inputs: Value) -> Value {
     if key == "frame_out" && parameters.as_object().is_some_and(|p| p.is_empty()) {
-        parameters = json!({"hdrEnabled":false,"toneMapper":"aces","exposureStops":0,"outputTransfer":"srgb","scaleMode":"stretch","filter":"linear","backgroundColor":[0,0,0,1]});
+        parameters = json!({"surfaceFormat":"preferred","hdrEnabled":false,"toneMapper":"aces","exposureStops":0,"outputTransfer":"srgb","scaleMode":"stretch","filter":"linear","backgroundColor":[0,0,0,1]});
     }
-    json!({"id":id,"state":"enabled","executor":{"key":key,"version":if key == "frame_out" { 2 } else { 1 }},"parameters":parameters,"inputs":inputs})
+    json!({"id":id,"state":"enabled","executor":{"key":key,"version":if key == "frame_out" { 3 } else { 1 }},"parameters":parameters,"inputs":inputs})
 }
 fn texture(format: &str, residency: &str) -> Value {
     json!({"texture":{"dimension":"d2","format":format,"extent":{"kind":"surface_relative","width":{"numerator":1,"denominator":1},"height":{"numerator":1,"denominator":1},"depthOrArrayLayers":1},"mipLevelCount":1,"sampleCount":1,"viewFormats":[]},"residency":residency})
@@ -850,7 +850,7 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("bloom_blur", 1),
             ("bloom_composite", 1),
             ("luminance_edge", 1),
-            ("frame_out", 2),
+            ("frame_out", 3),
         ]
     );
     assert_eq!(
@@ -2971,14 +2971,15 @@ fn runtime_rejects_coordinated_executor_frustum_and_fullscreen_mutations() {
 }
 
 fn frame_parameters(hdr: bool) -> Value {
-    json!({"hdrEnabled":hdr,"toneMapper":"reinhard","exposureStops":2,
+    json!({"surfaceFormat":"preferred","hdrEnabled":hdr,"toneMapper":"reinhard","exposureStops":2,
         "outputTransfer":"srgb","scaleMode":"contain","filter":"nearest",
         "backgroundColor":[0.1,0.2,0.3,0.4]})
 }
 
 #[test]
-fn frame_out_v2_has_exact_seven_fields_normalizes_sdr_and_rejects_v1() {
+fn frame_out_v3_has_exact_eight_fields_normalizes_sdr_and_rejects_v2() {
     let fields = [
+        "surfaceFormat",
         "hdrEnabled",
         "toneMapper",
         "exposureStops",
@@ -3033,7 +3034,7 @@ fn frame_out_v2_has_exact_seven_fields_normalizes_sdr_and_rejects_v1() {
     ));
     let mut g = full_cull_graph();
     let i = node_index(&g, "frame_out");
-    g["nodes"][i]["executor"]["version"] = json!(1);
+    g["nodes"][i]["executor"]["version"] = json!(2);
     assert_eq!(compile_error(g).code, "GRAPH_EXECUTOR_VERSION_UNSUPPORTED");
 }
 
@@ -3044,7 +3045,10 @@ fn frame_out_source_format_matrix_is_exact() {
         width: 1280,
         height: 720,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
         view_formats: vec![],
+        desired_maximum_frame_latency: 2,
     };
     for (format, sdr, hdr) in [
         ("rgba8_unorm", true, false),
@@ -3093,6 +3097,174 @@ fn frame_out_source_format_matrix_is_exact() {
 }
 
 #[test]
+fn surface_contract_resolution_is_capability_driven_and_policy_is_fixed() {
+    let capabilities = wgpu::SurfaceCapabilities {
+        formats: vec![
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ],
+        present_modes: vec![wgpu::PresentMode::Immediate, wgpu::PresentMode::Fifo],
+        alpha_modes: vec![
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::Opaque,
+        ],
+        usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+    };
+    let preferred = resolve_surface_contract(
+        SurfaceFormatRequest::Preferred,
+        &capabilities,
+        640,
+        480,
+        "format",
+    )
+    .unwrap();
+    assert_eq!(preferred.format, wgpu::TextureFormat::Rgba16Float);
+    assert_eq!(preferred.present_mode, wgpu::PresentMode::Fifo);
+    assert_eq!(preferred.alpha_mode, wgpu::CompositeAlphaMode::Opaque);
+    assert_eq!(preferred.desired_maximum_frame_latency, 2);
+    assert_eq!((preferred.width, preferred.height), (640, 480));
+    assert!(resolve_surface_contract(
+        SurfaceFormatRequest::Bgra8Unorm,
+        &capabilities,
+        1,
+        1,
+        "format"
+    )
+    .is_ok());
+    for (width, height) in [(0, 1), (1, 0)] {
+        assert_eq!(
+            resolve_surface_contract(
+                SurfaceFormatRequest::Preferred,
+                &capabilities,
+                width,
+                height,
+                "format",
+            )
+            .unwrap_err()
+            .details["path"],
+            "surface"
+        );
+    }
+    let no_attachment = wgpu::SurfaceCapabilities {
+        formats: capabilities.formats.clone(),
+        present_modes: capabilities.present_modes.clone(),
+        alpha_modes: capabilities.alpha_modes.clone(),
+        usages: wgpu::TextureUsages::COPY_DST,
+    };
+    assert_eq!(
+        resolve_surface_contract(
+            SurfaceFormatRequest::Preferred,
+            &no_attachment,
+            1,
+            1,
+            "format",
+        )
+        .unwrap_err()
+        .details["path"],
+        "surface.usage"
+    );
+    for request in [
+        SurfaceFormatRequest::Rgba8Unorm,
+        SurfaceFormatRequest::Preferred,
+    ] {
+        let caps = wgpu::SurfaceCapabilities {
+            formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+            present_modes: capabilities.present_modes.clone(),
+            alpha_modes: capabilities.alpha_modes.clone(),
+            usages: capabilities.usages,
+        };
+        assert_eq!(
+            resolve_surface_contract(request, &caps, 1, 1, "format")
+                .unwrap_err()
+                .code,
+            "GRAPH_SURFACE_INCOMPATIBLE"
+        );
+    }
+    for caps in [
+        wgpu::SurfaceCapabilities {
+            formats: capabilities.formats.clone(),
+            present_modes: vec![wgpu::PresentMode::Immediate],
+            alpha_modes: capabilities.alpha_modes.clone(),
+            usages: capabilities.usages,
+        },
+        wgpu::SurfaceCapabilities {
+            formats: capabilities.formats.clone(),
+            present_modes: capabilities.present_modes.clone(),
+            alpha_modes: vec![wgpu::CompositeAlphaMode::PreMultiplied],
+            usages: capabilities.usages,
+        },
+    ] {
+        assert_eq!(
+            resolve_surface_contract(SurfaceFormatRequest::Preferred, &caps, 1, 1, "format")
+                .unwrap_err()
+                .code,
+            "GRAPH_SURFACE_INCOMPATIBLE"
+        );
+    }
+    for (present_modes, alpha_modes, message) in [
+        (
+            vec![wgpu::PresentMode::Immediate],
+            vec![wgpu::CompositeAlphaMode::Opaque],
+            "fixed surface present mode is unsupported",
+        ),
+        (
+            vec![wgpu::PresentMode::Fifo],
+            vec![wgpu::CompositeAlphaMode::PreMultiplied],
+            "fixed surface alpha mode is unsupported",
+        ),
+    ] {
+        let caps = wgpu::SurfaceCapabilities {
+            formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+            present_modes,
+            alpha_modes,
+            usages: capabilities.usages,
+        };
+        let error = resolve_surface_contract(
+            SurfaceFormatRequest::Rgba8Unorm,
+            &caps,
+            1,
+            1,
+            "nodes[7].parameters.surfaceFormat",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "GRAPH_SURFACE_INCOMPATIBLE");
+        assert_eq!(error.details["path"], "surface");
+        assert_eq!(error.message, message);
+    }
+}
+
+#[test]
+fn graph_surface_resolution_uses_canonical_authored_path_and_all_requests_activate() {
+    for (request, format) in [
+        ("preferred", wgpu::TextureFormat::Bgra8Unorm),
+        ("rgba8_unorm", wgpu::TextureFormat::Rgba8Unorm),
+        ("bgra8_unorm", wgpu::TextureFormat::Bgra8Unorm),
+        ("rgba16_float", wgpu::TextureFormat::Rgba16Float),
+    ] {
+        let mut authored = full_cull_graph();
+        let index = node_index(&authored, "frame_out");
+        authored["nodes"][index]["parameters"]["surfaceFormat"] = json!(request);
+        let graph = compile_graph(authored);
+        validate_activatable(&graph).unwrap();
+        let caps = wgpu::SurfaceCapabilities {
+            formats: vec![format],
+            present_modes: vec![wgpu::PresentMode::Fifo],
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        };
+        resolve_graph_surface_contract(&graph, &caps, 1, 1).unwrap();
+        let mut unsupported = caps;
+        unsupported.formats.clear();
+        let error = resolve_graph_surface_contract(&graph, &unsupported, 1, 1).unwrap_err();
+        assert_eq!(
+            error.details["path"],
+            format!("nodes[{index}].parameters.surfaceFormat")
+        );
+    }
+}
+
+#[test]
 fn runtime_rejects_every_frame_parameter_lane_and_coordinated_source_mutations() {
     let baseline = compile_graph(full_cull_graph());
     let i = baseline
@@ -3100,7 +3272,7 @@ fn runtime_rejects_every_frame_parameter_lane_and_coordinated_source_mutations()
         .iter()
         .position(|e| e.executor.key == "frame_out")
         .unwrap();
-    for version in [1, 3] {
+    for version in [1, 2, 4] {
         let mut g = baseline.clone();
         g.executions[i].executor.version = version;
         assert_runtime_path(&g, format!("executions[{i}].executor.version"));
@@ -3187,7 +3359,10 @@ fn runtime_rejects_every_frame_parameter_lane_and_coordinated_source_mutations()
         width: 1280,
         height: 720,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
         view_formats: vec![],
+        desired_maximum_frame_latency: 2,
     };
     prepare_runtime_plan(&hdr_to_sdr, linear_surface.clone(), None).unwrap();
     let error = prepare_runtime_plan(

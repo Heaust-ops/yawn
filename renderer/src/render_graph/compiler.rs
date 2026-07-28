@@ -40,6 +40,7 @@ struct PipelineParameters {
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct FrameOutParameters {
+    surface_format: SurfaceFormatRequest,
     hdr_enabled: bool,
     tone_mapper: ToneMapper,
     exposure_stops: f32,
@@ -544,6 +545,7 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 &format!("{base}.backgroundColor"),
             )?;
             NormalizedParameters::FrameOut {
+                surface_format: p.surface_format,
                 dynamic_range: if p.hdr_enabled {
                     FrameDynamicRange::Hdr {
                         tone_mapper: p.tone_mapper,

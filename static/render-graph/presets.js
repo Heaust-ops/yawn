@@ -12,7 +12,7 @@ const texture = (format, scale = 1, heightScale = scale) => ({
   },
   residency: "transient",
 });
-const frameOut = (hdr, options = {}) => ({ hdrEnabled: hdr, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1], ...options });
+const frameOut = (hdr, options = {}) => ({ surfaceFormat: "preferred", hdrEnabled: hdr, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1], ...options });
 const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1) => [
   node("hdr", "texture", texture("rgba16_float", 1, heightScale)),
   node("depth", "texture", texture("depth32_float", 1, heightScale)),
