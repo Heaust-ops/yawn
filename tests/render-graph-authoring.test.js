@@ -24,7 +24,7 @@ function fixture() {
     return {
       id: n.id,
       typeId: n.executor.key,
-      typeVersion: 1,
+      typeVersion: d.version,
       known: true,
       muted: n.state !== "enabled",
       position: { x: 10, y: 20 },
@@ -96,7 +96,7 @@ function fixture() {
 test("catalog exhaustively mirrors all current contracts", () => {
   for (const [key, semantic] of Object.entries(semanticCatalog)) {
     assert.ok(Object.hasOwn(semantic, "version"));
-    assert.equal(semantic.version, 1);
+    assert.equal(semantic.version, key === "frame_out" ? 2 : 1);
     assert.equal(nodeDefinitions[key].version, semantic.version);
     assert.equal(descriptors[key].version, semantic.version);
   }
@@ -110,7 +110,6 @@ test("catalog exhaustively mirrors all current contracts", () => {
       "pipeline_registry",
       "pipeline",
       "fullscreen_copy",
-      "tone_map",
       "color_balance",
       "exposure_contrast",
       "saturation",
@@ -134,7 +133,7 @@ test("catalog exhaustively mirrors all current contracts", () => {
       Object.keys(contract.parameters).sort(),
       key,
     );
-  assert.equal(CATALOG_VERSION, 5);
+  assert.equal(CATALOG_VERSION, 6);
   assert.deepEqual(nodeDefinitions.pipeline.parameters, {
     pipeline: {
       type: "string",
@@ -238,6 +237,7 @@ test("adapter validates and exactly lowers canonical pipeline controls and blur 
       visible: socket.visible,
     }),
   );
+  blur.typeVersion = descriptors.bloom_blur.version;
   x.nodes.push(blur);
   assert.deepEqual(
     adaptFxNodeSnapshot(x).nodes.find((node) => node.id === "blur").parameters
@@ -345,6 +345,51 @@ test("adapter rejects hostile shape, IDs, duplicates, catalog, sockets and type 
     link.fromNodeId = "mesh";
     link.fromSocketId = "mesh:mesh";
   }, "AUTHORING_LINK_TYPE");
+});
+test("Frame Out has the exact v2 schema, defaults, UI, and strict authoring validation", () => {
+  const fields = ["hdrEnabled", "toneMapper", "exposureStops", "outputTransfer", "scaleMode", "filter", "backgroundColor"];
+  assert.equal(CATALOG_VERSION, 6);
+  assert.deepEqual(semanticCatalog.frame_out, {
+    version: 2, execution: "frame", inputs: { color: semanticCatalog.frame_out.inputs.color }, outputs: {},
+    parameters: { hdrEnabled: true, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1] },
+  });
+  assert.deepEqual(nodeDefinitions.frame_out.parameters, {
+    hdrEnabled: { type: "boolean", default: { kind: "boolean", value: true } },
+    toneMapper: { type: "string", default: { kind: "string", value: "aces" }, enum: ["aces", "reinhard", "none"] },
+    exposureStops: { type: "number", default: { kind: "number", value: 0 }, minimum: -10, maximum: 10 },
+    outputTransfer: { type: "string", default: { kind: "string", value: "srgb" }, enum: ["srgb", "linear"] },
+    scaleMode: { type: "string", default: { kind: "string", value: "stretch" }, enum: ["stretch", "contain", "cover"] },
+    filter: { type: "string", default: { kind: "string", value: "linear" }, enum: ["linear", "nearest"] },
+    backgroundColor: { type: "color", default: { kind: "color", value: [0, 0, 0, 1] }, minimum: 0, maximum: 1 },
+  });
+  assert.deepEqual(nodeDefinitions.frame_out.ui, [
+    { kind: "text", variant: "section", title: "Display Transform" },
+    { kind: "parameter", parameter: "hdrEnabled", title: "HDR" },
+    { kind: "parameter", parameter: "toneMapper", title: "Tone Mapper", visibleWhen: { parameter: "hdrEnabled", equals: true } },
+    { kind: "parameter", parameter: "exposureStops", title: "Exposure", visibleWhen: { parameter: "hdrEnabled", equals: true } },
+    { kind: "parameter", parameter: "outputTransfer", title: "Transfer" },
+    { kind: "parameter", parameter: "scaleMode", title: "Scale" },
+    { kind: "parameter", parameter: "filter" },
+    { kind: "parameter", parameter: "backgroundColor", title: "Background", visibleWhen: { parameter: "scaleMode", equals: "contain" } },
+    { kind: "socket", socket: "color" },
+  ]);
+  const reject = (mutate, code, parameter) => {
+    const x = fixture(), n = x.nodes.find((node) => node.typeId === "frame_out");
+    mutate(x, n);
+    assert.throws(() => adaptFxNodeSnapshot(x), (e) => e instanceof AuthoringGraphError && e.code === code && (!parameter || e.details.nodeId === n.id && e.details.parameter === parameter));
+  };
+  reject((x) => x.catalogVersion = 5, "AUTHORING_CATALOG");
+  reject((x, n) => n.typeVersion = 1, "AUTHORING_NODE_INVALID");
+  for (const field of fields) reject((x, n) => delete n.parameters[field], "AUTHORING_PARAMETER_SET");
+  reject((x, n) => n.parameters.extra = { kind: "number", value: 0 }, "AUTHORING_PARAMETER_SET");
+  for (const [field, value] of [
+    ["hdrEnabled", 1], ["toneMapper", "bad"], ["outputTransfer", "bad"], ["scaleMode", "bad"], ["filter", "bad"],
+    ["exposureStops", NaN], ["exposureStops", -10.01], ["exposureStops", 10.01],
+    ["backgroundColor", [0, 0, 0]], ["backgroundColor", [0, 0, Infinity, 1]], ["backgroundColor", [-0.01, 0, 0, 1]], ["backgroundColor", [0, 0, 0, 1.01]],
+  ]) reject((x, n) => n.parameters[field].value = value, "AUTHORING_PARAMETER", field);
+  for (const [hidden, value] of [["toneMapper", "bad"], ["exposureStops", Infinity]])
+    reject((x, n) => { n.parameters.hdrEnabled.value = false; n.parameters[hidden].value = value; }, "AUTHORING_PARAMETER", hidden);
+  reject((x, n) => { n.parameters.scaleMode.value = "stretch"; n.parameters.backgroundColor.value = [2, 0, 0, 1]; }, "AUTHORING_PARAMETER", "backgroundColor");
 });
 test("adapter counts only active incoming links and reports socket overflow", () => {
   const x = fixture();

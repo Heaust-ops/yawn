@@ -6,8 +6,11 @@ use serde_json::{json, Value};
 fn input(node: &str, socket: &str) -> Value {
     json!({"node":node,"socket":socket})
 }
-fn node(id: &str, key: &str, parameters: Value, inputs: Value) -> Value {
-    json!({"id":id,"state":"enabled","executor":{"key":key,"version":1},"parameters":parameters,"inputs":inputs})
+fn node(id: &str, key: &str, mut parameters: Value, inputs: Value) -> Value {
+    if key == "frame_out" && parameters.as_object().is_some_and(|p| p.is_empty()) {
+        parameters = json!({"hdrEnabled":false,"toneMapper":"aces","exposureStops":0,"outputTransfer":"srgb","scaleMode":"stretch","filter":"linear","backgroundColor":[0,0,0,1]});
+    }
+    json!({"id":id,"state":"enabled","executor":{"key":key,"version":if key == "frame_out" { 2 } else { 1 }},"parameters":parameters,"inputs":inputs})
 }
 fn texture(format: &str, residency: &str) -> Value {
     json!({"texture":{"dimension":"d2","format":format,"extent":{"kind":"surface_relative","width":{"numerator":1,"denominator":1},"height":{"numerator":1,"denominator":1},"depthOrArrayLayers":1},"mipLevelCount":1,"sampleCount":1,"viewFormats":[]},"residency":residency})
@@ -247,7 +250,7 @@ fn fullscreen_copy_parameters_are_exactly_empty() {
     let copy = node_index(&g, "copy");
     g["nodes"][copy]["parameters"] = json!({"obsolete":true});
     assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
-    assert_eq!(CONTRACTS.len(), 17);
+    assert_eq!(CONTRACTS.len(), 16);
 }
 
 #[test]
@@ -839,7 +842,6 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("pipeline_registry", 1),
             ("pipeline", 1),
             ("fullscreen_copy", 1),
-            ("tone_map", 1),
             ("color_balance", 1),
             ("exposure_contrast", 1),
             ("saturation", 1),
@@ -848,7 +850,7 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("bloom_blur", 1),
             ("bloom_composite", 1),
             ("luminance_edge", 1),
-            ("frame_out", 1),
+            ("frame_out", 2),
         ]
     );
     assert_eq!(
@@ -864,7 +866,6 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("pipeline_registry", None),
             ("pipeline", None),
             ("fullscreen_copy", Some(FullscreenPolicy::Copy)),
-            ("tone_map", Some(FullscreenPolicy::ToneMap)),
             ("color_balance", Some(FullscreenPolicy::HdrSameExtent)),
             ("exposure_contrast", Some(FullscreenPolicy::HdrSameExtent)),
             ("saturation", Some(FullscreenPolicy::HdrSameExtent)),
@@ -2083,6 +2084,41 @@ fn assert_runtime_path(graph: &CompiledGraph, path: impl AsRef<str>) {
     assert_eq!(error.details["path"], path.as_ref());
 }
 
+fn mutate_texture_descriptor(
+    graph: &mut CompiledGraph,
+    resource: u32,
+    mutate: impl FnOnce(&mut NormalizedTextureDescriptor),
+) {
+    let (family, allocation) = match graph.resources[resource as usize].plan {
+        ResourcePlan::Texture {
+            family, allocation, ..
+        } => (family as usize, allocation.unwrap()),
+        _ => unreachable!(),
+    };
+    let TextureFamilySource::AuthoredTexture {
+        resource: source,
+        descriptor,
+        ..
+    } = &mut graph.texture_families[family].source;
+    mutate(descriptor);
+    let descriptor = descriptor.clone();
+    let ResourcePlan::TextureSource {
+        descriptor: source_descriptor,
+        ..
+    } = &mut graph.resources[*source as usize].plan
+    else {
+        unreachable!()
+    };
+    *source_descriptor = descriptor.clone();
+    let key = &mut graph.allocation_classes[allocation.class as usize].key;
+    key.dimension = descriptor.dimension;
+    key.format = descriptor.format;
+    key.extent = descriptor.extent;
+    key.mip_level_count = descriptor.mip_level_count;
+    key.sample_count = descriptor.sample_count;
+    key.view_formats = descriptor.view_formats;
+}
+
 #[test]
 fn runtime_rejects_coordinated_contract_and_texture_target_mutations() {
     let baseline = compile_graph(full_cull_graph());
@@ -2920,15 +2956,6 @@ fn runtime_rejects_coordinated_executor_frustum_and_fullscreen_mutations() {
         .position(|execution| execution.executor.key == "fullscreen_copy")
         .unwrap();
     let mut graph = post.clone();
-    graph.executions[copy].executor.key = "tone_map".into();
-    assert_runtime_path(&graph, format!("executions[{copy}].parameters"));
-    for exposure in [f32::NAN, -0.1, 32.1] {
-        let mut graph = post.clone();
-        graph.executions[copy].executor.key = "tone_map".into();
-        graph.executions[copy].parameters = NormalizedParameters::ToneMap { exposure };
-        assert_runtime_path(&graph, format!("executions[{copy}].parameters"));
-    }
-    let mut graph = post.clone();
     let ExecutionKind::Render {
         color_attachments, ..
     } = &mut graph.executions[copy].kind
@@ -2941,6 +2968,242 @@ fn runtime_rejects_coordinated_executor_frustum_and_fullscreen_mutations() {
         *store = StoreOp::Discard;
     }
     assert_runtime_path(&graph, format!("executions[{copy}].kind"));
+}
+
+fn frame_parameters(hdr: bool) -> Value {
+    json!({"hdrEnabled":hdr,"toneMapper":"reinhard","exposureStops":2,
+        "outputTransfer":"srgb","scaleMode":"contain","filter":"nearest",
+        "backgroundColor":[0.1,0.2,0.3,0.4]})
+}
+
+#[test]
+fn frame_out_v2_has_exact_seven_fields_normalizes_sdr_and_rejects_v1() {
+    let fields = [
+        "hdrEnabled",
+        "toneMapper",
+        "exposureStops",
+        "outputTransfer",
+        "scaleMode",
+        "filter",
+        "backgroundColor",
+    ];
+    for field in fields {
+        let mut g = full_cull_graph();
+        let i = node_index(&g, "frame_out");
+        g["nodes"][i]["parameters"] = frame_parameters(false);
+        g["nodes"][i]["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert_eq!(
+            compile_error(g).code,
+            "GRAPH_PARAMETERS_INVALID",
+            "missing {field}"
+        );
+    }
+    let mut g = full_cull_graph();
+    let i = node_index(&g, "frame_out");
+    g["nodes"][i]["parameters"] = frame_parameters(false);
+    g["nodes"][i]["parameters"]["extra"] = json!(0);
+    assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
+    for (field, bad) in [
+        ("toneMapper", json!("bad")),
+        ("exposureStops", json!(11)),
+        ("backgroundColor", json!([0, 0, -0.1, 1])),
+    ] {
+        let mut g = full_cull_graph();
+        let i = node_index(&g, "frame_out");
+        g["nodes"][i]["parameters"] = frame_parameters(false);
+        g["nodes"][i]["parameters"][field] = bad;
+        assert_eq!(
+            compile_error(g).code,
+            "GRAPH_PARAMETERS_INVALID",
+            "hidden {field}"
+        );
+    }
+    let mut g = full_cull_graph();
+    let i = node_index(&g, "frame_out");
+    g["nodes"][i]["parameters"] = frame_parameters(false);
+    assert!(matches!(
+        execution(&compile_graph(g), "frame_out").parameters,
+        NormalizedParameters::FrameOut {
+            dynamic_range: FrameDynamicRange::Sdr,
+            ..
+        }
+    ));
+    let mut g = full_cull_graph();
+    let i = node_index(&g, "frame_out");
+    g["nodes"][i]["executor"]["version"] = json!(1);
+    assert_eq!(compile_error(g).code, "GRAPH_EXECUTOR_VERSION_UNSUPPORTED");
+}
+
+#[test]
+fn frame_out_source_format_matrix_is_exact() {
+    let surface = RuntimeSurfaceContract {
+        format: wgpu::TextureFormat::Bgra8Unorm,
+        width: 1280,
+        height: 720,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: vec![],
+    };
+    for (format, sdr, hdr) in [
+        ("rgba8_unorm", true, false),
+        ("bgra8_unorm", true, false),
+        ("rgba16_float", true, true),
+        ("rgba8_unorm_srgb", false, false),
+        ("bgra8_unorm_srgb", false, false),
+        ("r32_float", false, false),
+        ("depth32_float", false, false),
+    ] {
+        for (hdr_enabled, accepted) in [(false, sdr), (true, hdr)] {
+            let mut g = full_cull_graph();
+            let i = node_index(&g, "frame_out");
+            if format == "depth32_float" {
+                g["nodes"][i]["inputs"]["color"] = input("pipeline_main", "depth");
+            } else {
+                g["nodes"][0]["parameters"]["texture"]["format"] = json!(format);
+            }
+            g["nodes"][i]["parameters"] = frame_parameters(hdr_enabled);
+            match compile(serde_json::from_value(g).unwrap()) {
+                Ok(compiled) => {
+                    assert!(
+                        accepted,
+                        "unexpected accept: hdr={hdr_enabled} format={format}"
+                    );
+                    prepare_runtime_plan(&compiled, surface.clone(), None).unwrap();
+                }
+                Err(error) => {
+                    assert!(
+                        !accepted,
+                        "unexpected reject: hdr={hdr_enabled} format={format}"
+                    );
+                    let expected_message = if hdr_enabled {
+                        "HDR frame output requires rgba16_float"
+                    } else {
+                        "SDR frame output requires a linear filterable color texture"
+                    };
+                    assert_eq!(error.code, "GRAPH_ILLEGAL_ACCESS");
+                    assert_eq!(error.details["path"], format!("nodes[{i}].inputs.color"));
+                    assert_eq!(error.message, expected_message);
+                    assert_eq!(error.details["message"], expected_message);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn runtime_rejects_every_frame_parameter_lane_and_coordinated_source_mutations() {
+    let baseline = compile_graph(full_cull_graph());
+    let i = baseline
+        .executions
+        .iter()
+        .position(|e| e.executor.key == "frame_out")
+        .unwrap();
+    for version in [1, 3] {
+        let mut g = baseline.clone();
+        g.executions[i].executor.version = version;
+        assert_runtime_path(&g, format!("executions[{i}].executor.version"));
+    }
+    for lane in 0..4 {
+        for value in [f32::NAN, -0.1, 1.1] {
+            let mut g = baseline.clone();
+            let NormalizedParameters::FrameOut {
+                background_color, ..
+            } = &mut g.executions[i].parameters
+            else {
+                unreachable!()
+            };
+            background_color[lane] = value;
+            assert_runtime_path(&g, format!("executions[{i}].parameters"));
+        }
+    }
+    for exposure in [f32::NAN, -10.1, 10.1] {
+        let mut g = baseline.clone();
+        let NormalizedParameters::FrameOut { dynamic_range, .. } = &mut g.executions[i].parameters
+        else {
+            unreachable!()
+        };
+        *dynamic_range = FrameDynamicRange::Hdr {
+            tone_mapper: ToneMapper::Aces,
+            exposure_stops: exposure,
+        };
+        assert_runtime_path(&g, format!("executions[{i}].parameters"));
+    }
+    let ExecutionKind::FrameOut { color } = baseline.executions[i].kind else {
+        unreachable!()
+    };
+    let family = match baseline.resources[color as usize].plan {
+        ResourcePlan::Texture { family, .. } => family,
+        _ => unreachable!(),
+    } as usize;
+    for format in [
+        TextureFormat::Rgba8UnormSrgb,
+        TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::R32Float,
+    ] {
+        let mut g = baseline.clone();
+        mutate_texture_descriptor(&mut g, color, |descriptor| descriptor.format = format);
+        assert_runtime_path(&g, format!("textureFamilies[{family}].source.descriptor"));
+    }
+
+    let mut sdr_to_hdr = baseline.clone();
+    let NormalizedParameters::FrameOut { dynamic_range, .. } =
+        &mut sdr_to_hdr.executions[i].parameters
+    else {
+        unreachable!()
+    };
+    *dynamic_range = FrameDynamicRange::Hdr {
+        tone_mapper: ToneMapper::Aces,
+        exposure_stops: 0.,
+    };
+    assert_runtime_path(
+        &sdr_to_hdr,
+        format!("textureFamilies[{family}].source.descriptor"),
+    );
+
+    let mut hdr_value = full_cull_graph();
+    hdr_value["nodes"][0]["parameters"]["texture"]["format"] = json!("rgba16_float");
+    let frame_node = node_index(&hdr_value, "frame_out");
+    hdr_value["nodes"][frame_node]["parameters"] = frame_parameters(true);
+    let mut hdr_to_sdr = compile_graph(hdr_value);
+    let hdr_frame = hdr_to_sdr
+        .executions
+        .iter()
+        .position(|e| e.executor.key == "frame_out")
+        .unwrap();
+    let NormalizedParameters::FrameOut {
+        dynamic_range,
+        output_transfer,
+        ..
+    } = &mut hdr_to_sdr.executions[hdr_frame].parameters
+    else {
+        unreachable!()
+    };
+    *dynamic_range = FrameDynamicRange::Sdr;
+    *output_transfer = OutputTransfer::Linear;
+    let linear_surface = RuntimeSurfaceContract {
+        format: wgpu::TextureFormat::Bgra8Unorm,
+        width: 1280,
+        height: 720,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: vec![],
+    };
+    prepare_runtime_plan(&hdr_to_sdr, linear_surface.clone(), None).unwrap();
+    let error = prepare_runtime_plan(
+        &hdr_to_sdr,
+        RuntimeSurfaceContract {
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            ..linear_surface
+        },
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "GRAPH_SURFACE_INCOMPATIBLE");
+    assert_eq!(
+        error.details["path"],
+        format!("executions[{hdr_frame}].parameters.outputTransfer")
+    );
 }
 
 #[test]
@@ -2997,12 +3260,6 @@ fn runtime_rejects_fullscreen_parameter_and_sample_order_mutations() {
         .position(|execution| execution.executor.key == "fullscreen_copy")
         .unwrap();
     let invalid_parameters = [
-        (
-            "tone_map",
-            NormalizedParameters::ToneMap {
-                exposure: f32::INFINITY,
-            },
-        ),
         (
             "bloom_extract",
             NormalizedParameters::BloomExtract {
@@ -3130,55 +3387,23 @@ fn runtime_rechecks_pipeline_attachment_descriptors() {
             .unwrap()
             .resource
     };
-    let mutate_descriptor =
-        |graph: &mut CompiledGraph, resource: u32, mutate: fn(&mut NormalizedTextureDescriptor)| {
-            let (family, allocation) = match graph.resources[resource as usize].plan {
-                ResourcePlan::Texture {
-                    family, allocation, ..
-                } => (family as usize, allocation.unwrap()),
-                _ => unreachable!(),
-            };
-            let TextureFamilySource::AuthoredTexture {
-                resource: source,
-                descriptor,
-                ..
-            } = &mut graph.texture_families[family].source;
-            mutate(descriptor);
-            let descriptor = descriptor.clone();
-            let ResourcePlan::TextureSource {
-                descriptor: source_descriptor,
-                ..
-            } = &mut graph.resources[*source as usize].plan
-            else {
-                unreachable!()
-            };
-            *source_descriptor = descriptor.clone();
-            let key = &mut graph.allocation_classes[allocation.class as usize].key;
-            key.dimension = descriptor.dimension;
-            key.format = descriptor.format;
-            key.extent = descriptor.extent;
-            key.mip_level_count = descriptor.mip_level_count;
-            key.sample_count = descriptor.sample_count;
-            key.view_formats = descriptor.view_formats;
-        };
-
     let mut graph = baseline.clone();
     let color = attachment(&graph, "color");
-    mutate_descriptor(&mut graph, color, |descriptor| {
+    mutate_texture_descriptor(&mut graph, color, |descriptor| {
         descriptor.format = TextureFormat::Depth32Float;
     });
     assert_runtime_path(&graph, format!("executions[{pipeline}].inputs"));
 
     let mut graph = baseline.clone();
     let depth = attachment(&graph, "depth");
-    mutate_descriptor(&mut graph, depth, |descriptor| {
+    mutate_texture_descriptor(&mut graph, depth, |descriptor| {
         descriptor.format = TextureFormat::Rgba16Float;
     });
     assert_runtime_path(&graph, format!("executions[{pipeline}].inputs"));
 
     let mut graph = baseline;
     let color = attachment(&graph, "color");
-    mutate_descriptor(&mut graph, color, |descriptor| {
+    mutate_texture_descriptor(&mut graph, color, |descriptor| {
         descriptor.extent = NormalizedTextureExtent::Absolute {
             width: 4,
             height: 4,

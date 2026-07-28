@@ -4,17 +4,18 @@ const input = (node, socket) => ({ node, socket });
 const node = (id, key, parameters = {}, inputs = {}) => ({
   id, state: "enabled", executor: { key, version: descriptors[key].version }, parameters, inputs,
 });
-const texture = (format, scale = 1) => ({
+const texture = (format, scale = 1, heightScale = scale) => ({
   texture: {
     dimension: "d2", format,
-    extent: { kind: "surface_relative", width: { numerator: 1, denominator: scale }, height: { numerator: 1, denominator: scale }, depthOrArrayLayers: 1 },
+    extent: { kind: "surface_relative", width: { numerator: 1, denominator: scale }, height: { numerator: 1, denominator: heightScale }, depthOrArrayLayers: 1 },
     mipLevelCount: 1, sampleCount: 1, viewFormats: [],
   },
   residency: "transient",
 });
-const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1]) => [
-  node("hdr", "texture", texture("rgba16_float")),
-  node("depth", "texture", texture("depth32_float")),
+const frameOut = (hdr, options = {}) => ({ hdrEnabled: hdr, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1], ...options });
+const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1) => [
+  node("hdr", "texture", texture("rgba16_float", 1, heightScale)),
+  node("depth", "texture", texture("depth32_float", 1, heightScale)),
   node("mesh", "mesh"),
   node("query", "mesh_query", { visiblePredicate: "required_true", visibleDefault: true, frustumCulledPredicate: "any", frustumCulledDefault: false }, { mesh: input("mesh", "mesh"), isVisible: input("mesh", "isVisible") }),
   node("registry", "pipeline_registry", {}, { pipelineIndices: input("mesh", "pipelineIndices") }),
@@ -26,13 +27,13 @@ const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 2, graphId, rev
 const direct = (graphId, clearColor) => graph(graphId, [
   node("ldr", "texture", texture("rgba8_unorm")),
   ...scene("ldr", clearColor).filter((item) => item.id !== "hdr"),
-  node("frame_out", "frame_out", {}, { color: input("pbr_double", "color") }),
+  node("frame_out", "frame_out", frameOut(false), { color: input("pbr_double", "color") }),
 ]);
 export const midnight = direct("preset_midnight", [0.015, 0.06, 0.18, 1]);
 export const ember = direct("preset_ember", [0.18, 0.035, 0.012, 1]);
 export const hdr = graph("preset_hdr_fullscreen", [
   ...scene("hdr"),
-  node("frame_out", "frame_out", {}, { color: input("pbr_double", "color") }),
+  node("frame_out", "frame_out", frameOut(true), { color: input("pbr_double", "color") }),
 ]);
 export const culling = graph("preset_gpu_culling", (() => {
   const nodes = structuredClone(hdr.nodes);
@@ -43,15 +44,15 @@ export const culling = graph("preset_gpu_culling", (() => {
   return nodes;
 })());
 const postPreset = (graphId, kind) => {
-  const nodes = [node("ldr", "texture", texture("rgba8_unorm")), ...scene("hdr")];
+  const nodes = [...scene("hdr")];
   let source = "pbr_double";
   if (kind === "edges") {
-    nodes.splice(1, 0, node("edge_hdr", "texture", texture("rgba16_float")));
+    nodes.splice(0, 0, node("edge_hdr", "texture", texture("rgba16_float")));
     nodes.push(node("edges", "luminance_edge", { strength: 2 }, { source: input(source, "color"), colorTarget: input("edge_hdr", "texture") }));
     source = "edges";
   }
   if (kind === "bloom" || kind === "combined") {
-    nodes.splice(1, 0,
+    nodes.splice(0, 0,
       node("half_a", "texture", texture("rgba16_float", 2)), node("half_b", "texture", texture("rgba16_float", 2)),
       node("half_c", "texture", texture("rgba16_float", 2)), node("composite_hdr", "texture", texture("rgba16_float")));
     nodes.push(
@@ -62,26 +63,32 @@ const postPreset = (graphId, kind) => {
     );
     source = "composite";
     if (kind === "combined") {
-      nodes.splice(1, 0, node("edge_hdr", "texture", texture("rgba16_float")));
+      nodes.splice(0, 0, node("edge_hdr", "texture", texture("rgba16_float")));
       nodes.push(node("edges", "luminance_edge", { strength: 2 }, { source: input(source, "color"), colorTarget: input("edge_hdr", "texture") }));
       source = "edges";
     }
   }
-  nodes.push(node("tone", "tone_map", { exposure: 1 }, { source: input(source, "color"), colorTarget: input("ldr", "texture") }));
-  nodes.push(node("frame_out", "frame_out", {}, { color: input("tone", "color") }));
+  nodes.push(node("frame_out", "frame_out", frameOut(true), { color: input(source, "color") }));
   return graph(graphId, nodes);
 };
 export const tone = postPreset("preset_tone", "tone");
+const displayPreset = (id, parameters, heightScale = 1) => graph(id, [
+  ...scene("hdr", undefined, heightScale),
+  node("frame_out", "frame_out", parameters, { color: input("pbr_double", "color") }),
+]);
+export const contain = displayPreset("preset_contain", frameOut(false, { scaleMode: "contain", filter: "nearest", backgroundColor: [0.18, 0.18, 0.18, 0.25] }), 2);
+export const reinhard = displayPreset("preset_reinhard", frameOut(true, { toneMapper: "reinhard", exposureStops: 2, scaleMode: "cover", filter: "nearest" }), 2);
+export const linear = displayPreset("preset_linear", frameOut(true, { toneMapper: "none", exposureStops: 2, outputTransfer: "linear" }));
 export const edges = postPreset("preset_edges", "edges");
 export const bloom = postPreset("preset_bloom", "bloom");
 export const combined = postPreset("preset_combined", "combined");
 export const grading = graph("preset_grading", [
-  node("balance_hdr", "texture", texture("rgba16_float")), node("exposure_hdr", "texture", texture("rgba16_float")), node("saturation_hdr", "texture", texture("rgba16_float")), node("mixer_hdr", "texture", texture("rgba16_float")), node("ldr", "texture", texture("rgba8_unorm")),
+  node("balance_hdr", "texture", texture("rgba16_float")), node("exposure_hdr", "texture", texture("rgba16_float")), node("saturation_hdr", "texture", texture("rgba16_float")), node("mixer_hdr", "texture", texture("rgba16_float")),
   ...scene("hdr"),
   node("balance", "color_balance", { mode: "lift_gamma_gain", factor: 1, lift: 0, liftColor: [1,1,1,1], gamma: 1, gammaColor: [1,1,1,1], gain: 1, gainColor: [1,1,1,1], offset: 0, offsetColor: [1,1,1,1], power: 1, powerColor: [1,1,1,1], slope: 1, slopeColor: [1,1,1,1] }, { source: input("pbr_double", "color"), colorTarget: input("balance_hdr", "texture") }),
   node("exposure", "exposure_contrast", { exposureStops: 0, contrast: 1, pivot: 0.18, factor: 1 }, { source: input("balance", "color"), colorTarget: input("exposure_hdr", "texture") }),
   node("saturation", "saturation", { saturation: 1, factor: 1 }, { source: input("exposure", "color"), colorTarget: input("saturation_hdr", "texture") }),
   node("mixer", "channel_mixer", { redOutput: [1,0,0], greenOutput: [0,1,0], blueOutput: [0,0,1], factor: 1 }, { source: input("saturation", "color"), colorTarget: input("mixer_hdr", "texture") }),
-  node("tone", "tone_map", { exposure: 1 }, { source: input("mixer", "color"), colorTarget: input("ldr", "texture") }), node("frame_out", "frame_out", {}, { color: input("tone", "color") }),
+  node("frame_out", "frame_out", frameOut(true), { color: input("mixer", "color") }),
 ]);
-export const renderGraphPresets = Object.freeze({ midnight, ember, hdr, culling, tone, grading, edges, bloom, combined });
+export const renderGraphPresets = Object.freeze({ midnight, ember, hdr, culling, tone, contain, reinhard, linear, grading, edges, bloom, combined });

@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 5;
+export const CATALOG_VERSION = 6;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, required = true, authoringType) => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -120,16 +120,6 @@ export const semanticCatalog = Object.freeze({
     outputs: { color: o("texture") },
     parameters: {},
   },
-  tone_map: {
-    version: 1,
-    execution: "render",
-    inputs: {
-      source: i("texture"),
-      colorTarget: i("texture"),
-    },
-    outputs: { color: o("texture") },
-    parameters: { exposure: 1 },
-  },
   color_balance: {
     version: 1,
     execution: "render",
@@ -198,11 +188,11 @@ export const semanticCatalog = Object.freeze({
     parameters: { strength: 2 },
   },
   frame_out: {
-    version: 1,
+    version: 2,
     execution: "frame",
     inputs: { color: i("texture") },
     outputs: {},
-    parameters: {},
+    parameters: { hdrEnabled: true, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1] },
   },
 });
 const socketColors = [
@@ -383,7 +373,6 @@ const parameterSchemas = {
     clearColor: color([0.015, 0.02, 0.03, 1]),
   },
   fullscreen_copy: {},
-  tone_map: { exposure: number(1, 0, 32) },
   color_balance: {
     mode: enumeration("lift_gamma_gain", ["lift_gamma_gain", "offset_power_slope"]), factor: number(1, 0, 1),
     lift: number(0, -1, 1), liftColor: color([1, 1, 1, 1], 0, 4), gamma: number(1, 0.01, 4), gammaColor: color([1, 1, 1, 1], 0, 4), gain: number(1, 0, 4), gainColor: color([1, 1, 1, 1], 0, 4),
@@ -399,7 +388,15 @@ const parameterSchemas = {
   },
   bloom_composite: { intensity: number(1, 0, 16) },
   luminance_edge: { strength: number(2, 0, 16) },
-  frame_out: {},
+  frame_out: {
+    hdrEnabled: boolean(true),
+    toneMapper: enumeration("aces", ["aces", "reinhard", "none"]),
+    exposureStops: number(0, -10, 10),
+    outputTransfer: enumeration("srgb", ["srgb", "linear"]),
+    scaleMode: enumeration("stretch", ["stretch", "contain", "cover"]),
+    filter: enumeration("linear", ["linear", "nearest"]),
+    backgroundColor: color([0, 0, 0, 1]),
+  },
 };
 export const nodeDefinitions = Object.fromEntries(
   Object.entries(semanticCatalog).map(([key, c]) => {
@@ -470,6 +467,17 @@ nodeDefinitions.color_balance.ui = [
   ], visibleWhen: { parameter: "mode", equals: "offset_power_slope" } },
   { kind: "parameter", parameter: "factor" },
   { kind: "socket", socket: "source" }, { kind: "socket", socket: "colorTarget" }, { kind: "socket", socket: "color" },
+];
+nodeDefinitions.frame_out.ui = [
+  { kind: "text", variant: "section", title: "Display Transform" },
+  { kind: "parameter", parameter: "hdrEnabled", title: "HDR" },
+  { kind: "parameter", parameter: "toneMapper", title: "Tone Mapper", visibleWhen: { parameter: "hdrEnabled", equals: true } },
+  { kind: "parameter", parameter: "exposureStops", title: "Exposure", visibleWhen: { parameter: "hdrEnabled", equals: true } },
+  { kind: "parameter", parameter: "outputTransfer", title: "Transfer" },
+  { kind: "parameter", parameter: "scaleMode", title: "Scale" },
+  { kind: "parameter", parameter: "filter" },
+  { kind: "parameter", parameter: "backgroundColor", title: "Background", visibleWhen: { parameter: "scaleMode", equals: "contain" } },
+  { kind: "socket", socket: "color" },
 ];
 export const fxNodeComposition = Object.freeze({
   schemaVersion: 2,

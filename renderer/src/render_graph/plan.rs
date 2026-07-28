@@ -209,9 +209,6 @@ pub enum NormalizedParameters {
         clear_color: [f64; 4],
     },
     FullscreenCopy,
-    ToneMap {
-        exposure: f32,
-    },
     ColorBalance {
         mode: ColorBalanceMode,
         factor: f32,
@@ -258,7 +255,50 @@ pub enum NormalizedParameters {
     LuminanceEdge {
         strength: f32,
     },
-    FrameOut,
+    FrameOut {
+        dynamic_range: FrameDynamicRange,
+        output_transfer: OutputTransfer,
+        scale_mode: ScaleMode,
+        filter: FrameFilter,
+        background_color: [f32; 4],
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FrameDynamicRange {
+    Sdr,
+    Hdr {
+        tone_mapper: ToneMapper,
+        exposure_stops: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneMapper {
+    Aces,
+    Reinhard,
+    None,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputTransfer {
+    Srgb,
+    Linear,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleMode {
+    Stretch,
+    Contain,
+    Cover,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameFilter {
+    Linear,
+    Nearest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]

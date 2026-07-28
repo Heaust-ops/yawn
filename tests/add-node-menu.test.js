@@ -10,17 +10,13 @@ import {
   spawnRequestedNode,
 } from "../static/render-graph/node-spawn.js";
 
-test("add-node model contains all 17 catalog types in application groups", () => {
-  assert.equal(addNodeItems.length, 17);
+test("add-node model contains all 16 catalog types in application groups", () => {
+  assert.equal(addNodeItems.length, 16);
   assert.deepEqual(
     [...new Set(addNodeItems.map((item) => item.group))],
     ["Source", "Compute", "CPU preparation", "Render / post", "Frame"],
   );
-  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 17);
-  assert.deepEqual(
-    searchAddNodeItems("tone render").map((item) => item.typeId),
-    ["tone_map"],
-  );
+  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 16);
   assert.deepEqual(searchAddNodeItems("no such node"), []);
 });
 
@@ -40,7 +36,7 @@ test("allocator avoids existing and session-reserved IDs and is bounded", () => 
   );
 });
 
-test("all 17 types spawn with exact position, current version and generated ID", async () => {
+test("all 16 types spawn with exact position, current version and generated ID", async () => {
   let revision = 5,
     expectedType;
   const request = { compositionRevision: 5, viewPosition: { x: 12.25, y: -4 } };
@@ -91,13 +87,13 @@ test("spawn rechecks composition after getState and propagates add errors", asyn
     },
   };
   assert.equal(
-    await spawnRequestedNode(root, view, request, "tone_map", allocate),
+    await spawnRequestedNode(root, view, request, "fullscreen_copy", allocate),
     false,
   );
   revision = 2;
   root.getState = async () => ({ version: 3, nodes: [] });
   await assert.rejects(
-    spawnRequestedNode(root, view, request, "tone_map", allocate),
+    spawnRequestedNode(root, view, request, "fullscreen_copy", allocate),
     /must not add/,
   );
 });
@@ -124,7 +120,7 @@ test("spawn cancels when a pending getState becomes mutated or dead", async () =
     root,
     view,
     request,
-    "tone_map",
+    "fullscreen_copy",
     () => "node_a",
     () => alive,
   );
@@ -136,7 +132,7 @@ test("spawn cancels when a pending getState becomes mutated or dead", async () =
     root,
     view,
     request,
-    "tone_map",
+    "fullscreen_copy",
     () => "node_b",
     () => alive,
   );
@@ -161,7 +157,7 @@ test("spawn has a final liveness guard after ID allocation", async () => {
     root,
     view,
     request,
-    "tone_map",
+    "fullscreen_copy",
     () => {
       alive = false;
       return "node_reserved";
@@ -190,7 +186,7 @@ test("spawn suppresses teardown RPC rejections but propagates genuine live add e
       root,
       view,
       request,
-      "tone_map",
+      "fullscreen_copy",
       () => "node_a",
       () => alive,
     ),
@@ -208,7 +204,7 @@ test("spawn suppresses teardown RPC rejections but propagates genuine live add e
       root,
       view,
       request,
-      "tone_map",
+      "fullscreen_copy",
       () => "node_b",
       () => alive,
     ),
@@ -224,7 +220,7 @@ test("spawn suppresses teardown RPC rejections but propagates genuine live add e
       root,
       view,
       request,
-      "tone_map",
+      "fullscreen_copy",
       () => "node_c",
       () => alive,
     ),

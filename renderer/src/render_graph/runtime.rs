@@ -330,9 +330,6 @@ fn validate_fullscreen_execution(
     let vector = |v: &[f32], min, max| v.iter().all(|x| scalar(x, min, max));
     let valid_parameters = match (key, &execution.parameters) {
         ("fullscreen_copy", NormalizedParameters::FullscreenCopy) => true,
-        ("tone_map", NormalizedParameters::ToneMap { exposure }) => {
-            exposure.is_finite() && (0.0..=32.0).contains(exposure)
-        }
         (
             "color_balance",
             NormalizedParameters::ColorBalance {
@@ -564,14 +561,6 @@ fn validate_fullscreen_execution(
             FullscreenPolicy::Copy => {
                 single_view_d2(target_d)
                     && target_d.format != TextureFormat::Depth32Float
-                    && target_d.extent == source.extent
-            }
-            FullscreenPolicy::ToneMap => {
-                single_view_d2(target_d)
-                    && !matches!(
-                        target_d.format,
-                        TextureFormat::Depth32Float | TextureFormat::R32Float
-                    )
                     && target_d.extent == source.extent
             }
             FullscreenPolicy::BloomExtract => hdr(target_d),
@@ -1477,10 +1466,39 @@ pub fn prepare_runtime_plan(
     }
 
     let frame_out = &graph.executions[frame_out_index];
-    if !matches!(frame_out.parameters, NormalizedParameters::FrameOut) {
+    let NormalizedParameters::FrameOut {
+        dynamic_range,
+        output_transfer,
+        scale_mode: _,
+        filter: _,
+        background_color,
+    } = &frame_out.parameters
+    else {
         return Err(invalid(
             "frame_out parameters mismatch",
             format!("executions[{frame_out_index}].parameters"),
+        ));
+    };
+    let parameters_valid = background_color
+        .iter()
+        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        && match dynamic_range {
+            FrameDynamicRange::Sdr => true,
+            FrameDynamicRange::Hdr { exposure_stops, .. } => {
+                exposure_stops.is_finite() && (-10.0..=10.0).contains(exposure_stops)
+            }
+        };
+    if !parameters_valid {
+        return Err(invalid(
+            "frame_out parameters are out of range",
+            format!("executions[{frame_out_index}].parameters"),
+        ));
+    }
+    if *output_transfer == OutputTransfer::Linear && surface.format.is_srgb() {
+        return Err(error(
+            "GRAPH_SURFACE_INCOMPATIBLE",
+            "linear output transfer cannot target an sRGB surface",
+            format!("executions[{frame_out_index}].parameters.outputTransfer"),
         ));
     }
     let ExecutionKind::FrameOut { color } = frame_out.kind else {
@@ -1546,7 +1564,7 @@ pub fn prepare_runtime_plan(
         )
     })?;
     let TextureFamilySource::AuthoredTexture { descriptor, .. } = &family.source;
-    if !super::compiler::is_filterable_frame_color(descriptor) {
+    if !super::compiler::frame_out_source_compatible(descriptor, dynamic_range) {
         return Err(invalid(
             "frame_out texture descriptor is incompatible",
             format!("textureFamilies[{}].source.descriptor", family.id),

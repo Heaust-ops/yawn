@@ -33,6 +33,24 @@ struct FullscreenUniforms {
     values: [[f32; 4]; 8],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullscreenSamplerChoice {
+    Linear,
+    Nearest,
+}
+
+fn frame_out_sampler_choice(
+    parameters: &crate::render_graph::NormalizedParameters,
+) -> Option<FullscreenSamplerChoice> {
+    let crate::render_graph::NormalizedParameters::FrameOut { filter, .. } = parameters else {
+        return None;
+    };
+    Some(match filter {
+        crate::render_graph::FrameFilter::Linear => FullscreenSamplerChoice::Linear,
+        crate::render_graph::FrameFilter::Nearest => FullscreenSamplerChoice::Nearest,
+    })
+}
+
 fn pack_fullscreen_uniforms(
     key: &str,
     parameters: &crate::render_graph::NormalizedParameters,
@@ -40,11 +58,7 @@ fn pack_fullscreen_uniforms(
     use crate::render_graph::NormalizedParameters;
     let mut values = [[0.; 4]; 8];
     let first = match (key, parameters) {
-        (
-            "fullscreen_copy" | "frame_out",
-            NormalizedParameters::FullscreenCopy | NormalizedParameters::FrameOut,
-        ) => [0.; 4],
-        ("tone_map", NormalizedParameters::ToneMap { exposure }) => [*exposure, 0., 0., 0.],
+        ("fullscreen_copy", NormalizedParameters::FullscreenCopy) => [0.; 4],
         (
             "color_balance",
             NormalizedParameters::ColorBalance {
@@ -134,10 +148,68 @@ fn pack_fullscreen_uniforms(
     Some(FullscreenUniforms { values })
 }
 
+fn pack_frame_out_uniforms(
+    parameters: &crate::render_graph::NormalizedParameters,
+    surface: &crate::render_graph::RuntimeSurfaceContract,
+) -> Option<FullscreenUniforms> {
+    use crate::render_graph::*;
+    let NormalizedParameters::FrameOut {
+        dynamic_range,
+        output_transfer,
+        scale_mode,
+        background_color,
+        ..
+    } = parameters
+    else {
+        return None;
+    };
+    if *output_transfer == OutputTransfer::Linear && surface.format.is_srgb() {
+        return None;
+    }
+    let (hdr, mapper, exposure) = match dynamic_range {
+        FrameDynamicRange::Sdr => (0., 0., 0.),
+        FrameDynamicRange::Hdr {
+            tone_mapper,
+            exposure_stops,
+        } => (
+            1.,
+            match tone_mapper {
+                ToneMapper::None => 0.,
+                ToneMapper::Reinhard => 1.,
+                ToneMapper::Aces => 2.,
+            },
+            *exposure_stops,
+        ),
+    };
+    let mut values = [[0.; 4]; 8];
+    values[0] = [
+        hdr,
+        mapper,
+        exposure,
+        if *output_transfer == OutputTransfer::Srgb && !surface.format.is_srgb() {
+            1.
+        } else {
+            0.
+        },
+    ];
+    values[1] = [
+        match scale_mode {
+            ScaleMode::Stretch => 0.,
+            ScaleMode::Contain => 1.,
+            ScaleMode::Cover => 2.,
+        },
+        surface.width as f32,
+        surface.height as f32,
+        0.,
+    ];
+    values[2] = *background_color;
+    Some(FullscreenUniforms { values })
+}
+
 fn resolve_fullscreen_entry(key: &str) -> Option<&'static str> {
     match key {
-        "fullscreen_copy" | "frame_out" => Some("fs_copy"),
-        "tone_map" => Some("fs_tone_map"),
+        "fullscreen_copy" => Some("fs_copy"),
+        "frame_out" => Some("fs_frame_out"),
         "color_balance" => Some("fs_color_balance"),
         "exposure_contrast" => Some("fs_exposure_contrast"),
         "saturation" => Some("fs_saturation"),
@@ -153,7 +225,7 @@ fn resolve_fullscreen_entry(key: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod fullscreen_tests {
     use super::*;
-    use crate::render_graph::{ColorBalanceMode, NormalizedParameters};
+    use crate::render_graph::*;
 
     fn assert_packed(key: &str, parameters: NormalizedParameters, expected: &[[f32; 4]]) {
         let packed = pack_fullscreen_uniforms(key, &parameters).unwrap();
@@ -179,15 +251,15 @@ mod fullscreen_tests {
         assert!(packed.values[1..].iter().all(|value| *value == [0.0; 4]));
         assert_eq!(bytemuck::bytes_of(&packed).len(), 128);
         assert!(
-            pack_fullscreen_uniforms("tone_map", &NormalizedParameters::FullscreenCopy).is_none()
+            pack_fullscreen_uniforms("frame_out", &NormalizedParameters::FullscreenCopy).is_none()
         );
     }
 
     #[test]
     fn fullscreen_entries_are_explicit() {
         assert_eq!(resolve_fullscreen_entry("fullscreen_copy"), Some("fs_copy"));
-        assert_eq!(resolve_fullscreen_entry("frame_out"), Some("fs_copy"));
-        assert_eq!(resolve_fullscreen_entry("tone_map"), Some("fs_tone_map"));
+        assert_eq!(resolve_fullscreen_entry("frame_out"), Some("fs_frame_out"));
+        assert_eq!(resolve_fullscreen_entry("tone_map"), None);
         assert_eq!(
             resolve_fullscreen_entry("color_balance"),
             Some("fs_color_balance")
@@ -221,6 +293,296 @@ mod fullscreen_tests {
             Some("fs_luminance_edge")
         );
         assert_eq!(resolve_fullscreen_entry("unknown"), None);
+    }
+
+    fn surface(format: wgpu::TextureFormat) -> RuntimeSurfaceContract {
+        RuntimeSurfaceContract {
+            format,
+            width: 1920,
+            height: 1080,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: vec![],
+        }
+    }
+
+    fn frame(
+        dynamic_range: FrameDynamicRange,
+        transfer: OutputTransfer,
+        scale_mode: ScaleMode,
+        filter: FrameFilter,
+    ) -> NormalizedParameters {
+        NormalizedParameters::FrameOut {
+            dynamic_range,
+            output_transfer: transfer,
+            scale_mode,
+            filter,
+            background_color: [0.1, 0.2, 0.3, 0.4],
+        }
+    }
+
+    #[test]
+    fn frame_out_packer_tags_all_lanes_and_sampler_is_gpu_independent() {
+        let expected = |first, scale| {
+            [
+                first,
+                [scale, 1920., 1080., 0.],
+                [0.1, 0.2, 0.3, 0.4],
+                [0.; 4],
+                [0.; 4],
+                [0.; 4],
+                [0.; 4],
+                [0.; 4],
+            ]
+        };
+        for (mapper, mapper_tag, scale, scale_tag, filter) in [
+            (
+                ToneMapper::None,
+                0.,
+                ScaleMode::Stretch,
+                0.,
+                FrameFilter::Linear,
+            ),
+            (
+                ToneMapper::Reinhard,
+                1.,
+                ScaleMode::Contain,
+                1.,
+                FrameFilter::Nearest,
+            ),
+            (
+                ToneMapper::Aces,
+                2.,
+                ScaleMode::Cover,
+                2.,
+                FrameFilter::Linear,
+            ),
+        ] {
+            let p = frame(
+                FrameDynamicRange::Hdr {
+                    tone_mapper: mapper,
+                    exposure_stops: -2.,
+                },
+                OutputTransfer::Srgb,
+                scale,
+                filter,
+            );
+            assert_eq!(
+                pack_frame_out_uniforms(&p, &surface(wgpu::TextureFormat::Rgba8Unorm))
+                    .unwrap()
+                    .values,
+                expected([1., mapper_tag, -2., 1.], scale_tag)
+            );
+            assert_eq!(
+                frame_out_sampler_choice(&p),
+                Some(if filter == FrameFilter::Nearest {
+                    FullscreenSamplerChoice::Nearest
+                } else {
+                    FullscreenSamplerChoice::Linear
+                })
+            );
+        }
+        let sdr = frame(
+            FrameDynamicRange::Sdr,
+            OutputTransfer::Srgb,
+            ScaleMode::Stretch,
+            FrameFilter::Linear,
+        );
+        for format in [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            assert_eq!(
+                pack_frame_out_uniforms(&sdr, &surface(format))
+                    .unwrap()
+                    .values,
+                expected([0.; 4], 0.)
+            );
+        }
+        assert_eq!(
+            pack_frame_out_uniforms(&sdr, &surface(wgpu::TextureFormat::Bgra8Unorm))
+                .unwrap()
+                .values,
+            expected([0., 0., 0., 1.], 0.)
+        );
+        let linear = frame(
+            FrameDynamicRange::Sdr,
+            OutputTransfer::Linear,
+            ScaleMode::Stretch,
+            FrameFilter::Linear,
+        );
+        assert_eq!(
+            pack_frame_out_uniforms(&linear, &surface(wgpu::TextureFormat::Bgra8Unorm))
+                .unwrap()
+                .values,
+            expected([0.; 4], 0.)
+        );
+        assert!(
+            pack_frame_out_uniforms(&linear, &surface(wgpu::TextureFormat::Bgra8UnormSrgb))
+                .is_none()
+        );
+        assert_eq!(
+            frame_out_sampler_choice(&NormalizedParameters::FullscreenCopy),
+            None
+        );
+    }
+
+    fn coordinates(
+        p: [f32; 2],
+        surface: [f32; 2],
+        source: [f32; 2],
+        mode: ScaleMode,
+    ) -> ([f32; 2], bool) {
+        if mode == ScaleMode::Stretch {
+            return ([p[0] / surface[0], p[1] / surface[1]], true);
+        }
+        let (sa, ia) = (surface[0] / surface[1], source[0] / source[1]);
+        let mut size = surface;
+        if (mode == ScaleMode::Contain && ia > sa) || (mode == ScaleMode::Cover && ia < sa) {
+            size[1] = surface[0] / ia;
+        } else {
+            size[0] = surface[1] * ia;
+        }
+        let origin = [(surface[0] - size[0]) * 0.5, (surface[1] - size[1]) * 0.5];
+        (
+            [(p[0] - origin[0]) / size[0], (p[1] - origin[1]) / size[1]],
+            mode == ScaleMode::Cover
+                || (p[0] >= origin[0]
+                    && p[1] >= origin[1]
+                    && p[0] < origin[0] + size[0]
+                    && p[1] < origin[1] + size[1]),
+        )
+    }
+
+    #[test]
+    fn frame_coordinates_reference_half_open_centered_crop_and_stretch() {
+        let contain = |p| coordinates(p, [4., 4.], [4., 2.], ScaleMode::Contain);
+        assert_eq!(contain([0., 1.]), ([0., 0.], true));
+        assert_eq!(contain([4., 1.]), ([1., 0.], false));
+        assert_eq!(contain([0., 3.]), ([0., 1.], false));
+        assert!(contain([4. - 0.0001, 3. - 0.0001]).1);
+        for point in [[-1., 2.], [5., 2.], [2., 0.], [2., 4.]] {
+            assert!(!contain(point).1, "outside point {point:?}");
+        }
+        let cover = |p| coordinates(p, [4., 4.], [4., 2.], ScaleMode::Cover);
+        assert_eq!(cover([2., 2.]), ([0.5, 0.5], true));
+        assert_eq!(cover([0., 2.]), ([0.25, 0.5], true));
+        assert_eq!(cover([4., 2.]), ([0.75, 0.5], true));
+        assert_eq!(
+            coordinates([2., 2.], [4., 4.], [1., 9.], ScaleMode::Stretch),
+            ([0.5, 0.5], true)
+        );
+    }
+
+    fn srgb(x: f32) -> f32 {
+        let x = x.clamp(0., 1.);
+        if x <= 0.0031308 {
+            12.92 * x
+        } else {
+            1.055 * x.powf(1. / 2.4) - 0.055
+        }
+    }
+    fn shade(c: [f32; 4], mapper: Option<ToneMapper>, exposure: f32, transfer: bool) -> [f32; 4] {
+        let mut rgb = [0.; 3];
+        for i in 0..3 {
+            let x = if mapper.is_some() {
+                (c[i] * 2f32.powf(exposure)).max(0.)
+            } else {
+                c[i]
+            };
+            rgb[i] = match mapper {
+                Some(ToneMapper::Aces) => {
+                    ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0., 1.)
+                }
+                Some(ToneMapper::Reinhard) => x / (1. + x),
+                _ => x.clamp(0., 1.),
+            };
+            if transfer {
+                rgb[i] = srgb(rgb[i]);
+            }
+        }
+        [rgb[0], rgb[1], rgb[2], c[3].clamp(0., 1.)]
+    }
+
+    fn shade_background(
+        c: [f32; 4],
+        _hdr_mapper: ToneMapper,
+        _hdr_exposure_stops: f32,
+        output_transfer: OutputTransfer,
+    ) -> [f32; 4] {
+        let mut rgb = [c[0].clamp(0., 1.), c[1].clamp(0., 1.), c[2].clamp(0., 1.)];
+        if output_transfer == OutputTransfer::Srgb {
+            rgb.iter_mut().for_each(|value| *value = srgb(*value));
+        }
+        [rgb[0], rgb[1], rgb[2], c[3].clamp(0., 1.)]
+    }
+
+    #[test]
+    fn frame_cpu_goldens_process_rgb_with_straight_clamped_alpha_and_background_once() {
+        let close = |actual: f32, expected: f32| {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}")
+        };
+        for (input, mapper, expected) in [
+            (0., ToneMapper::Aces, 0.),
+            (1., ToneMapper::Aces, 0.8037975),
+            (1., ToneMapper::Reinhard, 0.5),
+            (4., ToneMapper::Reinhard, 0.8),
+            (-1., ToneMapper::None, 0.),
+            (2., ToneMapper::None, 1.),
+        ] {
+            close(
+                shade([input, 0., 0., 0.25], Some(mapper), 0., false)[0],
+                expected,
+            );
+        }
+        for (input, expected) in [(0., 0.), (0.0031308, 0.0404499), (0.18, 0.461356), (1., 1.)] {
+            close(srgb(input), expected);
+        }
+        let low_alpha = shade([0.18, 0.5, 1., 0.25], Some(ToneMapper::Reinhard), 1., true);
+        let opaque = shade([0.18, 0.5, 1., 1.], Some(ToneMapper::Reinhard), 1., true);
+        assert_eq!(&low_alpha[..3], &opaque[..3]);
+        assert_eq!((low_alpha[3], opaque[3]), (0.25, 1.));
+        assert_eq!(shade([0.18, 0.5, 1., 2.], None, 0., false)[3], 1.);
+        let background = [0.18, 0.5, 1., 0.25];
+        let once = shade_background(background, ToneMapper::Aces, 10., OutputTransfer::Srgb);
+        for (actual, expected) in once.into_iter().zip([0.461356, 0.7353569, 1., 0.25]) {
+            close(actual, expected);
+        }
+        assert_eq!(
+            once,
+            shade_background(background, ToneMapper::Reinhard, -10., OutputTransfer::Srgb)
+        );
+        assert_eq!(
+            shade_background(background, ToneMapper::Aces, 10., OutputTransfer::Linear),
+            background
+        );
+        assert_eq!(
+            shade_background(
+                [0.18, 0.5, 1., 1.2],
+                ToneMapper::Aces,
+                10.,
+                OutputTransfer::Srgb
+            )[3],
+            1.
+        );
+        assert_eq!(
+            shade_background(
+                [0.18, 0.5, 1., -0.2],
+                ToneMapper::Aces,
+                10.,
+                OutputTransfer::Srgb
+            )[3],
+            0.
+        );
+        let white = shade_background(
+            [1., 1., 1., 0.25],
+            ToneMapper::Aces,
+            10.,
+            OutputTransfer::Srgb,
+        );
+        white[..3].iter().for_each(|channel| close(*channel, 1.));
+        assert_eq!(white[3], 0.25);
+        let tone_mapped_white = shade([1., 1., 1., 1.], Some(ToneMapper::Aces), 0., false);
+        assert!(tone_mapped_white[0] < 0.81 && white[0] > tone_mapped_white[0]);
     }
 
     fn balance(mode: ColorBalanceMode) -> NormalizedParameters {
@@ -1218,6 +1580,15 @@ impl<T: Scene + 'static> Renderer<T> {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             });
+        let nearest_sampler = self
+            .context
+            .device
+            .create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(" frame nearest clamp"),
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
         let mut executions = Vec::new();
         for (index, execution) in graph.executions.iter().enumerate() {
             let contract = crate::render_graph::contract(&execution.executor.key)
@@ -1256,9 +1627,20 @@ impl<T: Scene + 'static> Renderer<T> {
                             _ => return Err(fail("fullscreen inputs mismatch")),
                         }
                     };
-                    let values =
+                    let values = if frame_out {
+                        pack_frame_out_uniforms(&execution.parameters, &runtime.surface)
+                    } else {
                         pack_fullscreen_uniforms(&execution.executor.key, &execution.parameters)
-                            .ok_or_else(|| fail("executor parameters mismatch"))?;
+                    }
+                    .ok_or_else(|| fail("executor parameters mismatch"))?;
+                    let sampler_choice = if frame_out {
+                        Some(
+                            frame_out_sampler_choice(&execution.parameters)
+                                .ok_or_else(|| fail("executor parameters mismatch"))?,
+                        )
+                    } else {
+                        None
+                    };
                     use wgpu::util::DeviceExt;
                     let uniform =
                         self.context
@@ -1347,7 +1729,15 @@ impl<T: Scene + 'static> Renderer<T> {
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 2,
-                                        resource: wgpu::BindingResource::Sampler(&sampler),
+                                        resource: wgpu::BindingResource::Sampler(
+                                            if sampler_choice
+                                                == Some(FullscreenSamplerChoice::Nearest)
+                                            {
+                                                &nearest_sampler
+                                            } else {
+                                                &sampler
+                                            },
+                                        ),
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 3,

@@ -38,8 +38,15 @@ struct PipelineParameters {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ToneMapParameters {
-    exposure: f32,
+#[serde(rename_all = "camelCase")]
+struct FrameOutParameters {
+    hdr_enabled: bool,
+    tone_mapper: ToneMapper,
+    exposure_stops: f32,
+    output_transfer: OutputTransfer,
+    scale_mode: ScaleMode,
+    filter: FrameFilter,
+    background_color: [f32; 4],
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -424,13 +431,6 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
             NormalizedParameters::FrustumCull { camera: p.camera }
         }
         "fullscreen_copy" => empty!(NormalizedParameters::FullscreenCopy),
-        "tone_map" => {
-            let p: ToneMapParameters =
-                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
-            NormalizedParameters::ToneMap {
-                exposure: range(p.exposure, 0.0, 32.0, format!("{base}.exposure"))?,
-            }
-        }
         "color_balance" => {
             let p: ColorBalanceParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
@@ -528,7 +528,36 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 strength: range(p.strength, 0.0, 16.0, format!("{base}.strength"))?,
             }
         }
-        "frame_out" => empty!(NormalizedParameters::FrameOut),
+        "frame_out" => {
+            let p: FrameOutParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            let exposure_stops = range(
+                p.exposure_stops,
+                -10.0,
+                10.0,
+                format!("{base}.exposureStops"),
+            )?;
+            let background_color = components(
+                p.background_color,
+                0.0,
+                1.0,
+                &format!("{base}.backgroundColor"),
+            )?;
+            NormalizedParameters::FrameOut {
+                dynamic_range: if p.hdr_enabled {
+                    FrameDynamicRange::Hdr {
+                        tone_mapper: p.tone_mapper,
+                        exposure_stops,
+                    }
+                } else {
+                    FrameDynamicRange::Sdr
+                },
+                output_transfer: p.output_transfer,
+                scale_mode: p.scale_mode,
+                filter: p.filter,
+                background_color,
+            }
+        }
         "texture" => {
             let p: TextureParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
@@ -1378,12 +1407,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                             && descriptor.extent == source_descriptor.extent
                     })
             }
-            Some(FullscreenPolicy::ToneMap) => target_descriptor.is_some_and(|descriptor| {
-                descriptor.format != TextureFormat::Depth32Float
-                    && descriptor.format != TextureFormat::R32Float
-                    && is_single_view_d2(descriptor)
-                    && descriptor.extent == source_descriptor.extent
-            }),
             Some(FullscreenPolicy::BloomExtract) => authored_target_ok,
             Some(FullscreenPolicy::HdrSameExtent) => authored_target_ok && target_matches_source,
             Some(FullscreenPolicy::BloomComposite) => {
@@ -1418,10 +1441,19 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         };
         let TextureFamilySource::AuthoredTexture { descriptor, .. } =
             &families[family as usize].source;
-        if !is_filterable_frame_color(descriptor) {
+        let NormalizedParameters::FrameOut { dynamic_range, .. } = &params[i] else {
+            unreachable!()
+        };
+        if !frame_out_source_compatible(descriptor, dynamic_range) {
+            let message = match dynamic_range {
+                FrameDynamicRange::Hdr { .. } => "HDR frame output requires rgba16_float",
+                FrameDynamicRange::Sdr => {
+                    "SDR frame output requires a linear filterable color texture"
+                }
+            };
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
-                "frame output requires a filterable single-view d2 color texture",
+                message,
                 format!("nodes[{i}].inputs.color"),
             ));
         }
@@ -1903,17 +1935,20 @@ pub(super) fn is_single_view_d2(descriptor: &NormalizedTextureDescriptor) -> boo
         && descriptor.sample_count == 1
         && descriptor.mip_level_count == 1
         && extent_layers(&descriptor.extent) == 1
+        && descriptor.view_formats.is_empty()
 }
-pub(super) fn is_filterable_frame_color(descriptor: &NormalizedTextureDescriptor) -> bool {
+pub(super) fn frame_out_source_compatible(
+    descriptor: &NormalizedTextureDescriptor,
+    dynamic_range: &FrameDynamicRange,
+) -> bool {
     is_single_view_d2(descriptor)
-        && matches!(
-            descriptor.format,
-            TextureFormat::Rgba8Unorm
-                | TextureFormat::Rgba8UnormSrgb
-                | TextureFormat::Bgra8Unorm
-                | TextureFormat::Bgra8UnormSrgb
-                | TextureFormat::Rgba16Float
-        )
+        && match dynamic_range {
+            FrameDynamicRange::Hdr { .. } => descriptor.format == TextureFormat::Rgba16Float,
+            FrameDynamicRange::Sdr => matches!(
+                descriptor.format,
+                TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm | TextureFormat::Rgba16Float
+            ),
+        }
 }
 pub(super) fn texture_usage(
     f: &TextureFamily,

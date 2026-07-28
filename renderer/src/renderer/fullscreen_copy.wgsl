@@ -17,10 +17,29 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (2.51 * x + vec3(0.03))) / (x * (2.43 * x + vec3(0.59)) + vec3(0.14)), vec3(0.0), vec3(1.0));
 }
 fn linear_to_srgb(x: vec3<f32>) -> vec3<f32> {
-    let low = x * 12.92; let high = 1.055 * pow(x, vec3(1.0 / 2.4)) - vec3(0.055);
-    return select(high, low, x <= vec3(0.0031308));
+    let safe = clamp(x, vec3(0.0), vec3(1.0));
+    let low = safe * 12.92; let high = 1.055 * pow(safe, vec3(1.0 / 2.4)) - vec3(0.055);
+    return select(high, low, safe <= vec3(0.0031308));
 }
-@fragment fn fs_tone_map(in: VertexOut) -> @location(0) vec4<f32> { let c=sample_source(in.uv); return vec4(linear_to_srgb(aces(c.rgb * parameters.values[0].x)), c.a); }
+struct FrameCoordinates { uv: vec2<f32>, contained: bool }
+fn frame_coordinates(position: vec2<f32>, surface: vec2<f32>, source: vec2<f32>, mode: f32) -> FrameCoordinates {
+    if mode < 0.5 { return FrameCoordinates(position / surface, true); }
+    let surface_aspect = surface.x / surface.y; let source_aspect = source.x / source.y; var size = surface;
+    if (mode < 1.5 && source_aspect > surface_aspect) || (mode > 1.5 && source_aspect < surface_aspect) { size.y = surface.x / source_aspect; } else { size.x = surface.y * source_aspect; }
+    let origin = (surface - size) * 0.5;
+    return FrameCoordinates((position - origin) / size, mode > 1.5 || (all(position >= origin) && all(position < origin + size)));
+}
+@fragment fn fs_frame_out(in: VertexOut) -> @location(0) vec4<f32> {
+    let surface=parameters.values[1].yz; let source=vec2<f32>(textureDimensions(source_texture));
+    let coordinates=frame_coordinates(in.position.xy,surface,source,parameters.values[1].x);
+    if !coordinates.contained {
+        var bg=parameters.values[2]; if parameters.values[0].w > 0.5 { bg=vec4(linear_to_srgb(bg.rgb),clamp(bg.a,0.0,1.0)); } return bg;
+    }
+    let sampled=sample_source(coordinates.uv); var rgb: vec3<f32>;
+    if parameters.values[0].x > 0.5 { rgb=max(sampled.rgb*exp2(parameters.values[0].z),vec3(0.0)); if parameters.values[0].y > 1.5 { rgb=aces(rgb); } else if parameters.values[0].y > 0.5 { rgb=rgb/(vec3(1.0)+rgb); } else { rgb=clamp(rgb,vec3(0.0),vec3(1.0)); } } else { rgb=clamp(sampled.rgb,vec3(0.0),vec3(1.0)); }
+    if parameters.values[0].w > 0.5 { rgb=linear_to_srgb(rgb); }
+    return vec4(clamp(rgb,vec3(0.0),vec3(1.0)),clamp(sampled.a,0.0,1.0));
+}
 fn grading_result(source: vec4<f32>, graded: vec3<f32>, factor: f32) -> vec4<f32> { return vec4(mix(source.rgb, graded, vec3(factor)), source.a); }
 @fragment fn fs_color_balance(in: VertexOut) -> @location(0) vec4<f32> {
     let c=sample_source(in.uv); var graded: vec3<f32>;

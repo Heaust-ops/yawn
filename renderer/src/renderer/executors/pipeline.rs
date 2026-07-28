@@ -102,7 +102,7 @@ pub(crate) fn encode_compiled<T: Scene>(
                     (
                         surface,
                         wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         },
                     )

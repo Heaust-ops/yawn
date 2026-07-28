@@ -25,7 +25,6 @@ pub enum ExecutionClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullscreenPolicy {
     Copy,
-    ToneMap,
     HdrSameExtent,
     BloomExtract,
     BloomComposite,
@@ -336,15 +335,6 @@ pub static CONTRACTS: &[Contract] = &[
         fullscreen_policy: Some(FullscreenPolicy::Copy),
     },
     Contract {
-        key: "tone_map",
-        version: 1,
-        execution: ExecutionClass::Render,
-        inputs: FULLSCREEN_COPY_IN,
-        outputs: FULLSCREEN_COPY_OUT,
-        inherently_observable: false,
-        fullscreen_policy: Some(FullscreenPolicy::ToneMap),
-    },
-    Contract {
         key: "color_balance",
         version: 1,
         execution: ExecutionClass::Render,
@@ -418,7 +408,7 @@ pub static CONTRACTS: &[Contract] = &[
     },
     Contract {
         key: "frame_out",
-        version: 1,
+        version: 2,
         execution: ExecutionClass::Frame,
         inputs: FRAME_OUT_IN,
         outputs: NONE_OUT,

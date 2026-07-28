@@ -9,6 +9,9 @@ const order = [
   "hdr",
   "culling",
   "tone",
+  "contain",
+  "reinhard",
+  "linear",
   "grading",
   "edges",
   "bloom",
@@ -61,7 +64,6 @@ const sequences = {
     ["frame_out", "frame_out"],
   ],
   tone: [
-    ["ldr", "texture"],
     ["hdr", "texture"],
     ["depth", "texture"],
     ["mesh", "mesh"],
@@ -70,17 +72,15 @@ const sequences = {
     ["ground", "pipeline"],
     ["pbr", "pipeline"],
     ["pbr_double", "pipeline"],
-    ["tone", "tone_map"],
     ["frame_out", "frame_out"],
   ],
   grading: [
-    ["balance_hdr", "texture"], ["exposure_hdr", "texture"], ["saturation_hdr", "texture"], ["mixer_hdr", "texture"], ["ldr", "texture"],
+    ["balance_hdr", "texture"], ["exposure_hdr", "texture"], ["saturation_hdr", "texture"], ["mixer_hdr", "texture"],
     ["hdr", "texture"], ["depth", "texture"], ["mesh", "mesh"], ["query", "mesh_query"], ["registry", "pipeline_registry"],
     ["ground", "pipeline"], ["pbr", "pipeline"], ["pbr_double", "pipeline"], ["balance", "color_balance"], ["exposure", "exposure_contrast"],
-    ["saturation", "saturation"], ["mixer", "channel_mixer"], ["tone", "tone_map"], ["frame_out", "frame_out"],
+    ["saturation", "saturation"], ["mixer", "channel_mixer"], ["frame_out", "frame_out"],
   ],
   edges: [
-    ["ldr", "texture"],
     ["edge_hdr", "texture"],
     ["hdr", "texture"],
     ["depth", "texture"],
@@ -91,11 +91,9 @@ const sequences = {
     ["pbr", "pipeline"],
     ["pbr_double", "pipeline"],
     ["edges", "luminance_edge"],
-    ["tone", "tone_map"],
     ["frame_out", "frame_out"],
   ],
   bloom: [
-    ["ldr", "texture"],
     ["half_a", "texture"],
     ["half_b", "texture"],
     ["half_c", "texture"],
@@ -112,11 +110,9 @@ const sequences = {
     ["blur_h", "bloom_blur"],
     ["blur_v", "bloom_blur"],
     ["composite", "bloom_composite"],
-    ["tone", "tone_map"],
     ["frame_out", "frame_out"],
   ],
   combined: [
-    ["ldr", "texture"],
     ["edge_hdr", "texture"],
     ["half_a", "texture"],
     ["half_b", "texture"],
@@ -135,10 +131,11 @@ const sequences = {
     ["blur_v", "bloom_blur"],
     ["composite", "bloom_composite"],
     ["edges", "luminance_edge"],
-    ["tone", "tone_map"],
     ["frame_out", "frame_out"],
   ],
 };
+for (const name of ["contain", "reinhard", "linear"])
+  sequences[name] = sequences.tone;
 
 test("presets have the exact canonical pipeline identities, schemas, and node sequences", () => {
   assert.deepEqual(Object.keys(presets.renderGraphPresets), order);
@@ -150,6 +147,9 @@ test("presets have the exact canonical pipeline identities, schemas, and node se
       "preset_hdr_fullscreen",
       "preset_gpu_culling",
       "preset_tone",
+      "preset_contain",
+      "preset_reinhard",
+      "preset_linear",
       "preset_grading",
       "preset_edges",
       "preset_bloom",
@@ -282,16 +282,19 @@ test("presets preserve common mesh, texture, query, pipeline, culling and post w
     node: "cull",
     socket: "isFrustumCulled",
   });
-  for (const name of ["tone", "grading", "edges", "bloom", "combined"])
+  for (const name of ["tone", "contain", "reinhard", "linear", "grading", "edges", "bloom", "combined"])
     assert.ok(!presets[name].nodes.some((node) => node.id === "copy"));
   const finalSource = {
     hdr: "pbr_double",
     culling: "pbr_double",
-    tone: "tone",
-    grading: "tone",
-    edges: "tone",
-    bloom: "tone",
-    combined: "tone",
+    tone: "pbr_double",
+    contain: "pbr_double",
+    reinhard: "pbr_double",
+    linear: "pbr_double",
+    grading: "mixer",
+    edges: "edges",
+    bloom: "composite",
+    combined: "edges",
     midnight: "pbr_double",
     ember: "pbr_double",
   };
@@ -300,21 +303,4 @@ test("presets preserve common mesh, texture, query, pipeline, culling and post w
       node: finalSource[name],
       socket: "color",
     });
-  assert.equal(
-    presets.tone.nodes.find((node) => node.id === "tone").inputs.source.node,
-    "pbr_double",
-  );
-  assert.equal(
-    presets.edges.nodes.find((node) => node.id === "tone").inputs.source.node,
-    "edges",
-  );
-  assert.equal(
-    presets.bloom.nodes.find((node) => node.id === "tone").inputs.source.node,
-    "composite",
-  );
-  assert.equal(
-    presets.combined.nodes.find((node) => node.id === "tone").inputs.source
-      .node,
-    "edges",
-  );
 });
