@@ -13,16 +13,37 @@ const texture = (format, scale = 1, heightScale = scale) => ({
   residency: "transient",
 });
 const frameOut = (hdr, options = {}) => ({ surfaceFormat: "preferred", hdrEnabled: hdr, toneMapper: "aces", exposureStops: 0, outputTransfer: "srgb", scaleMode: "stretch", filter: "linear", backgroundColor: [0, 0, 0, 1], ...options });
-const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1) => [
+const predicates = (withCulling = false) => {
+  const result = [
+    node("type_words", "separate_u32x16", { valueDefault: Array(16).fill(0) }, { value: input("mesh", "type") }),
+    node("type_bits", "separate_u32_bits", { valueDefault: 0 }, { value: input("type_words", "word0") }),
+    node("ground_class", "and", { leftDefault: true, rightDefault: true }, { left: input("type_bits", "bit0"), right: input("type_bits", "bit1") }),
+    node("visible_pbr", "and", { leftDefault: true, rightDefault: true }, { left: input("type_bits", "bit0"), right: input("type_bits", "bit2") }),
+    node("not_double", "not", { operandDefault: false }, { operand: input("type_bits", "bit3") }),
+    node("standard_class", "and", { leftDefault: true, rightDefault: true }, { left: input("visible_pbr", "value"), right: input("not_double", "value") }),
+    node("double_class", "and", { leftDefault: true, rightDefault: true }, { left: input("type_bits", "bit0"), right: input("type_bits", "bit3") }),
+  ];
+  if (!withCulling) return { nodes: result, classes: { ground: "ground_class", pbr: "standard_class", pbr_double: "double_class" } };
+  result.push(
+    node("cull", "frustum_cull", { camera: "active" }, { mesh: input("mesh", "mesh"), localAabb: input("mesh", "localAabb") }),
+    node("not_culled", "not", { operandDefault: false }, { operand: input("cull", "isFrustumCulled") }),
+    ...[["ground", "ground_class"], ["pbr", "standard_class"], ["pbr_double", "double_class"]].map(([name, classification]) =>
+      node(`${name}_final`, "and", { leftDefault: true, rightDefault: true }, { left: input(classification, "value"), right: input("not_culled", "value") })),
+  );
+  return { nodes: result, classes: { ground: "ground_final", pbr: "pbr_final", pbr_double: "pbr_double_final" } };
+};
+const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1, withCulling = false) => {
+  const classification = predicates(withCulling);
+  return [
   node("hdr", "texture", texture("rgba16_float", 1, heightScale)),
   node("depth", "texture", texture("depth32_float", 1, heightScale)),
   node("mesh", "mesh"),
-  node("query", "mesh_query", { visiblePredicate: "required_true", visibleDefault: true, frustumCulledPredicate: "any", frustumCulledDefault: false }, { mesh: input("mesh", "mesh"), isVisible: input("mesh", "isVisible") }),
-  node("registry", "pipeline_registry", {}, { pipelineIndices: input("mesh", "pipelineIndices") }),
-  node("ground", "pipeline", { pipeline: "ground_plane", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor }, { mesh: input("mesh", "mesh"), draws: input("query", "draws"), activation: input("registry", "activation"), colorTarget: input(colorTarget, "texture"), depthTarget: input("depth", "texture") }),
-  node("pbr", "pipeline", { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor }, { mesh: input("mesh", "mesh"), draws: input("query", "draws"), activation: input("registry", "activation"), colorTarget: input("ground", "color"), depthTarget: input("ground", "depth") }),
-  node("pbr_double", "pipeline", { pipeline: "gltf_standard_double_sided", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor }, { mesh: input("mesh", "mesh"), draws: input("query", "draws"), activation: input("registry", "activation"), colorTarget: input("pbr", "color"), depthTarget: input("pbr", "depth") }),
+  ...classification.nodes,
+  node("ground", "pipeline", { pipeline: "ground_plane", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.ground, "value"), colorTarget: input(colorTarget, "texture"), depthTarget: input("depth", "texture") }),
+  node("pbr", "pipeline", { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr, "value"), colorTarget: input("ground", "color"), depthTarget: input("ground", "depth") }),
+  node("pbr_double", "pipeline", { pipeline: "gltf_standard_double_sided", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr_double, "value"), colorTarget: input("pbr", "color"), depthTarget: input("pbr", "depth") }),
 ];
+};
 const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 2, graphId, revision: 1, nodes });
 const direct = (graphId, clearColor) => graph(graphId, [
   node("ldr", "texture", texture("rgba8_unorm")),
@@ -36,12 +57,7 @@ export const hdr = graph("preset_hdr_fullscreen", [
   node("frame_out", "frame_out", frameOut(true), { color: input("pbr_double", "color") }),
 ]);
 export const culling = graph("preset_gpu_culling", (() => {
-  const nodes = structuredClone(hdr.nodes);
-  nodes.splice(3, 0, node("cull", "frustum_cull", { camera: "active" }, { mesh: input("mesh", "mesh"), localAabbs: input("mesh", "localAabbs") }));
-  const query = nodes.find((item) => item.id === "query");
-  query.parameters.frustumCulledPredicate = "required_false";
-  query.inputs.isFrustumCulled = input("cull", "isFrustumCulled");
-  return nodes;
+  return [...scene("hdr", undefined, 1, true), node("frame_out", "frame_out", frameOut(true), { color: input("pbr_double", "color") })];
 })());
 const postPreset = (graphId, kind) => {
   const nodes = [...scene("hdr")];

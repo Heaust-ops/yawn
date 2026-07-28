@@ -10,13 +10,15 @@ import {
   spawnRequestedNode,
 } from "../static/render-graph/node-spawn.js";
 
-test("add-node model contains all 16 catalog types in application groups", () => {
-  assert.equal(addNodeItems.length, 16);
+test("add-node model contains all final catalog types in application groups", () => {
+  assert.equal(addNodeItems.length, 42);
   assert.deepEqual(
     [...new Set(addNodeItems.map((item) => item.group))],
-    ["Source", "Compute", "CPU preparation", "Render / post", "Frame"],
+    ["Source", "Expression", "Render / post", "Frame"],
   );
-  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 16);
+  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 42);
+  assert.ok(addNodeItems.some((item) => item.typeId === "separate_u32_bits" && item.group === "Expression"));
+  assert.ok(!addNodeItems.some((item) => ["mesh_query", "pipeline_registry"].includes(item.typeId)));
   assert.deepEqual(searchAddNodeItems("no such node"), []);
 });
 
@@ -36,7 +38,7 @@ test("allocator avoids existing and session-reserved IDs and is bounded", () => 
   );
 });
 
-test("all 16 types spawn with exact position, current version and generated ID", async () => {
+test("all final types spawn with exact position, current version and generated ID", async () => {
   let revision = 5,
     expectedType;
   const request = { compositionRevision: 5, viewPosition: { x: 12.25, y: -4 } };

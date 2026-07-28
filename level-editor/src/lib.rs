@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 use renderer::app_setup::WebApp;
 use renderer::camera::Camera;
 use renderer::message::WindowEvent;
-use renderer::render_data::{MeshCreateInfo, RenderData, RenderFlags};
+use renderer::render_data::{InstanceType, MeshCreateInfo, RenderData};
 use renderer::renderer as gpu_renderer;
 use renderer::renderer::gpu_scene::vertex_layouts;
 use renderer::renderer::scene::FrameMetadata;
@@ -193,8 +193,9 @@ impl EditorScene {
                 indices: Self::INDICES,
                 pipeline: pipeline_index,
                 material: renderer::render_data::MaterialKey::DEFAULT,
-                flags: RenderFlags::VISIBLE,
-                default_instance_flags: RenderFlags::VISIBLE,
+                default_instance_type: InstanceType {
+                    words: [1 | 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                },
                 default_transform: transform,
             })
             .expect("ground plane geometry is valid");

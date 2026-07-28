@@ -2,12 +2,12 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"YAWN");
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const CAPACITY: usize = 1024;
-pub const SLOT_WORDS: usize = 24;
-pub const SLOT_BYTES: usize = 96;
+pub const SLOT_WORDS: usize = 40;
+pub const SLOT_BYTES: usize = 160;
 pub const HEADER_BYTES: usize = 64;
-pub const SLOT_VERSION: u32 = 1;
+pub const SLOT_VERSION: u32 = 2;
 const STATE_OPEN: u32 = 0;
 const STATE_CORRUPT: u32 = 1;
 
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn malformed_slot_fails_closed() {
         for (version, request, expected) in [
-            (2, 1, RingError::SlotVersion),
+            (SLOT_VERSION + 1, 1, RingError::SlotVersion),
             (SLOT_VERSION, 0, RingError::ZeroRequest),
         ] {
             let ring = CommandRing::new();

@@ -16,8 +16,9 @@ fn info() -> MeshCreateInfo<'static> {
         indices: &INDICES,
         pipeline: PipelineKey::new(7),
         material: MaterialKey::new(11),
-        flags: RenderFlags::from_bits_retain(2),
-        default_instance_flags: RenderFlags::VISIBLE,
+        default_instance_type: InstanceType {
+            words: [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        },
         default_transform: IDENTITY_MODEL_TRANSFORM,
     }
 }
@@ -81,29 +82,42 @@ fn world_bounds_reject_projective_and_overflowing_transforms() {
 }
 
 #[test]
-fn default_instance_is_protected_and_flags_are_separate() {
+fn default_instance_is_protected_and_preserves_its_type() {
     let mut data = data();
     let created = data.create_mesh(info()).unwrap();
     assert!(data.instance(created.default_instance).unwrap().is_default);
-    assert_eq!(data.mesh(created.mesh).unwrap().flags.bits(), 2);
+    assert_eq!(
+        data.mesh(created.mesh).unwrap().default_instance_type.words[0],
+        3
+    );
     assert_eq!(
         data.mesh(created.mesh).unwrap().material,
         MaterialKey::new(11)
     );
     assert_eq!(
-        data.instance(created.default_instance).unwrap().flags,
-        RenderFlags::VISIBLE
+        data.instance(created.default_instance)
+            .unwrap()
+            .instance_type,
+        info().default_instance_type
     );
     assert_eq!(
         data.destroy_instance(created.default_instance),
         Err(RenderDataError::CannotDestroyDefaultInstance)
     );
-    data.set_mesh_flags(created.mesh, RenderFlags::NONE)
-        .unwrap();
-    assert_eq!(data.mesh(created.mesh).unwrap().flags, RenderFlags::NONE);
+    data.set_mesh_visible(created.mesh, false).unwrap();
     assert_eq!(
-        data.instance(created.default_instance).unwrap().flags,
-        RenderFlags::VISIBLE
+        data.mesh(created.mesh).unwrap().default_instance_type,
+        info().default_instance_type
+    );
+    assert_eq!(
+        data.instance(created.default_instance)
+            .unwrap()
+            .instance_type,
+        {
+            let mut expected = info().default_instance_type;
+            expected.set_visible(false);
+            expected
+        }
     );
 }
 
@@ -112,11 +126,11 @@ fn stale_mesh_and_instance_handles_are_rejected_after_reuse() {
     let mut data = data();
     let first = data.create_mesh(info()).unwrap();
     let old_instance = data
-        .create_instance(first.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+        .create_instance(first.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     data.destroy_instance(old_instance).unwrap();
     let replacement = data
-        .create_instance(first.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+        .create_instance(first.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     assert_eq!(old_instance.slot(), replacement.slot());
     assert_ne!(old_instance.generation(), replacement.generation());
@@ -133,7 +147,7 @@ fn clear_handles_all_slot_states_retains_capacity_and_never_reuses_retired() {
     let mut data = data();
     let mesh = data.create_mesh(info()).unwrap();
     let vacant = data
-        .create_instance(mesh.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+        .create_instance(mesh.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     data.destroy_instance(vacant).unwrap();
     data.instances
@@ -188,7 +202,7 @@ fn all_storage_classes_grow_and_retired_slots_force_max_checked_append() {
             instances: 1,
         }
     );
-    data.create_instance(mesh.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+    data.create_instance(mesh.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     assert_eq!(data.capacities().instances, 2);
 
@@ -302,7 +316,7 @@ fn aabb_supports_one_point_and_multiple_points() {
     let mut data = data();
     let mesh = data.create_mesh(one).unwrap();
     assert_eq!(
-        data.mesh(mesh.mesh).unwrap().aabb,
+        data.mesh(mesh.mesh).unwrap().local_aabb,
         Aabb {
             min: point[0],
             max: point[0]
@@ -310,7 +324,7 @@ fn aabb_supports_one_point_and_multiple_points() {
     );
     let mesh = data.create_mesh(info()).unwrap();
     assert_eq!(
-        data.mesh(mesh.mesh).unwrap().aabb,
+        data.mesh(mesh.mesh).unwrap().local_aabb,
         Aabb {
             min: [-1.0, -2.0, -3.0],
             max: [4.0, 2.0, 3.0],
@@ -444,7 +458,7 @@ fn normal_matrices_and_failed_transform_operations_are_transactional() {
         assert_eq!(data.instance(mesh.default_instance).unwrap(), old);
         let count = data.instance_count();
         assert_eq!(
-            data.create_instance(mesh.mesh, invalid, RenderFlags::NONE),
+            data.create_instance(mesh.mesh, invalid, InstanceType::ZERO),
             Err(RenderDataError::InvalidTransform)
         );
         assert_eq!(data.instance_count(), count);
@@ -463,14 +477,14 @@ fn destroying_mesh_invalidates_exact_owner_instances_with_reused_generations() {
     let first = data.create_mesh(info()).unwrap();
     let second = data.create_mesh(info()).unwrap();
     let first_extra = data
-        .create_instance(first.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+        .create_instance(first.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     let second_extra = data
-        .create_instance(second.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+        .create_instance(second.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     data.destroy_instance(first_extra).unwrap();
     let reused = data
-        .create_instance(second.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::NONE)
+        .create_instance(second.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
         .unwrap();
     assert_eq!(first_extra.slot(), reused.slot());
     data.destroy_mesh(first.mesh).unwrap();

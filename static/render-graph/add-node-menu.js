@@ -2,13 +2,14 @@ import { semanticCatalog } from "./catalog.js";
 
 const GROUPS = Object.freeze([
   ["source", "Source"],
+  ["expression", "Expression"],
   ["compute", "Compute"],
   ["cpu_preparation", "CPU preparation"],
   ["render", "Render / post"],
   ["frame", "Frame"],
 ]);
 
-const title = (typeId) => typeId.replaceAll("_", " ");
+const title = (typeId) => typeId.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 /** Application-owned, immutable add-node catalog model. */
 export const addNodeItems = Object.freeze(

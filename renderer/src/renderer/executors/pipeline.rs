@@ -30,7 +30,7 @@ fn encode_scene<'a, T: Scene>(
         pass.set_vertex_buffer(4, t.slice(..));
         pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
         for draw in &gpu.draws {
-            if !draw.effective_visible {
+            if !draw.instance_type.is_visible() {
                 continue;
             }
             pass.set_pipeline(pipelines.get_pipeline(draw.pipeline));
@@ -54,6 +54,7 @@ pub(crate) fn encode_compiled<T: Scene>(
     gpu: &GpuSceneCache,
     pipelines: &PipelineLibrary,
     materials: &MaterialResources,
+    indirect_commands: &wgpu::Buffer,
     mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) -> Result<(), &'static str> {
     use crate::render_graph::{ExecutionKind, NormalizedColorLoad, NormalizedDepthLoad, StoreOp};
@@ -73,16 +74,8 @@ pub(crate) fn encode_compiled<T: Scene>(
             .map(|s| &s.view)
             .ok_or(" allocation out of bounds")
     };
-    for (execution_index, prepared) in active.executions.iter().enumerate() {
-        let profile_id = &active.graph.executions[execution_index].id;
+    for prepared in &active.executions {
         match prepared {
-            PreparedExecution::PipelineRegistry => {}
-            PreparedExecution::FrustumCull => {
-                gpu.encode_frustum_cull(encoder, profile.as_deref_mut(), profile_id);
-            }
-            PreparedExecution::MeshQuery => {
-                gpu.encode_mesh_query(encoder, profile.as_deref_mut(), profile_id);
-            }
             PreparedExecution::Fullscreen {
                 execution,
                 frame_out,
@@ -159,6 +152,7 @@ pub(crate) fn encode_compiled<T: Scene>(
             PreparedExecution::Pipeline {
                 execution,
                 base,
+                predicate_ordinal,
                 variant,
             } => {
                 let execution = active
@@ -236,24 +230,19 @@ pub(crate) fn encode_compiled<T: Scene>(
                     pass.set_vertex_buffer(2, u.slice(..));
                     pass.set_vertex_buffer(4, t.slice(..));
                     pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
-                    for draw in &gpu.draws {
-                        if draw.pipeline != *base {
-                            continue;
-                        }
-                        let slot = draw.instances.start as u64;
-                        let start = slot
-                            * std::mem::size_of::<crate::renderer::gpu_scene::GpuInstance>() as u64;
-                        pass.set_vertex_buffer(3, inst.slice(start..start + 112));
+                    pass.set_vertex_buffer(3, inst.slice(..));
+                    for (draw_index, draw) in gpu.draws.iter().enumerate() {
                         pass.set_pipeline(variant);
-                        if pipelines.requires_material(draw.pipeline) {
+                        if pipelines.requires_material(*base) {
                             pass.set_bind_group(2, materials.group(draw.material), &[]);
                         }
                         pass.draw_indexed_indirect(
-                            gpu.indirect_commands
-                                .buffer
-                                .as_ref()
-                                .ok_or("indirect command buffer missing")?,
-                            slot * 20,
+                            indirect_commands,
+                            crate::renderer::instance_traversal::command_offset(
+                                *predicate_ordinal,
+                                gpu.draws.len(),
+                                draw_index,
+                            ),
                         );
                     }
                 }

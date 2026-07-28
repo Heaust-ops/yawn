@@ -120,7 +120,7 @@ pub struct PipelineLibrary {
     default_layout: Option<PipelineLayoutKey>,
     material_layout: Option<PipelineLayoutKey>,
     next_layout: u64,
-    pipeline_registry: HashMap<String, (PipelineKey, RenderPipelineKey)>,
+    named_bases: HashMap<String, (PipelineKey, RenderPipelineKey)>,
     descriptor_cache: HashMap<RenderPipelineKey, PipelineKey>,
 }
 
@@ -134,7 +134,7 @@ impl PipelineLibrary {
             default_layout: None,
             material_layout: None,
             next_layout: 0,
-            pipeline_registry: HashMap::new(),
+            named_bases: HashMap::new(),
             descriptor_cache: HashMap::new(),
         }
     }
@@ -328,7 +328,7 @@ impl PipelineLibrary {
     ) -> Result<PipelineKey, String> {
         let spec = self.compatibility_spec(name, layouts, shader, format);
         let descriptor = spec.key();
-        if let Some((_, existing)) = self.pipeline_registry.get(name) {
+        if let Some((_, existing)) = self.named_bases.get(name) {
             return Err(if existing == &descriptor {
                 format!("Pipeline '{name}' already exists")
             } else {
@@ -336,13 +336,12 @@ impl PipelineLibrary {
             });
         }
         let key = self.get_or_create_from_spec(device, &spec, Some(name));
-        self.pipeline_registry
-            .insert(name.to_owned(), (key, descriptor));
+        self.named_bases.insert(name.to_owned(), (key, descriptor));
         Ok(key)
     }
 
     pub fn find_pipeline(&self, name: &str) -> Option<PipelineKey> {
-        self.pipeline_registry.get(name).map(|v| v.0)
+        self.named_bases.get(name).map(|v| v.0)
     }
     pub fn get_or_create_pipeline(
         &mut self,
@@ -353,7 +352,7 @@ impl PipelineLibrary {
         format: wgpu::TextureFormat,
     ) -> PipelineKey {
         let wanted = self.compatibility_spec(name, layouts, shader, format).key();
-        if let Some((key, existing)) = self.pipeline_registry.get(name) {
+        if let Some((key, existing)) = self.named_bases.get(name) {
             assert_eq!(
                 existing, &wanted,
                 "Pipeline '{name}' requested with a different descriptor"

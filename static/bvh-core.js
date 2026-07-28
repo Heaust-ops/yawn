@@ -5,7 +5,7 @@ export class DerivedBvh {
     let changed = n !== this.count;
     if (!changed) for (let i = 0; i < n; i++) if (this.identity[i * 2] !== s.instanceSlot[i] || this.identity[i * 2 + 1] !== s.instanceGeneration[i] || this.meshIdentity[i * 2] !== s.instanceMeshSlot[i] || this.meshIdentity[i * 2 + 1] !== s.instanceMeshGeneration[i]) { changed = true; break; }
     this.count = n; this.identity = new Uint32Array(n * 2); this.meshIdentity = new Uint32Array(n * 2); this.pickable = new Uint8Array(n); this.bounds = new Float32Array(n * 6);
-    for (let i = 0; i < n; i++) { this.identity.set([s.instanceSlot[i], s.instanceGeneration[i]], i * 2); this.meshIdentity.set([s.instanceMeshSlot[i], s.instanceMeshGeneration[i]], i * 2); this.pickable[i] = !!s.instancePickable[i]; this.bounds.set(s.instanceWorldMin.subarray(i * 3, i * 3 + 3), i * 6); this.bounds.set(s.instanceWorldMax.subarray(i * 3, i * 3 + 3), i * 6 + 3); }
+    for (let i = 0; i < n; i++) { this.identity.set([s.instanceSlot[i], s.instanceGeneration[i]], i * 2); this.meshIdentity.set([s.instanceMeshSlot[i], s.instanceMeshGeneration[i]], i * 2); this.pickable[i] = !!(s.instanceType[i * 16] & 1); this.bounds.set(s.instanceWorldMin.subarray(i * 3, i * 3 + 3), i * 6); this.bounds.set(s.instanceWorldMax.subarray(i * 3, i * 3 + 3), i * 6 + 3); }
     changed ? this.rebuild() : this.refit();
   }
   rebuild() {

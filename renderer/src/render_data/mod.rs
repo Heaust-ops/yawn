@@ -4,7 +4,7 @@ mod range_allocator;
 pub use handle::{InstanceHandle, MeshHandle};
 
 use std::{
-    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref},
+    ops::Deref,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -58,49 +58,35 @@ impl MaterialKey {
     }
 }
 
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RenderFlags(u32);
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceType {
+    pub words: [u32; 16],
+}
 
-impl RenderFlags {
-    pub const NONE: Self = Self(0);
-    pub const VISIBLE: Self = Self(1);
+impl InstanceType {
+    pub const VISIBLE_MASK: u32 = 1;
+    pub const ZERO: Self = Self { words: [0; 16] };
+    pub const VISIBLE: Self = Self {
+        words: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
 
-    pub const fn from_bits_retain(bits: u32) -> Self {
-        Self(bits)
+    pub const fn is_visible(self) -> bool {
+        self.words[0] & Self::VISIBLE_MASK != 0
     }
-
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+    pub fn set_visible(&mut self, visible: bool) {
+        self.words[0] = (self.words[0] & !Self::VISIBLE_MASK) | visible as u32;
     }
 }
 
-impl BitOr for RenderFlags {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
+impl Default for InstanceType {
+    fn default() -> Self {
+        Self::VISIBLE
     }
 }
-impl BitOrAssign for RenderFlags {
-    fn bitor_assign(&mut self, rhs: Self) {
-        self.0 |= rhs.0;
-    }
-}
-impl BitAnd for RenderFlags {
-    type Output = Self;
-    fn bitand(self, rhs: Self) -> Self {
-        Self(self.0 & rhs.0)
-    }
-}
-impl BitAndAssign for RenderFlags {
-    fn bitand_assign(&mut self, rhs: Self) {
-        self.0 &= rhs.0;
-    }
-}
+
+const _: [(); 64] = [(); std::mem::size_of::<InstanceType>()];
+const _: [(); 4] = [(); std::mem::align_of::<InstanceType>()];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
@@ -124,8 +110,7 @@ pub struct MeshCreateInfo<'a> {
     pub indices: &'a [u32],
     pub pipeline: PipelineKey,
     pub material: MaterialKey,
-    pub flags: RenderFlags,
-    pub default_instance_flags: RenderFlags,
+    pub default_instance_type: InstanceType,
     pub default_transform: ModelTransform,
 }
 
@@ -141,8 +126,8 @@ pub struct MeshView {
     pub geometry: GeometryRange,
     pub pipeline: PipelineKey,
     pub material: MaterialKey,
-    pub flags: RenderFlags,
-    pub aabb: Aabb,
+    pub default_instance_type: InstanceType,
+    pub local_aabb: Aabb,
     pub default_instance: InstanceHandle,
 }
 
@@ -152,7 +137,7 @@ pub struct InstanceView {
     pub mesh: MeshHandle,
     pub model: ModelTransform,
     pub normal: NormalMatrix,
-    pub flags: RenderFlags,
+    pub instance_type: InstanceType,
     pub is_default: bool,
 }
 
@@ -311,7 +296,7 @@ struct MeshSoa {
     index_counts: Vec<u32>,
     pipeline_keys: Vec<PipelineKey>,
     material_keys: Vec<MaterialKey>,
-    flags: Vec<RenderFlags>,
+    default_instance_types: Vec<InstanceType>,
     aabb_mins: Vec<[f32; 3]>,
     aabb_maxs: Vec<[f32; 3]>,
     default_instance_slots: Vec<u32>,
@@ -329,7 +314,7 @@ struct InstanceSoa {
     normal_col_0: Vec<[f32; 3]>,
     normal_col_1: Vec<[f32; 3]>,
     normal_col_2: Vec<[f32; 3]>,
-    flags: Vec<RenderFlags>,
+    instance_types: Vec<InstanceType>,
 }
 
 pub struct RenderData {
@@ -369,9 +354,9 @@ impl ReplacementStage {
         &mut self,
         mesh: MeshHandle,
         model: ModelTransform,
-        flags: RenderFlags,
+        instance_type: InstanceType,
     ) -> Result<InstanceHandle, RenderDataError> {
-        self.data.create_instance(mesh, model, flags)
+        self.data.create_instance(mesh, model, instance_type)
     }
 }
 
@@ -595,7 +580,7 @@ impl RenderData {
             },
             info.pipeline,
             info.material,
-            info.flags,
+            info.default_instance_type,
             bounds,
             default_instance,
         );
@@ -604,7 +589,7 @@ impl RenderData {
             mesh,
             info.default_transform,
             normal,
-            info.default_instance_flags,
+            info.default_instance_type,
         );
         self.revision = next_revision;
         Ok(CreatedMesh {
@@ -617,19 +602,20 @@ impl RenderData {
         &mut self,
         mesh: MeshHandle,
         model: ModelTransform,
-        flags: RenderFlags,
+        instance_type: InstanceType,
     ) -> Result<InstanceHandle, RenderDataError> {
         if !self.meshes.slots.contains(mesh.slot(), mesh.generation()) {
             return Err(RenderDataError::InvalidMeshHandle);
         }
         let normal = normal_matrix(model)?;
-        affine_world_aabb(self.mesh(mesh).unwrap().aabb, model)?;
+        affine_world_aabb(self.mesh(mesh).unwrap().local_aabb, model)?;
         let next_revision = self.next_revision()?;
         let required = self.instances.slots.required_len_for_prepare()?;
         self.instances.reserve(required)?;
         let prepared = self.instances.slots.prepare()?;
         let handle = InstanceHandle::from_parts(prepared.slot, prepared.generation);
-        self.instances.commit(prepared, mesh, model, normal, flags);
+        self.instances
+            .commit(prepared, mesh, model, normal, instance_type);
         self.revision = next_revision;
         Ok(handle)
     }
@@ -699,10 +685,10 @@ impl RenderData {
         Ok(())
     }
 
-    pub fn set_mesh_flags(
+    pub fn set_mesh_visible(
         &mut self,
         handle: MeshHandle,
-        flags: RenderFlags,
+        visible: bool,
     ) -> Result<(), RenderDataError> {
         if !self
             .meshes
@@ -711,16 +697,24 @@ impl RenderData {
         {
             return Err(RenderDataError::InvalidMeshHandle);
         }
+        let owned: Vec<u32> = self
+            .instances
+            .slots
+            .occupied()
+            .filter_map(|(slot, _)| (self.instances.mesh_handle(slot) == handle).then_some(slot))
+            .collect();
         let next_revision = self.next_revision()?;
-        self.meshes.flags[handle.slot() as usize] = flags;
+        for slot in owned {
+            self.instances.instance_types[slot as usize].set_visible(visible);
+        }
         self.revision = next_revision;
         Ok(())
     }
 
-    pub fn set_instance_flags(
+    pub fn set_instance_type(
         &mut self,
         handle: InstanceHandle,
-        flags: RenderFlags,
+        instance_type: InstanceType,
     ) -> Result<(), RenderDataError> {
         if !self
             .instances
@@ -730,7 +724,25 @@ impl RenderData {
             return Err(RenderDataError::InvalidInstanceHandle);
         }
         let next_revision = self.next_revision()?;
-        self.instances.flags[handle.slot() as usize] = flags;
+        self.instances.instance_types[handle.slot() as usize] = instance_type;
+        self.revision = next_revision;
+        Ok(())
+    }
+
+    pub fn set_instance_visible(
+        &mut self,
+        handle: InstanceHandle,
+        visible: bool,
+    ) -> Result<(), RenderDataError> {
+        if !self
+            .instances
+            .slots
+            .contains(handle.slot(), handle.generation())
+        {
+            return Err(RenderDataError::InvalidInstanceHandle);
+        }
+        let next_revision = self.next_revision()?;
+        self.instances.instance_types[handle.slot() as usize].set_visible(visible);
         self.revision = next_revision;
         Ok(())
     }
@@ -749,7 +761,7 @@ impl RenderData {
         }
         let normal = normal_matrix(model)?;
         let mesh = self.instances.mesh_handle(handle.slot());
-        affine_world_aabb(self.mesh(mesh).unwrap().aabb, model)?;
+        affine_world_aabb(self.mesh(mesh).unwrap().local_aabb, model)?;
         let next_revision = self.next_revision()?;
         self.instances.set_transform(handle.slot(), model, normal);
         self.revision = next_revision;
@@ -890,7 +902,7 @@ impl MeshSoa {
             index_counts: Vec::new(),
             pipeline_keys: Vec::new(),
             material_keys: Vec::new(),
-            flags: Vec::new(),
+            default_instance_types: Vec::new(),
             aabb_mins: Vec::new(),
             aabb_maxs: Vec::new(),
             default_instance_slots: Vec::new(),
@@ -910,7 +922,7 @@ impl MeshSoa {
         reserve_vec(&mut self.index_counts, target, "meshes")?;
         reserve_vec(&mut self.pipeline_keys, target, "meshes")?;
         reserve_vec(&mut self.material_keys, target, "meshes")?;
-        reserve_vec(&mut self.flags, target, "meshes")?;
+        reserve_vec(&mut self.default_instance_types, target, "meshes")?;
         reserve_vec(&mut self.aabb_mins, target, "meshes")?;
         reserve_vec(&mut self.aabb_maxs, target, "meshes")?;
         reserve_vec(&mut self.default_instance_slots, target, "meshes")?;
@@ -925,7 +937,7 @@ impl MeshSoa {
         geometry: GeometryRange,
         pipeline: PipelineKey,
         material: MaterialKey,
-        flags: RenderFlags,
+        default_instance_type: InstanceType,
         bounds: Aabb,
         default: InstanceHandle,
     ) {
@@ -936,7 +948,7 @@ impl MeshSoa {
         resize_column(&mut self.index_counts, len, 0);
         resize_column(&mut self.pipeline_keys, len, PipelineKey::new(0));
         resize_column(&mut self.material_keys, len, MaterialKey::DEFAULT);
-        resize_column(&mut self.flags, len, RenderFlags::NONE);
+        resize_column(&mut self.default_instance_types, len, InstanceType::ZERO);
         resize_column(&mut self.aabb_mins, len, [0.0; 3]);
         resize_column(&mut self.aabb_maxs, len, [0.0; 3]);
         resize_column(&mut self.default_instance_slots, len, 0);
@@ -948,7 +960,7 @@ impl MeshSoa {
         self.index_counts[index] = geometry.index_count;
         self.pipeline_keys[index] = pipeline;
         self.material_keys[index] = material;
-        self.flags[index] = flags;
+        self.default_instance_types[index] = default_instance_type;
         self.aabb_mins[index] = bounds.min;
         self.aabb_maxs[index] = bounds.max;
         self.default_instance_slots[index] = default.slot();
@@ -968,8 +980,8 @@ impl MeshSoa {
             },
             pipeline: self.pipeline_keys[index],
             material: self.material_keys[index],
-            flags: self.flags[index],
-            aabb: Aabb {
+            default_instance_type: self.default_instance_types[index],
+            local_aabb: Aabb {
                 min: self.aabb_mins[index],
                 max: self.aabb_maxs[index],
             },
@@ -994,7 +1006,7 @@ impl InstanceSoa {
             normal_col_0: Vec::new(),
             normal_col_1: Vec::new(),
             normal_col_2: Vec::new(),
-            flags: Vec::new(),
+            instance_types: Vec::new(),
         };
         soa.reserve(initial)?;
         Ok(soa)
@@ -1013,7 +1025,7 @@ impl InstanceSoa {
         reserve_vec(&mut self.normal_col_0, target, "instances")?;
         reserve_vec(&mut self.normal_col_1, target, "instances")?;
         reserve_vec(&mut self.normal_col_2, target, "instances")?;
-        reserve_vec(&mut self.flags, target, "instances")?;
+        reserve_vec(&mut self.instance_types, target, "instances")?;
         self.slots.reserve_for_len(target, "instances")?;
         Ok(())
     }
@@ -1024,7 +1036,7 @@ impl InstanceSoa {
         mesh: MeshHandle,
         model: ModelTransform,
         normal: NormalMatrix,
-        flags: RenderFlags,
+        instance_type: InstanceType,
     ) {
         let len = prepared.slot as usize + 1;
         resize_column(&mut self.mesh_slots, len, 0);
@@ -1036,11 +1048,11 @@ impl InstanceSoa {
         resize_column(&mut self.normal_col_0, len, [0.0; 3]);
         resize_column(&mut self.normal_col_1, len, [0.0; 3]);
         resize_column(&mut self.normal_col_2, len, [0.0; 3]);
-        resize_column(&mut self.flags, len, RenderFlags::NONE);
+        resize_column(&mut self.instance_types, len, InstanceType::ZERO);
         let index = prepared.slot as usize;
         self.mesh_slots[index] = mesh.slot();
         self.mesh_generations[index] = mesh.generation();
-        self.flags[index] = flags;
+        self.instance_types[index] = instance_type;
         self.set_transform(prepared.slot, model, normal);
         self.slots.commit(prepared);
     }
@@ -1077,7 +1089,7 @@ impl InstanceSoa {
                 self.normal_col_1[index],
                 self.normal_col_2[index],
             ],
-            flags: self.flags[index],
+            instance_type: self.instance_types[index],
             is_default,
         }
     }

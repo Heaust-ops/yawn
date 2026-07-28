@@ -4,8 +4,8 @@ use gltf::Gltf;
 use ultraviolet::{Mat4, Vec3};
 
 use crate::render_data::{
-    InstanceHandle, MaterialKey, MeshCreateInfo, MeshHandle, ModelTransform, PipelineKey,
-    RenderData, RenderDataError, RenderFlags,
+    InstanceHandle, InstanceType, MaterialKey, MeshCreateInfo, MeshHandle, ModelTransform,
+    PipelineKey, RenderData, RenderDataError,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -549,8 +549,26 @@ pub fn install_imported(
             indices: &geometry.indices,
             pipeline: pipelines[usize::from(geometry.double_sided)],
             material: geometry.material,
-            flags: RenderFlags::VISIBLE,
-            default_instance_flags: RenderFlags::VISIBLE,
+            default_instance_type: InstanceType {
+                words: [
+                    1 | 4 | (geometry.double_sided as u32) * 8,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            },
             default_transform: transform,
         })?;
         handles.insert(geometry.key, created.mesh);
@@ -570,10 +588,11 @@ pub fn install_imported(
             .get(&occurrence.key)
             .ok_or_else(|| ImportError::InvalidPrimitive("occurrence has no geometry".into()))?;
         if consumed.insert(occurrence.key, ()).is_some() {
+            let instance_type = stage.mesh(mesh).unwrap().default_instance_type;
             instance_handles.push(stage.create_instance(
                 mesh,
                 occurrence.transform,
-                RenderFlags::VISIBLE,
+                instance_type,
             )?);
         }
         let geometry = geometries
@@ -584,7 +603,7 @@ pub fn install_imported(
             let point = transform.transform_point3(Vec3::from(*position));
             [point.x, point.y, point.z]
         }));
-        let local = stage.mesh(mesh).unwrap().aabb;
+        let local = stage.mesh(mesh).unwrap().local_aabb;
         for x in [local.min[0], local.max[0]] {
             for y in [local.min[1], local.max[1]] {
                 for z in [local.min[2], local.max[2]] {

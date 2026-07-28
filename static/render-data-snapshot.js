@@ -1,11 +1,11 @@
 export const SNAPSHOT = Object.freeze({
-  MAGIC: 0x504e5359, BLOB_MAGIC: 0x31534452, VERSION: 1, BYTES: 256,
-  SLOTS: 3, SLOT_BYTES: 64, SCHEMA: 1, INIT: 0, OPEN: 1, FAILED: 2,
+  MAGIC: 0x504e5359, BLOB_MAGIC: 0x32534452, VERSION: 1, BYTES: 256,
+  SLOTS: 3, SLOT_BYTES: 64, SCHEMA: 2, INIT: 0, OPEN: 1, FAILED: 2,
   CLOSED: 3, FREE: 0, WRITING: 1, READY: 2, READING: 3,
 });
-export const STREAM_NAMES = ["meshSlot", "meshGeneration", "meshFlags", "meshLocalMin", "meshLocalMax", "instanceSlot", "instanceGeneration", "instanceMeshSlot", "instanceMeshGeneration", "instanceFlags", "instanceModel", "instanceWorldMin", "instanceWorldMax", "instancePickable"];
-const COMPONENTS = [1, 1, 1, 3, 3, 1, 1, 1, 1, 1, 16, 3, 3, 1];
-const SCALARS = [1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 2, 2, 2, 1];
+export const STREAM_NAMES = ["meshSlot", "meshGeneration", "meshLocalMin", "meshLocalMax", "instanceSlot", "instanceGeneration", "instanceMeshSlot", "instanceMeshGeneration", "instanceModel", "instanceWorldMin", "instanceWorldMax", "instanceType"];
+const COMPONENTS = [1, 1, 3, 3, 1, 1, 1, 1, 16, 3, 3, 16];
+const SCALARS = [1, 1, 2, 2, 1, 1, 1, 1, 2, 2, 2, 1];
 const STRIDES = COMPONENTS.map(n => n * 4);
 
 export class SnapshotProtocolError extends Error {
@@ -70,15 +70,15 @@ export class SnapshotReader {
       if (slot[0] !== SNAPSHOT.READING || slot[1] !== latest.epoch || slot[2] !== latest.layoutEpoch || slot[5] !== latest.revisionLo || slot[6] !== latest.revisionHi || slot[9] !== SNAPSHOT.SCHEMA || slot[10] !== 64) return null;
       if (slot.slice(11).some(Boolean)) bad("BAD_SLOT_RESERVED");
       const ptr = slot[3], bytes = slot[4];
-      if (ptr % 16 || bytes < 512 || bytes % 16 || add(ptr, bytes) > this.buffer.byteLength) bad("BAD_SLOT");
+      if (ptr % 16 || bytes < 448 || bytes % 16 || add(ptr, bytes) > this.buffer.byteLength) bad("BAD_SLOT");
       const u32 = new Uint32Array(this.buffer, ptr, bytes / 4);
-      if (u32[0] !== SNAPSHOT.BLOB_MAGIC || u32[1] !== SNAPSHOT.SCHEMA || u32[2] !== 64 || u32[3] !== bytes || u32[4] !== slot[1] || u32[5] !== slot[5] || u32[6] !== slot[6] || u32[7] !== 14 || u32[8] !== 64 || u32[9] !== 32 || u32[10] !== slot[7] || u32[11] !== slot[8] || u32[12] !== 0x01020304 || u32[13] !== 3) bad("BAD_BLOB");
+      if (u32[0] !== SNAPSHOT.BLOB_MAGIC || u32[1] !== SNAPSHOT.SCHEMA || u32[2] !== 64 || u32[3] !== bytes || u32[4] !== slot[1] || u32[5] !== slot[5] || u32[6] !== slot[6] || u32[7] !== 12 || u32[8] !== 64 || u32[9] !== 32 || u32[10] !== slot[7] || u32[11] !== slot[8] || u32[12] !== 0x01020304 || u32[13] !== 3) bad("BAD_BLOB");
       if (u32[14] || u32[15]) bad("BAD_BLOB_RESERVED");
       const ranges = [], streams = {};
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 12; i++) {
         const d = 16 + i * 8, semantic = u32[d], scalar = u32[d + 1], offset = u32[d + 2], count = u32[d + 3], components = u32[d + 4], stride = u32[d + 5], width = u32[d + 6], reserved = u32[d + 7];
-        const want = i < 5 ? slot[7] : slot[8];
-        if (semantic !== i + 1 || scalar !== SCALARS[i] || count !== want || components !== COMPONENTS[i] || stride !== STRIDES[i] || width !== 4 || reserved || offset < 512 || offset % 16) bad("BAD_DESCRIPTOR");
+        const want = i < 4 ? slot[7] : slot[8];
+        if (semantic !== i + 1 || scalar !== SCALARS[i] || count !== want || components !== COMPONENTS[i] || stride !== STRIDES[i] || width !== 4 || reserved || offset < 448 || offset % 16) bad("BAD_DESCRIPTOR");
         const end = add(offset, mul(stride, count));
         if (end > bytes) bad("BAD_DESCRIPTOR_RANGE");
         if (count) ranges.push([offset, end]);

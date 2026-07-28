@@ -2,13 +2,15 @@
 
 mod compiler;
 mod contracts;
+mod expression;
 mod plan;
 mod registry;
 mod runtime;
 mod schema;
 
-pub use compiler::{compile, mesh_predicate_matches, parse_and_compile};
+pub use compiler::{compile, parse_and_compile};
 pub use contracts::*;
+pub use expression::*;
 pub use plan::*;
 pub use registry::{CompiledGraphId, Registry};
 pub use runtime::*;

@@ -36,13 +36,30 @@ test("production render graph composition passes fxnode's public validator", asy
       result.ok ? undefined : JSON.stringify(result.issues, null, 2),
     );
     assert.equal(fxNodeComposition.schemaVersion, 2);
-    assert.equal(fxNodeComposition.version, 7);
-    assert.equal(Object.keys(fxNodeComposition.nodes).length, 16);
+    assert.equal(fxNodeComposition.version, 8);
+    assert.equal(Object.keys(fxNodeComposition.nodes).length, 42);
     assert.ok(
       Object.values(fxNodeComposition.nodes).every(
         (definition) => definition.migrations.length === 0,
       ),
     );
+    for (const [type, descriptor] of Object.entries(fxNodeComposition.nodes)) {
+      const socketKeys = Object.keys(descriptor.sockets);
+      assert.equal(
+        socketKeys.length,
+        new Set(socketKeys).size,
+        `${type} has colliding input and output socket names`,
+      );
+    }
+    assert.deepEqual(fxNodeComposition.nodes.not.sockets.operand, {
+      title: "operand",
+      direction: "input",
+      type: "bool",
+      maxIncomingLinks: 1,
+      visible: true,
+      value: { type: "boolean", default: { kind: "boolean", value: false } },
+      showValue: true,
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

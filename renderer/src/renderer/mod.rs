@@ -11,12 +11,13 @@ use crate::{
     command_ring::CommandRing,
     gltf::{install_imported, ModelBounds},
     message::{camera_drag, CameraDrag, DrainEventError, MouseMessage, ResizeMessage, WindowEvent},
-    render_data::{InstanceHandle, MeshHandle, RenderData, RenderDataConfig, RenderFlags},
+    render_data::{InstanceHandle, InstanceType, MeshHandle, RenderData, RenderDataConfig},
     renderer::scene::Scene,
 };
 
 pub mod executors;
 pub mod gpu_scene;
+pub mod instance_traversal;
 pub mod material;
 pub mod pipeline_library;
 pub mod profiler;
@@ -26,6 +27,43 @@ pub mod scene_frame;
 pub use pipeline_library::PipelineLibrary;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeviceFeaturePlan {
+    hard: wgpu::Features,
+    initial: wgpu::Features,
+    profiling_enabled: bool,
+}
+
+fn device_feature_plan(profile: bool, supported: wgpu::Features) -> DeviceFeaturePlan {
+    let hard = wgpu::Features::INDIRECT_FIRST_INSTANCE;
+    let profiling = profiler::Profiler::requested_features(profile, supported);
+    DeviceFeaturePlan {
+        hard,
+        initial: hard | profiling,
+        profiling_enabled: !profiling.is_empty(),
+    }
+}
+
+#[cfg(test)]
+mod device_feature_tests {
+    use super::*;
+
+    #[test]
+    fn retry_plan_never_drops_hard_features() {
+        let hard_only = device_feature_plan(false, wgpu::Features::INDIRECT_FIRST_INSTANCE);
+        assert_eq!(hard_only.initial, hard_only.hard);
+        assert!(!hard_only.profiling_enabled);
+
+        let profiled = device_feature_plan(
+            true,
+            wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::TIMESTAMP_QUERY,
+        );
+        assert!(profiled.initial.contains(profiled.hard));
+        assert!(profiled.initial.contains(wgpu::Features::TIMESTAMP_QUERY));
+        assert!(profiled.profiling_enabled);
+    }
+}
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -748,12 +786,10 @@ struct GpuTextureSlot {
 }
 
 enum PreparedExecution {
-    FrustumCull,
-    MeshQuery,
-    PipelineRegistry,
     Pipeline {
         execution: usize,
         base: crate::render_data::PipelineKey,
+        predicate_ordinal: u32,
         variant: wgpu::RenderPipeline,
     },
     Fullscreen {
@@ -777,7 +813,7 @@ struct ActiveCompiledGraph {
 #[derive(Clone, Copy)]
 enum UploadGraph {
     Immediate,
-    Compiled(crate::render_graph::MeshQueryRuntimeKey),
+    Compiled(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -832,27 +868,27 @@ fn acquisition_action(source: FrameTargetSource, error: &wgpu::SurfaceError) -> 
 }
 
 fn classify_upload_graph(graph: &ActiveCompiledGraph) -> UploadGraph {
-    UploadGraph::Compiled(graph.runtime.allocations.query)
+    UploadGraph::Compiled(
+        graph
+            .runtime
+            .instance_traversal
+            .as_ref()
+            .is_some_and(|p| p.requires_camera),
+    )
 }
 
-fn upload_query_for_render(
-    pending: Option<UploadGraph>,
-    active: Option<UploadGraph>,
-) -> Option<crate::render_graph::MeshQueryRuntimeKey> {
+fn upload_query_for_render(pending: Option<UploadGraph>, active: Option<UploadGraph>) -> bool {
     match pending.or(active) {
-        Some(UploadGraph::Compiled(query)) => Some(query),
-        Some(UploadGraph::Immediate) | None => None,
+        Some(UploadGraph::Compiled(value)) => value,
+        Some(UploadGraph::Immediate) | None => false,
     }
 }
 
 fn resolve_culling_frustum(
-    query: crate::render_graph::MeshQueryRuntimeKey,
+    required: bool,
     read: impl FnOnce() -> Option<Result<[[f32; 4]; 6], crate::camera::FrustumError>>,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
-    if matches!(
-        query.frustum_culled,
-        crate::render_graph::RuntimePredicate::Any | crate::render_graph::RuntimePredicate::Never
-    ) {
+    if !required {
         return Ok(None);
     }
     match read() {
@@ -871,13 +907,10 @@ fn resolve_culling_frustum(
 fn update_validate_write_scene<S: scene::Scene>(
     scene: &mut S,
     queue: &wgpu::Queue,
-    query: Option<crate::render_graph::MeshQueryRuntimeKey>,
+    requires_camera: bool,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
     scene.update_cpu();
-    let planes = match query {
-        Some(query) => resolve_culling_frustum(query, || scene.frustum_planes())?,
-        None => None,
-    };
+    let planes = resolve_culling_frustum(requires_camera, || scene.frustum_planes())?;
     scene.write_uniforms(queue);
     Ok(planes)
 }
@@ -935,7 +968,7 @@ fn resolve_switch_request(
         1 => {
             let id = crate::render_graph::CompiledGraphId { slot, generation };
             // Resolve the registry entry here, before any GPU preparation or pending
-            // state mutation. Registry::get is also the Phase 4 activation gate.
+            // state mutation. Registry::get is also the compiled-graph availability gate.
             registry.get(id)?;
             Ok(ResolvedSwitchRequest::Compiled(id))
         }
@@ -980,42 +1013,29 @@ mod switch_request_tests {
 
     use super::*;
 
-    fn query(visible: crate::render_graph::RuntimePredicate) -> UploadGraph {
-        UploadGraph::Compiled(crate::render_graph::MeshQueryRuntimeKey {
-            visible,
-            frustum_culled: crate::render_graph::RuntimePredicate::Any,
-        })
+    fn graph(requires_camera: bool) -> UploadGraph {
+        UploadGraph::Compiled(requires_camera)
     }
 
     #[test]
     fn upload_selection_follows_the_graph_rendered_for_the_commit_frame() {
-        use crate::render_graph::RuntimePredicate::{Any, RequiredFalse, RequiredTrue};
-        let selected =
-            |pending, active| upload_query_for_render(pending, active).map(|query| query.visible);
+        let selected = upload_query_for_render;
+        assert!(!selected(Some(graph(false)), Some(graph(true))));
         assert_eq!(
-            selected(Some(query(RequiredFalse)), Some(query(RequiredTrue))),
-            Some(RequiredFalse)
+            selected(Some(UploadGraph::Immediate), Some(graph(true))),
+            false
         );
         assert_eq!(
-            selected(Some(UploadGraph::Immediate), Some(query(RequiredTrue))),
-            None
+            selected(Some(UploadGraph::Immediate), Some(graph(true))),
+            false
         );
-        assert_eq!(
-            selected(Some(UploadGraph::Immediate), Some(query(RequiredTrue))),
-            None
-        );
-        assert_eq!(
-            selected(None, Some(query(RequiredTrue))),
-            Some(RequiredTrue)
-        );
-        assert_eq!(selected(None, Some(UploadGraph::Immediate)), None);
-        assert_eq!(selected(None, None), None);
-        assert_eq!(selected(Some(query(Any)), None), Some(Any));
+        assert!(selected(None, Some(graph(true))));
+        assert!(!selected(None, Some(UploadGraph::Immediate)));
+        assert!(!selected(None, None));
     }
 
     #[test]
     fn frame_target_precedence_and_pending_resize_upload_are_exact() {
-        use crate::render_graph::RuntimePredicate::{RequiredFalse, RequiredTrue};
         assert_eq!(
             select_frame_target_source(true, true, true),
             FrameTargetSource::PendingSwitch
@@ -1032,14 +1052,10 @@ mod switch_request_tests {
             select_frame_target_source(false, false, false),
             FrameTargetSource::Immediate
         );
-        let pending_resize = query(RequiredFalse);
-        let active = query(RequiredTrue);
-        assert_eq!(
-            upload_query_for_render(Some(pending_resize), Some(active))
-                .unwrap()
-                .visible,
-            RequiredFalse
-        );
+        assert!(!upload_query_for_render(
+            Some(graph(false)),
+            Some(graph(true))
+        ));
     }
 
     #[test]
@@ -1063,15 +1079,10 @@ mod switch_request_tests {
     }
 
     #[test]
-    fn frustum_preflight_skips_any_and_distinguishes_missing_from_invalid() {
-        use crate::render_graph::RuntimePredicate::{Any, RequiredFalse, RequiredTrue};
-        let query = |frustum_culled| crate::render_graph::MeshQueryRuntimeKey {
-            visible: RequiredTrue,
-            frustum_culled,
-        };
+    fn frustum_preflight_uses_boolean_traversal_requirement() {
         let mut reads = 0;
         assert_eq!(
-            resolve_culling_frustum(query(Any), || {
+            resolve_culling_frustum(false, || {
                 reads += 1;
                 None
             })
@@ -1082,9 +1093,9 @@ mod switch_request_tests {
             reads, 0,
             "inactive frustum filtering must not read the camera"
         );
-        let missing = resolve_culling_frustum(query(RequiredFalse), || None).unwrap_err();
+        let missing = resolve_culling_frustum(true, || None).unwrap_err();
         assert!(missing.message.contains("no camera"));
-        let invalid = resolve_culling_frustum(query(RequiredFalse), || {
+        let invalid = resolve_culling_frustum(true, || {
             Some(Err(crate::camera::FrustumError::Degenerate { plane: 2 }))
         })
         .unwrap_err();
@@ -1265,10 +1276,11 @@ pub struct Renderer<T: scene::Scene> {
     snapshot_init_sent: bool,
     scene_frame: scene_frame::SceneFrameCache,
     gpu_scene: gpu_scene::GpuSceneCache,
+    instance_traversal: Option<instance_traversal::TraversalGpu>,
     materials: material::MaterialResources,
     pub(crate) command_ring: Option<&'static CommandRing>,
     pending_replies: Vec<JsValue>,
-    gpu_error: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gpu_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     framing_radius: f32,
     graph_registry: crate::render_graph::Registry,
     active_compiled: Option<ActiveCompiledGraph>,
@@ -1471,19 +1483,39 @@ impl<T: Scene + 'static> Renderer<T> {
                     let result = js_sys::Object::new();
                     let meshes = js_sys::Array::new();
                     for h in installed.meshes {
-                        meshes.push(&js_sys::Array::of2(
-                            &h.slot().into(),
-                            &h.generation().into(),
-                        ));
+                        let item = js_sys::Object::new();
+                        js_sys::Reflect::set(
+                            &item,
+                            &"handle".into(),
+                            &js_sys::Array::of2(&h.slot().into(), &h.generation().into()),
+                        )
+                        .unwrap();
+                        let ty = self
+                            .render_data
+                            .mesh(h)
+                            .unwrap()
+                            .default_instance_type
+                            .words;
+                        js_sys::Reflect::set(
+                            &item,
+                            &"defaultType".into(),
+                            &js_sys::Array::from_iter(ty.into_iter().map(JsValue::from)),
+                        )
+                        .unwrap();
+                        meshes.push(&item);
                     }
                     js_sys::Reflect::set(&result, &"meshes".into(), &meshes).unwrap();
                     Ok(result.into())
                 }
                 2 => {
                     self.render_data
-                        .set_mesh_flags(
+                        .set_mesh_visible(
                             MeshHandle::from_parts(words[2], words[3]),
-                            RenderFlags::from_bits_retain(words[4]),
+                            match words[4] {
+                                0 => false,
+                                1 => true,
+                                _ => return Err("INVALID_VISIBILITY"),
+                            },
                         )
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(JsValue::UNDEFINED)
@@ -1496,15 +1528,25 @@ impl<T: Scene + 'static> Renderer<T> {
                     }
                     let h = self
                         .render_data
-                        .create_instance(mesh, m, RenderFlags::from_bits_retain(words[20]))
+                        .create_instance(
+                            mesh,
+                            m,
+                            InstanceType {
+                                words: std::array::from_fn(|i| words[20 + i]),
+                            },
+                        )
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(js_sys::Array::of2(&h.slot().into(), &h.generation().into()).into())
                 }
                 4 => {
                     self.render_data
-                        .set_instance_flags(
+                        .set_instance_visible(
                             InstanceHandle::from_parts(words[2], words[3]),
-                            RenderFlags::from_bits_retain(words[4]),
+                            match words[4] {
+                                0 => false,
+                                1 => true,
+                                _ => return Err("INVALID_VISIBILITY"),
+                            },
                         )
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(JsValue::UNDEFINED)
@@ -1523,6 +1565,17 @@ impl<T: Scene + 'static> Renderer<T> {
                 6 => {
                     self.render_data
                         .destroy_instance(InstanceHandle::from_parts(words[2], words[3]))
+                        .map_err(|e| render_data_error_code(&e))?;
+                    Ok(JsValue::UNDEFINED)
+                }
+                10 => {
+                    self.render_data
+                        .set_instance_type(
+                            InstanceHandle::from_parts(words[2], words[3]),
+                            InstanceType {
+                                words: std::array::from_fn(|i| words[4 + i]),
+                            },
+                        )
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(JsValue::UNDEFINED)
                 }
@@ -1765,8 +1818,7 @@ impl<T: Scene + 'static> Renderer<T> {
             let contract = crate::render_graph::contract(&execution.executor.key)
                 .ok_or_else(|| fail("executor contract missing"))?;
             match execution.executor.key.as_str() {
-                "frustum_cull" => executions.push(PreparedExecution::FrustumCull),
-                "mesh_query" => executions.push(PreparedExecution::MeshQuery),
+                "frustum_cull" => continue,
                 _ if execution.executor.key == "frame_out"
                     || contract.fullscreen_policy.is_some() =>
                 {
@@ -1924,7 +1976,6 @@ impl<T: Scene + 'static> Renderer<T> {
                         _uniform: uniform,
                     });
                 }
-                "pipeline_registry" => executions.push(PreparedExecution::PipelineRegistry),
                 "pipeline" => {
                     let ExecutionKind::Render {
                         color_attachments,
@@ -2009,6 +2060,14 @@ impl<T: Scene + 'static> Renderer<T> {
                     executions.push(PreparedExecution::Pipeline {
                         execution: index,
                         base,
+                        predicate_ordinal: runtime
+                            .instance_traversal
+                            .as_ref()
+                            .and_then(|p| {
+                                p.pipelines.iter().find(|v| v.execution as usize == index)
+                            })
+                            .map(|p| p.ordinal)
+                            .ok_or_else(|| fail("pipeline predicate missing"))?,
                         variant,
                     });
                 }
@@ -2049,7 +2108,13 @@ impl<T: Scene + 'static> Renderer<T> {
         // Candidate construction allocates GPU resources, so the live scene preflight
         // belongs here: this is the earliest boundary with both the runtime query and
         // scene access, and precedes GPU work and all pending/in-flight mutation.
-        resolve_culling_frustum(runtime.allocations.query, || self.scene.frustum_planes())?;
+        resolve_culling_frustum(
+            runtime
+                .instance_traversal
+                .as_ref()
+                .is_some_and(|p| p.requires_camera),
+            || self.scene.frustum_planes(),
+        )?;
         let restart_graph = graph.clone();
         self.next_preparation_token = self.next_preparation_token.wrapping_add(1).max(1);
         let token = self.next_preparation_token;
@@ -2153,9 +2218,13 @@ impl<T: Scene + 'static> Renderer<T> {
             .await
             .unwrap();
 
-        let optional_features = profiler::Profiler::requested_features(profile, adapter.features());
+        let feature_plan = device_feature_plan(profile, adapter.features());
+        assert!(
+            adapter.features().contains(feature_plan.hard),
+            "WebGPU adapter lacks required indirect-first-instance support"
+        );
         let descriptor = wgpu::DeviceDescriptor {
-            required_features: optional_features,
+            required_features: feature_plan.initial,
             required_limits: wgpu::Limits::default(),
             label: None,
             memory_hints: wgpu::MemoryHints::default(),
@@ -2164,7 +2233,7 @@ impl<T: Scene + 'static> Renderer<T> {
 
         let (device, queue) = match adapter.request_device(&descriptor).await {
             Ok(result) => result,
-            Err(error) if !optional_features.is_empty() => {
+            Err(error) if feature_plan.profiling_enabled => {
                 log::warn!("timestamp-enabled device request failed, retrying baseline: {error}");
                 adapter = instance
                     .request_adapter(&wgpu::RequestAdapterOptions {
@@ -2174,8 +2243,12 @@ impl<T: Scene + 'static> Renderer<T> {
                     })
                     .await
                     .expect("surface-compatible adapter required for baseline device");
+                assert!(
+                    adapter.features().contains(feature_plan.hard),
+                    "reacquired WebGPU adapter lacks required indirect-first-instance support"
+                );
                 let baseline = wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
+                    required_features: feature_plan.hard,
                     required_limits: wgpu::Limits::default(),
                     label: None,
                     memory_hints: wgpu::MemoryHints::default(),
@@ -2185,15 +2258,23 @@ impl<T: Scene + 'static> Renderer<T> {
             }
             Err(error) => panic!("baseline WebGPU device request failed: {error}"),
         };
+        assert!(
+            device.features().contains(feature_plan.hard),
+            "WebGPU device lacks required indirect-first-instance support"
+        );
         info!("Adapter info: {:?}", adapter.get_info());
         info!("Adapter features: {:?}", adapter.features());
         info!("Adapter limits: {:?}", adapter.limits());
         let profiler = profiler::Profiler::new(profile, &device, &queue).await;
-        let gpu_error = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gpu_error = std::sync::Arc::new(std::sync::Mutex::new(None));
         let error_flag = gpu_error.clone();
         device.on_uncaptured_error(Box::new(move |error| {
-            error_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            log::error!("Uncaptured GPU error: {error}");
+            let message = error.to_string();
+            let mut first = error_flag.lock().unwrap();
+            if first.is_none() {
+                *first = Some(message.clone());
+            }
+            log::error!("Uncaptured GPU error: {message}");
         }));
 
         let surface_caps = surface.get_capabilities(&adapter);
@@ -2244,6 +2325,7 @@ impl<T: Scene + 'static> Renderer<T> {
             snapshot_init_sent: false,
             scene_frame: Default::default(),
             gpu_scene: Default::default(),
+            instance_traversal: None,
             materials,
             command_ring: None,
             pending_replies: Vec::new(),
@@ -2266,12 +2348,10 @@ impl<T: Scene + 'static> Renderer<T> {
             return;
         }
         self.drain_preparation_completions();
-        if self
-            .gpu_error
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
+        let gpu_error = self.gpu_error.lock().unwrap().take();
+        if let Some(error) = gpu_error {
             self.halted = true;
-            self.post_fatal("GPU_VALIDATION_FAILED", "uncaptured WebGPU error");
+            self.post_fatal("GPU_VALIDATION_FAILED", &error);
             return;
         }
         if !self.drain_commands() {
@@ -2295,8 +2375,16 @@ impl<T: Scene + 'static> Renderer<T> {
                 &"controlPtr".into(),
                 &self.snapshot.control_ptr().into(),
             );
-            let _ = js_sys::Reflect::set(&message, &"controlVersion".into(), &1.into());
-            let _ = js_sys::Reflect::set(&message, &"schemaVersion".into(), &1.into());
+            let _ = js_sys::Reflect::set(
+                &message,
+                &"controlVersion".into(),
+                &crate::shared_snapshot::CONTROL_VERSION.into(),
+            );
+            let _ = js_sys::Reflect::set(
+                &message,
+                &"schemaVersion".into(),
+                &crate::shared_snapshot::SCHEMA.into(),
+            );
             let _ = global.post_message(&message);
             self.snapshot_init_sent = true;
         }
@@ -2351,25 +2439,13 @@ impl<T: Scene + 'static> Renderer<T> {
                 return;
             }
         };
-        let upload = if let Some(query) = query {
-            self.gpu_scene.upload_with_query(
-                &self.context.device,
-                &self.context.queue,
-                frame_plan,
-                query,
-            )
-        } else {
-            self.gpu_scene
-                .upload(&self.context.device, &self.context.queue, frame_plan)
-        };
+        let upload = self
+            .gpu_scene
+            .upload(&self.context.device, &self.context.queue, frame_plan);
         if let Err(error) = upload {
             log::error!("GPU scene upload failed: {error}");
             self.post_fatal("GPU_UPLOAD_FAILED", &error);
             return;
-        }
-        if let Some(query) = query {
-            self.gpu_scene
-                .write_culling_params(&self.context.queue, planes, query);
         }
 
         // Candidate publication is transactional: configure its complete contract at
@@ -2463,16 +2539,53 @@ impl<T: Scene + 'static> Renderer<T> {
             ),
         });
         let encode_result = if let Some(active) = rendering_compiled {
-            executors::encode_compiled(
-                &mut encoder,
-                &texture_view,
-                active,
-                &self.scene,
-                &self.gpu_scene,
-                &self.resources,
-                &self.materials,
-                profile_frame.as_mut(),
-            )
+            (|| -> Result<(), &'static str> {
+                let plan = active
+                    .runtime
+                    .instance_traversal
+                    .as_ref()
+                    .ok_or("compiled graph instance traversal missing")?;
+                let rebuild = self.instance_traversal.as_ref().is_none_or(|traversal| {
+                    !traversal.matches(
+                        active.id,
+                        plan,
+                        self.gpu_scene.buffer_epoch,
+                        self.gpu_scene.draws.len(),
+                    )
+                });
+                if rebuild {
+                    self.instance_traversal = Some(
+                        instance_traversal::TraversalGpu::create(
+                            &self.context.device,
+                            active.id,
+                            plan,
+                            &self.gpu_scene,
+                        )
+                        .map_err(|error| {
+                            log::error!("instance traversal preparation failed: {error}");
+                            "instance traversal preparation failed"
+                        })?,
+                    );
+                }
+                self.instance_traversal.as_ref().unwrap().encode(
+                    &mut encoder,
+                    &self.context.queue,
+                    planes,
+                    self.gpu_scene.draws.len() as u32,
+                    profile_frame.as_mut(),
+                );
+                executors::encode_compiled(
+                    &mut encoder,
+                    &texture_view,
+                    active,
+                    &self.scene,
+                    &self.gpu_scene,
+                    &self.resources,
+                    &self.materials,
+                    &self.instance_traversal.as_ref().unwrap().commands,
+                    profile_frame.as_mut(),
+                )
+            })()
         } else {
             executors::encode_immediate(
                 &mut encoder,
@@ -2620,12 +2733,7 @@ impl<T: Scene + 'static> Renderer<T> {
                     .unwrap_or(0)
                     .into(),
             ),
-            (
-                "gpuError",
-                self.gpu_error
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    .into(),
-            ),
+            ("gpuError", self.gpu_error.lock().unwrap().is_some().into()),
         ] {
             let _ = js_sys::Reflect::set(&telemetry, &key.into(), &value);
         }

@@ -1,8 +1,8 @@
 import { SnapshotReader } from "./render-data-snapshot.js";
 
 export const VISIBLE = 1;
-const HEADER_WORDS = 16, SLOT_WORDS = 24, CAPACITY = 1024, SLOT_VERSION = 1;
-const OP = { IMPORT_GLB: 1, MESH_FLAGS: 2, CREATE_INSTANCE: 3, INSTANCE_FLAGS: 4, INSTANCE_TRANSFORM: 5, DESTROY_INSTANCE: 6, COMPILE_GRAPH: 7, DROP_GRAPH: 8, SWITCH_GRAPH: 9 };
+const HEADER_WORDS = 16, SLOT_WORDS = 40, CAPACITY = 1024, SLOT_VERSION = 2;
+const OP = { IMPORT_GLB: 1, MESH_FLAGS: 2, CREATE_INSTANCE: 3, INSTANCE_VISIBLE: 4, INSTANCE_TRANSFORM: 5, DESTROY_INSTANCE: 6, COMPILE_GRAPH: 7, DROP_GRAPH: 8, SWITCH_GRAPH: 9, SET_INSTANCE_TYPE: 10 };
 const HANDLE_TOKEN = Symbol("renderer handle");
 
 export class RendererError extends Error {
@@ -20,7 +20,7 @@ export class RendererClient {
     this.#bridge = bridge;
     this.#worker = bridge.worker;
     this.#refreshViews();
-    if (Atomics.load(this.#header, 0) !== 0x4e574159 || Atomics.load(this.#header, 1) !== 1 || Atomics.load(this.#header, 2) !== CAPACITY || Atomics.load(this.#header, 3) !== SLOT_WORDS) {
+    if (Atomics.load(this.#header, 0) !== 0x4e574159 || Atomics.load(this.#header, 1) !== 2 || Atomics.load(this.#header, 2) !== CAPACITY || Atomics.load(this.#header, 3) !== SLOT_WORDS) {
       try { this.#worker?.terminate?.(); } catch { /* best effort */ }
       try { bridge?.free?.(); } catch { /* best effort */ }
       throw new RendererError("PROTOCOL_MISMATCH");
@@ -70,9 +70,9 @@ export class RendererClient {
       this.#fail(message.code || "WORKER_FATAL");
     } else if (message?.type === "snapshot-init") {
       try {
-        if (message.controlVersion !== 1 || message.schemaVersion !== 1) throw new Error("version");
+        if (message.controlVersion !== 1 || message.schemaVersion !== 2) throw new Error("version");
         this.#snapshotReader = new SnapshotReader(this.#bridge.memory, message.controlPtr);
-        this.#bvh?.postMessage({type:"init",memory:this.#bridge.memory,controlPtr:message.controlPtr,controlVersion:1,schemaVersion:1});
+        this.#bvh?.postMessage({type:"init",memory:this.#bridge.memory,controlPtr:message.controlPtr,controlVersion:1,schemaVersion:2});
       } catch { this.#disablePicking("PICK_PROTOCOL_MISMATCH"); }
     } else if (message?.type === "snapshot-published") {
       try { this.#snapshotEpoch=this.#snapshotReader?.latest().epoch||0; this.#bvh?.postMessage({type:"update",epoch:this.#snapshotEpoch}); } catch { this.#disablePicking("PICK_PROTOCOL_MISMATCH"); }
@@ -157,18 +157,20 @@ export class RendererClient {
     return promise;
   }
 
-  #mesh(handle) {
+  #mesh(handle, defaultType = Array(16).fill(0)) {
     return new Mesh(HANDLE_TOKEN,
-      visible => this.#enqueue(OP.MESH_FLAGS, [...handle, visible ? VISIBLE : 0]),
-      async (transform, visible) => {
-        const result = await this.#enqueue(OP.CREATE_INSTANCE, [...handle, ...floatWords(transform), visible ? VISIBLE : 0]);
+      visible => { validateVisible(visible); return this.#enqueue(OP.MESH_FLAGS, [...handle, visible ? 1 : 0]); },
+      async (transform, {type = defaultType, visible} = {}) => {
+        type = typeWords(type); if (visible !== undefined) { validateVisible(visible); type[0] = (type[0] & ~1) | Number(visible); }
+        const result = await this.#enqueue(OP.CREATE_INSTANCE, [...handle, ...floatWords(transform), ...type]);
         return this.#instance(result);
       });
   }
 
   #instance(handle) {
     return new Instance(HANDLE_TOKEN,
-      visible => this.#enqueue(OP.INSTANCE_FLAGS, [...handle, visible ? VISIBLE : 0]),
+      visible => { validateVisible(visible); return this.#enqueue(OP.INSTANCE_VISIBLE, [...handle, visible ? 1 : 0]); },
+      type => this.#enqueue(OP.SET_INSTANCE_TYPE, [...handle, ...typeWords(type)]),
       transform => this.#enqueue(OP.INSTANCE_TRANSFORM, [...handle, ...floatWords(transform)]),
       () => this.#enqueue(OP.DESTROY_INSTANCE, [...handle]));
   }
@@ -183,11 +185,9 @@ export class RendererClient {
     else throw new TypeError("GLB source must be URL, File, or ArrayBuffer");
     if (this.#disposed) throw new RendererError("DISPOSED");
     const result = await this.#withPayload(buffer, OP.IMPORT_GLB, [framing === "interior" ? 1 : 0]);
-    return result.meshes.map(handle => this.#mesh(handle));
+    return result.meshes.map(item => this.#mesh(item.handle, item.defaultType));
   }
 
-  /** Compatibility alias for the original opcode-1 API. */
-  importGlb(source, options) { return this.replaceSceneGlb(source, options); }
 
   async #withPayload(buffer, opcode, words = []) {
     if (this.#disposed) throw new RendererError("DISPOSED");
@@ -260,6 +260,9 @@ function validateCompiledId(compiledId) {
   if (!Array.isArray(compiledId) || compiledId.length !== 2 || compiledId.some(word => !Number.isInteger(word) || word < 0 || word > 0xffffffff)) throw new TypeError("compiledId must contain exactly two uint32 values");
 }
 
+function validateVisible(value) { if (typeof value !== "boolean") throw new TypeError("visible must be boolean"); }
+function typeWords(words) { if (!words || words.length !== 16 || [...words].some(x => !Number.isInteger(x) || x < 0 || x > 0xffffffff)) throw new TypeError("type must contain exactly 16 uint32 values"); return Array.from(words, x => x >>> 0); }
+
 function floatWords(matrix) {
   if (!matrix || matrix.length !== 16) throw new TypeError("transform must contain 16 numbers");
   return [...new Int32Array(new Float32Array(matrix).buffer)];
@@ -273,19 +276,21 @@ class Mesh {
     this.#createInstance = createInstance;
   }
   setVisible(visible) { return this.#setVisible(visible); }
-  createInstance(transform, visible = true) { return this.#createInstance(transform, visible); }
+  createInstance(transform, options = {}) { return this.#createInstance(transform, options); }
 }
 
 class Instance {
-  #setVisible; #setTransform; #destroy; #dead = false;
-  constructor(token, setVisible, setTransform, destroy) {
+  #setVisible; #setType; #setTransform; #destroy; #dead = false;
+  constructor(token, setVisible, setType, setTransform, destroy) {
     if (token !== HANDLE_TOKEN) throw new TypeError("Instance cannot be constructed directly");
     this.#setVisible = setVisible;
+    this.#setType = setType;
     this.#setTransform = setTransform;
     this.#destroy = destroy;
   }
   #live() { if (this.#dead) throw new RendererError("STALE_HANDLE"); }
   setVisible(visible) { this.#live(); return this.#setVisible(visible); }
+  setType(words) { this.#live(); return this.#setType(words); }
   setTransform(transform) { this.#live(); return this.#setTransform(transform); }
   async destroy() { this.#live(); await this.#destroy(); this.#dead = true; }
 }

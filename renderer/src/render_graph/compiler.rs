@@ -21,20 +21,13 @@ struct CullParameters {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct QueryParameters {
-    visible_predicate: TriStatePredicate,
-    visible_default: bool,
-    frustum_culled_predicate: TriStatePredicate,
-    frustum_culled_default: bool,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct PipelineParameters {
     pipeline: String,
     depth_compare: CompareFunction,
     depth_write_enabled: bool,
     clear_depth: f32,
     clear_color: [f64; 4],
+    predicate_default: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -146,7 +139,6 @@ struct OutputKey(usize, u16);
 #[derive(Clone, Copy)]
 struct BoundInput {
     producer: OutputKey,
-    active: bool,
 }
 #[derive(Clone)]
 struct DependencyEdge {
@@ -229,15 +221,6 @@ fn validate_name_grammar(s: &str, path: impl Into<String>) -> Result<(), GraphEr
         Err(error("GRAPH_INVALID_ID", "invalid identifier", path))
     } else {
         Ok(())
-    }
-}
-
-pub fn mesh_predicate_matches(predicate: RuntimePredicate, flag: bool) -> bool {
-    match predicate {
-        RuntimePredicate::Any => true,
-        RuntimePredicate::RequiredTrue => flag,
-        RuntimePredicate::RequiredFalse => !flag,
-        RuntimePredicate::Never => false,
     }
 }
 
@@ -424,6 +407,89 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
             $variant
         }};
     }
+    fn literal(value: &serde_json::Value, ty: SemanticType) -> Option<TypedLiteral> {
+        let floats = |value: &serde_json::Value, n: usize| -> Option<Vec<f32>> {
+            let values = value.as_array()?;
+            if values.len() != n {
+                return None;
+            }
+            values
+                .iter()
+                .map(|value| value.as_f64().map(|value| value as f32))
+                .collect::<Option<Vec<_>>>()
+                .filter(|values| values.iter().all(|value| value.is_finite()))
+        };
+        let vector = |n| floats(value, n);
+        Some(match ty {
+            SemanticType::Bool => TypedLiteral::Bool(value.as_bool()?),
+            SemanticType::F32 => {
+                let value = value.as_f64()? as f32;
+                if !value.is_finite() {
+                    return None;
+                }
+                TypedLiteral::F32(value)
+            }
+            SemanticType::U32 => TypedLiteral::U32(value.as_u64()?.try_into().ok()?),
+            SemanticType::Vec2 => TypedLiteral::Vec2(vector(2)?.try_into().ok()?),
+            SemanticType::Vec3 => TypedLiteral::Vec3(vector(3)?.try_into().ok()?),
+            SemanticType::Vec4 => TypedLiteral::Vec4(vector(4)?.try_into().ok()?),
+            SemanticType::U32x16 => TypedLiteral::U32x16(
+                value
+                    .as_array()?
+                    .iter()
+                    .map(|v| v.as_u64()?.try_into().ok())
+                    .collect::<Option<Vec<u32>>>()?
+                    .try_into()
+                    .ok()?,
+            ),
+            SemanticType::LocalAabb => TypedLiteral::LocalAabb {
+                min: floats(value.get("min")?, 3)?.try_into().ok()?,
+                max: floats(value.get("max")?, 3)?.try_into().ok()?,
+            },
+            ty @ (SemanticType::Mat2 | SemanticType::Mat3 | SemanticType::Mat4) => {
+                let n = match ty {
+                    SemanticType::Mat2 => 2,
+                    SemanticType::Mat3 => 3,
+                    _ => 4,
+                };
+                let columns = value.as_array()?;
+                if columns.len() != n {
+                    return None;
+                }
+                let columns = columns
+                    .iter()
+                    .map(|v| floats(v, n))
+                    .collect::<Option<Vec<_>>>()?;
+                match ty {
+                    SemanticType::Mat2 => TypedLiteral::Mat2(
+                        columns
+                            .into_iter()
+                            .map(|v| v.try_into().ok())
+                            .collect::<Option<Vec<_>>>()?
+                            .try_into()
+                            .ok()?,
+                    ),
+                    SemanticType::Mat3 => TypedLiteral::Mat3(
+                        columns
+                            .into_iter()
+                            .map(|v| v.try_into().ok())
+                            .collect::<Option<Vec<_>>>()?
+                            .try_into()
+                            .ok()?,
+                    ),
+                    _ => TypedLiteral::Mat4(
+                        columns
+                            .into_iter()
+                            .map(|v| v.try_into().ok())
+                            .collect::<Option<Vec<_>>>()?
+                            .try_into()
+                            .ok()?,
+                    ),
+                }
+            }
+            SemanticType::MeshData | SemanticType::Texture => return None,
+        })
+    }
     Ok(match node.executor.key.as_str() {
         "mesh" => empty!(NormalizedParameters::Mesh),
         "frustum_cull" => {
@@ -607,37 +673,6 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 descriptor: normalize_texture(p.texture, &base)?,
             }
         }
-        "mesh_query" => {
-            let p: QueryParameters =
-                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
-            let fold = |predicate, default, linked| match (predicate, linked, default) {
-                (TriStatePredicate::Any, _, _) => RuntimePredicate::Any,
-                (TriStatePredicate::RequiredTrue, true, _) => RuntimePredicate::RequiredTrue,
-                (TriStatePredicate::RequiredFalse, true, _) => RuntimePredicate::RequiredFalse,
-                (TriStatePredicate::RequiredTrue, false, true)
-                | (TriStatePredicate::RequiredFalse, false, false) => RuntimePredicate::Any,
-                _ => RuntimePredicate::Never,
-            };
-            let mut visible = fold(
-                p.visible_predicate,
-                p.visible_default,
-                node.inputs.contains_key("isVisible"),
-            );
-            let mut culled = fold(
-                p.frustum_culled_predicate,
-                p.frustum_culled_default,
-                node.inputs.contains_key("isFrustumCulled"),
-            );
-            if visible == RuntimePredicate::Never || culled == RuntimePredicate::Never {
-                visible = RuntimePredicate::Never;
-                culled = RuntimePredicate::Never;
-            }
-            NormalizedParameters::MeshQuery {
-                visible_predicate: visible,
-                frustum_culled_predicate: culled,
-            }
-        }
-        "pipeline_registry" => empty!(NormalizedParameters::PipelineRegistry),
         "pipeline" => {
             let p: PipelineParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
@@ -673,7 +708,49 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 depth_write_enabled: p.depth_write_enabled,
                 clear_depth: p.clear_depth,
                 clear_color: p.clear_color,
+                predicate_default: p.predicate_default,
             }
+        }
+        key if contract(key)
+            .is_some_and(|contract| contract.execution == ExecutionClass::Expression) =>
+        {
+            let contract = contract(key).unwrap();
+            let object = node.parameters.as_object().ok_or_else(|| {
+                error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "parameters must be an object",
+                    base.clone(),
+                )
+            })?;
+            if object.len() != contract.inputs.len() {
+                return Err(error(
+                    "GRAPH_PARAMETERS_INVALID",
+                    "expression defaults must exactly match inputs",
+                    base,
+                ));
+            }
+            let mut defaults = Vec::with_capacity(contract.inputs.len());
+            for input in contract.inputs {
+                let key = format!("{}Default", input.name);
+                let value = object.get(&key).ok_or_else(|| {
+                    error(
+                        "GRAPH_PARAMETERS_INVALID",
+                        "missing expression default",
+                        format!("{base}.{key}"),
+                    )
+                })?;
+                let TypeConstraint::Exact(ty) = input.accepted else {
+                    unreachable!()
+                };
+                defaults.push(literal(value, ty).ok_or_else(|| {
+                    error(
+                        "GRAPH_PARAMETERS_INVALID",
+                        "invalid typed expression default",
+                        format!("{base}.{key}"),
+                    )
+                })?);
+            }
+            NormalizedParameters::ExpressionDefaults { defaults }
         }
         _ => unreachable!(),
     })
@@ -846,13 +923,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     }
     for (i, n) in graph.nodes.iter().enumerate() {
         for input in contracts[i].inputs {
-            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { visible_predicate, frustum_culled_predicate } if (input.name == "isVisible" && matches!(visible_predicate, RuntimePredicate::Any | RuntimePredicate::Never)) || (input.name == "isFrustumCulled" && matches!(frustum_culled_predicate, RuntimePredicate::Any | RuntimePredicate::Never)));
             if !n.inputs.contains_key(input.name) {
-                if input.cardinality == InputCardinality::RequiredOne
-                    || (!inactive
-                        && matches!(params[i], NormalizedParameters::MeshQuery { .. })
-                        && input.name != "mesh")
-                {
+                if input.cardinality == InputCardinality::RequiredOne {
                     return Err(error(
                         "GRAPH_SOCKET_CARDINALITY",
                         "required input is missing",
@@ -866,7 +938,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     let mut bound: Vec<BTreeMap<&str, BoundInput>> = vec![BTreeMap::new(); graph.nodes.len()];
     for (i, n) in graph.nodes.iter().enumerate() {
         for input in contracts[i].inputs {
-            let inactive = matches!(&params[i], NormalizedParameters::MeshQuery { visible_predicate, frustum_culled_predicate } if (input.name == "isVisible" && matches!(visible_predicate, RuntimePredicate::Any | RuntimePredicate::Never)) || (input.name == "isFrustumCulled" && matches!(frustum_culled_predicate, RuntimePredicate::Any | RuntimePredicate::Never)));
             let Some(r) = n.inputs.get(input.name) else {
                 continue;
             };
@@ -884,97 +955,18 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     format!("nodes[{i}].inputs.{}", input.name),
                 ));
             }
-            if let Some(flag) = MeshFlag::ORDERED
-                .iter()
-                .find(|f| f.input_socket() == input.name)
-            {
-                if out.metadata != (OutputMetadata::BooleanFlag { flag: *flag }) {
-                    return Err(error(
-                        "GRAPH_SOCKET_TYPE_MISMATCH",
-                        "mesh flag metadata mismatch",
-                        format!("nodes[{i}].inputs.{}", input.name),
-                    ));
-                }
-            }
             bound[i].insert(
                 input.name,
                 BoundInput {
                     producer: OutputKey(pn, ordinal as u16),
-                    active: !inactive,
                 },
             );
-        }
-    }
-    let root = |key: OutputKey,
-                bound: &Vec<BTreeMap<&str, BoundInput>>,
-                contracts: &Vec<&Contract>|
-     -> Option<OutputKey> {
-        let mut k = key;
-        let mut seen = HashSet::new();
-        loop {
-            if !seen.insert(k.0) {
-                return None;
-            }
-            if contracts[k.0].key == "mesh" {
-                let ordinal = contracts[k.0]
-                    .outputs
-                    .iter()
-                    .position(|output| output.semantic_type == SemanticType::MeshData)?;
-                return Some(OutputKey(k.0, ordinal as u16));
-            }
-            if contracts[k.0].outputs[k.1 as usize].semantic_type == SemanticType::MeshData {
-                return Some(k);
-            }
-            k = bound[k.0]
-                .get("mesh")
-                .or_else(|| bound[k.0].get("pipelineIndices"))
-                .or_else(|| bound[k.0].get("activation"))?
-                .producer;
-        }
-    };
-    for (i, c) in contracts.iter().enumerate() {
-        if c.key == "frustum_cull"
-            && root(bound[i]["mesh"].producer, &bound, &contracts)
-                != root(bound[i]["localAabbs"].producer, &bound, &contracts)
-        {
-            return Err(error(
-                "GRAPH_SOCKET_TYPE_MISMATCH",
-                "scene roots differ",
-                format!("nodes[{i}].inputs.localAabbs"),
-            ));
-        }
-        if matches!(c.key, "mesh_query" | "pipeline_registry" | "pipeline") {
-            let scene_socket = if c.key == "pipeline_registry" {
-                "pipelineIndices"
-            } else {
-                "mesh"
-            };
-            let scene = root(bound[i][scene_socket].producer, &bound, &contracts);
-            for (s, b) in &bound[i] {
-                if b.active
-                    && matches!(
-                        *s,
-                        "isVisible"
-                            | "isFrustumCulled"
-                            | "draws"
-                            | "pipelineIndices"
-                            | "activation"
-                    )
-                    && root(b.producer, &bound, &contracts) != scene
-                {
-                    return Err(error(
-                        "GRAPH_SOCKET_TYPE_MISMATCH",
-                        "scene roots differ",
-                        format!("nodes[{i}].inputs.{s}"),
-                    ));
-                }
-            }
         }
     }
     let mut edges = Vec::new();
     for i in 0..graph.nodes.len() {
         for (input_ordinal, input) in contracts[i].inputs.iter().enumerate() {
-            if let Some(b) = bound[i].get(input.name).filter(|b| b.active) {
+            if let Some(b) = bound[i].get(input.name) {
                 edges.push(DependencyEdge {
                     from_node: b.producer.0,
                     from_socket: contracts[b.producer.0].outputs[b.producer.1 as usize]
@@ -1030,6 +1022,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     for i in 0..graph.nodes.len() {
         if live.contains(&i) {
             for (o, out) in contracts[i].outputs.iter().enumerate() {
+                if out.semantic_type.is_virtual() {
+                    continue;
+                }
                 let key = OutputKey(i, o as u16);
                 if contracts[i].execution == ExecutionClass::Source
                     && !referenced_outputs.contains(&key)
@@ -1586,7 +1581,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     for (i, o, out) in resource_meta {
         let key = OutputKey(i, o);
         let id = output_ids[&key];
-        let mesh = || output_ids[&root(key, &bound, &contracts).unwrap()];
         let plan = match out.semantic_type {
             SemanticType::Texture if matches!(params[i], NormalizedParameters::Texture { .. }) => {
                 if let NormalizedParameters::Texture {
@@ -1615,19 +1609,19 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 }
             }
             SemanticType::MeshData => ResourcePlan::MeshData,
-            SemanticType::LocalAabbBuffer => ResourcePlan::LocalAabbBuffer { mesh: mesh() },
-            SemanticType::BooleanFlagBuffer => {
-                if let OutputMetadata::BooleanFlag { flag } = out.metadata {
-                    ResourcePlan::BooleanFlagBuffer { mesh: mesh(), flag }
-                } else {
-                    unreachable!()
-                }
+            SemanticType::Bool
+            | SemanticType::F32
+            | SemanticType::U32
+            | SemanticType::Vec2
+            | SemanticType::Vec3
+            | SemanticType::Vec4
+            | SemanticType::Mat2
+            | SemanticType::Mat3
+            | SemanticType::Mat4
+            | SemanticType::U32x16
+            | SemanticType::LocalAabb => {
+                unreachable!("pure expression outputs are never materialized")
             }
-            SemanticType::PipelineIndexStream => ResourcePlan::PipelineIndexStream { mesh: mesh() },
-            SemanticType::PipelineActivation => ResourcePlan::PipelineActivation {
-                pipeline_indices: output_ids[&bound[i]["pipelineIndices"].producer],
-            },
-            SemanticType::DrawStream => ResourcePlan::DrawStream { mesh: mesh() },
         };
         resources.push(CompiledResource {
             original_node_index: i as u32,
@@ -1644,17 +1638,20 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let _ = id;
     }
     let mut executions = Vec::new();
-    let mut node_execution = HashMap::new();
     for &i in &order {
-        if contracts[i].execution == ExecutionClass::Source {
+        if matches!(
+            contracts[i].execution,
+            ExecutionClass::Source | ExecutionClass::Expression
+        ) {
             continue;
         }
-        let ordinal = executions.len() as u32;
-        node_execution.insert(i, ordinal);
         let input_resource = |s: &str| output_ids[&bound[i][s].producer];
         let mut inputs = Vec::new();
         for s in contracts[i].inputs {
-            if let Some(b) = bound[i].get(s.name).filter(|b| b.active) {
+            if s.role != InputRole::Expression {
+                let Some(b) = bound[i].get(s.name) else {
+                    continue;
+                };
                 inputs.push(CompiledSocketInput {
                     socket: s.name.into(),
                     resource: output_ids[&b.producer],
@@ -1665,6 +1662,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             .outputs
             .iter()
             .enumerate()
+            .filter(|(_, s)| !s.semantic_type.is_virtual())
             .map(|(o, s)| CompiledSocketOutput {
                 socket: s.name.into(),
                 resource: output_ids[&OutputKey(i, o as u16)],
@@ -1672,58 +1670,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             .collect();
         let mut accesses = Vec::new();
         let kind = match contracts[i].key {
-            "frustum_cull" => {
-                for (s, m) in [
-                    ("mesh", AccessMode::StorageRead),
-                    ("localAabbs", AccessMode::StorageRead),
-                ] {
-                    accesses.push(CompiledAccess {
-                        socket: s.into(),
-                        resource: input_resource(s),
-                        mode: m,
-                    });
-                }
-                let r = output_ids[&OutputKey(i, 0)];
-                accesses.push(CompiledAccess {
-                    socket: "isFrustumCulled".into(),
-                    resource: r,
-                    mode: AccessMode::StorageWrite {
-                        full_overwrite: true,
-                    },
-                });
-                ExecutionKind::Compute {
-                    work: ComputeWork::FrustumCull,
-                }
-            }
-            "mesh_query" => {
-                for s in ["mesh", "isVisible", "isFrustumCulled"] {
-                    if let Some(b) = bound[i].get(s).filter(|b| b.active) {
-                        accesses.push(CompiledAccess {
-                            socket: s.into(),
-                            resource: output_ids[&b.producer],
-                            mode: AccessMode::StorageRead,
-                        });
-                    }
-                }
-                accesses.push(CompiledAccess {
-                    socket: "draws".into(),
-                    resource: output_ids[&OutputKey(i, 0)],
-                    mode: AccessMode::StorageWrite {
-                        full_overwrite: true,
-                    },
-                });
-                ExecutionKind::Compute {
-                    work: ComputeWork::MeshQuery,
-                }
-            }
-            "pipeline_registry" => {
-                accesses.push(CompiledAccess {
-                    socket: "pipelineIndices".into(),
-                    resource: input_resource("pipelineIndices"),
-                    mode: AccessMode::SemanticRead,
-                });
-                ExecutionKind::CpuPreparation
-            }
             "pipeline" => {
                 let color = output_ids[&OutputKey(i, 0)];
                 let depth = output_ids[&OutputKey(i, 1)];
@@ -1747,15 +1693,11 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 } else {
                     NormalizedDepthLoad::Load
                 };
-                for s in ["mesh", "draws", "activation"] {
+                for s in ["mesh"] {
                     accesses.push(CompiledAccess {
                         socket: s.into(),
                         resource: input_resource(s),
-                        mode: if s == "draws" {
-                            AccessMode::IndirectRead
-                        } else {
-                            AccessMode::SemanticRead
-                        },
+                        mode: AccessMode::SemanticRead,
                     });
                 }
                 accesses.push(CompiledAccess {
@@ -1849,6 +1791,270 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             accesses,
         });
     }
+    // Lower virtual values into a stable, device-independent expression plan.
+    let mut expression_plan = ExpressionPlan::default();
+    let mut expression_ids = HashMap::<OutputKey, ExprId>::new();
+    let mut expression_provenance = HashMap::<OutputKey, Option<u32>>::new();
+    let mut cse = HashMap::<String, ExprId>::new();
+    let mut requires_camera = false;
+    let mut mesh_root = None;
+    let mut intern = |semantic_type: SemanticType,
+                      op: ExpressionOp,
+                      origin: NodeOutputRef,
+                      mesh_provenance: Option<u32>| {
+        let key = format!("{semantic_type:?}:{op:?}:{mesh_provenance:?}");
+        if let Some(id) = cse.get(&key) {
+            return *id;
+        }
+        let id = ExprId(expression_plan.expressions.len() as u32);
+        expression_plan.expressions.push(Expression {
+            semantic_type,
+            op,
+            origin,
+            mesh_provenance,
+        });
+        cse.insert(key, id);
+        id
+    };
+    for &i in &order {
+        if contracts[i].execution != ExecutionClass::Expression {
+            continue;
+        }
+        let defaults: &[TypedLiteral] = match &params[i] {
+            NormalizedParameters::ExpressionDefaults { defaults } => defaults.as_slice(),
+            NormalizedParameters::FrustumCull { .. } => &[],
+            _ => unreachable!(),
+        };
+        let mut operands = Vec::new();
+        let mut operand_provenance = Vec::new();
+        for (ordinal, input) in contracts[i].inputs.iter().enumerate() {
+            if let Some(binding) = bound[i].get(input.name) {
+                let key = binding.producer;
+                let producer_type = contracts[key.0].outputs[key.1 as usize].semantic_type;
+                let operand_mesh = if contracts[key.0].key == "mesh" {
+                    Some(output_ids[&OutputKey(key.0, 0)])
+                } else {
+                    expression_provenance[&key]
+                };
+                let id = if producer_type.is_virtual() {
+                    if contracts[key.0].key == "mesh" {
+                        let mesh = output_ids[&OutputKey(key.0, 0)];
+                        if mesh_root.is_some_and(|root| root != mesh) {
+                            return Err(error(
+                                "GRAPH_SOCKET_TYPE_MISMATCH",
+                                "instance traversal has multiple mesh roots",
+                                format!("nodes[{i}].inputs.{}", input.name),
+                            ));
+                        }
+                        mesh_root = Some(mesh);
+                        let op = match producer_type {
+                            SemanticType::U32x16 => ExpressionOp::InstanceType { mesh },
+                            SemanticType::LocalAabb => ExpressionOp::LocalAabb { mesh },
+                            _ => unreachable!(),
+                        };
+                        intern(
+                            producer_type,
+                            op,
+                            graph.nodes[key.0]
+                                .inputs
+                                .get("")
+                                .cloned()
+                                .unwrap_or(NodeOutputRef {
+                                    node: graph.nodes[key.0].id.clone(),
+                                    socket: contracts[key.0].outputs[key.1 as usize].name.into(),
+                                }),
+                            Some(mesh),
+                        )
+                    } else {
+                        expression_ids[&key]
+                    }
+                } else {
+                    continue;
+                };
+                operands.push(id);
+                operand_provenance.push(operand_mesh);
+            } else {
+                let literal = defaults[ordinal].clone();
+                operands.push(intern(
+                    literal.semantic_type(),
+                    ExpressionOp::Literal { literal },
+                    NodeOutputRef {
+                        node: graph.nodes[i].id.clone(),
+                        socket: input.name.into(),
+                    },
+                    None,
+                ));
+                operand_provenance.push(None);
+            }
+        }
+        let mut provenances = operand_provenance.into_iter().flatten();
+        let provenance = provenances.next();
+        if provenances.any(|candidate| Some(candidate) != provenance) {
+            return Err(error(
+                "GRAPH_SOCKET_TYPE_MISMATCH",
+                "expression mixes mesh provenance",
+                format!("nodes[{i}].inputs"),
+            ));
+        }
+        for (output_ordinal, output) in contracts[i].outputs.iter().enumerate() {
+            let key = contracts[i].key;
+            let op = match key {
+                "not" => ExpressionOp::Not { value: operands[0] },
+                "and" | "or" | "xor" | "xnor" => ExpressionOp::BooleanBinary {
+                    operation: match key {
+                        "and" => BooleanBinaryOp::And,
+                        "or" => BooleanBinaryOp::Or,
+                        "xor" => BooleanBinaryOp::Xor,
+                        _ => BooleanBinaryOp::Xnor,
+                    },
+                    left: operands[0],
+                    right: operands[1],
+                },
+                "greater_than_f32" | "less_than_f32" | "equals_f32" => ExpressionOp::CompareF32 {
+                    operation: if key.starts_with("greater") {
+                        CompareOp::GreaterThan
+                    } else if key.starts_with("less") {
+                        CompareOp::LessThan
+                    } else {
+                        CompareOp::Equals
+                    },
+                    left: operands[0],
+                    right: operands[1],
+                },
+                "greater_than_u32" | "less_than_u32" | "equals_u32" => ExpressionOp::CompareU32 {
+                    operation: if key.starts_with("greater") {
+                        CompareOp::GreaterThan
+                    } else if key.starts_with("less") {
+                        CompareOp::LessThan
+                    } else {
+                        CompareOp::Equals
+                    },
+                    left: operands[0],
+                    right: operands[1],
+                },
+                k if k.starts_with("separate_vec") => ExpressionOp::VectorProject {
+                    vector: operands[0],
+                    index: output_ordinal as u8,
+                },
+                k if k.starts_with("combine_vec") => ExpressionOp::VectorConstruct {
+                    components: operands.clone(),
+                },
+                k if k.starts_with("separate_mat") => ExpressionOp::MatrixColumn {
+                    matrix: operands[0],
+                    index: output_ordinal as u8,
+                },
+                k if k.starts_with("combine_mat") => ExpressionOp::MatrixConstruct {
+                    columns: operands.clone(),
+                },
+                "separate_u32x16" => ExpressionOp::TypeWord {
+                    value: operands[0],
+                    index: output_ordinal as u8,
+                },
+                "combine_u32x16" => ExpressionOp::TypeConstruct {
+                    words: operands.clone(),
+                },
+                "separate_u32_bits" => ExpressionOp::U32Bit {
+                    value: operands[0],
+                    index: output_ordinal as u8,
+                },
+                "combine_u32_bits" => ExpressionOp::U32Construct {
+                    bits: operands.clone(),
+                },
+                "separate_local_aabb" if output_ordinal == 0 => {
+                    ExpressionOp::AabbMin { aabb: operands[0] }
+                }
+                "separate_local_aabb" => ExpressionOp::AabbMax { aabb: operands[0] },
+                "frustum_cull" => {
+                    requires_camera = true;
+                    let mesh = output_ids[&bound[i]["mesh"].producer];
+                    if mesh_root.is_some_and(|root| root != mesh) {
+                        return Err(error(
+                            "GRAPH_SOCKET_TYPE_MISMATCH",
+                            "instance traversal has multiple mesh roots",
+                            format!("nodes[{i}].inputs.mesh"),
+                        ));
+                    }
+                    mesh_root = Some(mesh);
+                    ExpressionOp::FrustumCulled {
+                        mesh,
+                        local_aabb: operands[0],
+                    }
+                }
+                _ => unreachable!(),
+            };
+            let id = intern(
+                output.semantic_type,
+                op,
+                NodeOutputRef {
+                    node: graph.nodes[i].id.clone(),
+                    socket: output.name.into(),
+                },
+                provenance,
+            );
+            expression_ids.insert(OutputKey(i, output_ordinal as u16), id);
+            expression_provenance.insert(OutputKey(i, output_ordinal as u16), provenance);
+        }
+    }
+    let mut predicates = Vec::new();
+    for (execution, compiled) in executions.iter().enumerate() {
+        let node = compiled.original_node_index as usize;
+        if contracts[node].key != "pipeline" {
+            continue;
+        }
+        let mesh = output_ids[&bound[node]["mesh"].producer];
+        if mesh_root.is_some_and(|root| root != mesh) {
+            return Err(error(
+                "GRAPH_SOCKET_TYPE_MISMATCH",
+                "instance traversal has multiple mesh roots",
+                format!("nodes[{node}].inputs.mesh"),
+            ));
+        }
+        mesh_root = Some(mesh);
+        let predicate = if let Some(binding) = bound[node].get("predicate") {
+            expression_ids[&binding.producer]
+        } else {
+            let NormalizedParameters::Pipeline {
+                predicate_default, ..
+            } = params[node]
+            else {
+                unreachable!()
+            };
+            intern(
+                SemanticType::Bool,
+                ExpressionOp::Literal {
+                    literal: TypedLiteral::Bool(predicate_default),
+                },
+                NodeOutputRef {
+                    node: graph.nodes[node].id.clone(),
+                    socket: "predicate".into(),
+                },
+                None,
+            )
+        };
+        predicates.push(PipelinePredicatePlan {
+            execution: execution as u32,
+            predicate,
+            ordinal: 0,
+        });
+    }
+    for (ordinal, predicate) in predicates.iter_mut().enumerate() {
+        predicate.ordinal = ordinal as u32;
+    }
+    if expression_plan.expressions.len() > MAX_EXPRESSIONS
+        || predicates.len() > MAX_PREDICATE_PIPELINES
+    {
+        return Err(error(
+            "GRAPH_LIMIT_EXCEEDED",
+            "instance traversal plan exceeds limits",
+            "nodes",
+        ));
+    }
+    let instance_traversal = mesh_root.map(|mesh| InstanceTraversalPlan {
+        mesh,
+        expressions: expression_plan,
+        pipelines: predicates,
+        requires_camera,
+    });
     for (ordinal, e) in executions.iter().enumerate() {
         for o in &e.outputs {
             resources[o.resource as usize].producer_execution = Some(ordinal as u32);
@@ -1917,6 +2123,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         culled_node_count: (graph.nodes.len() - live.len()) as u32,
         culled_resource_count: (all_outputs - output_ids.len()) as u32,
         transient_slot_count: transient,
+        instance_traversal,
     })
 }
 

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::render_data::{
-    affine_world_aabb, Aabb, GeometryRange, InstanceHandle, MaterialKey, MeshHandle,
-    ModelTransform, NormalMatrix, PipelineKey, RenderData, RenderFlags,
+    affine_world_aabb, Aabb, GeometryRange, InstanceHandle, InstanceType, MaterialKey, MeshHandle,
+    ModelTransform, NormalMatrix, PipelineKey, RenderData,
 };
 
 #[derive(Clone, Debug)]
@@ -13,8 +13,8 @@ pub struct SceneFrameMesh {
     pub geometry: GeometryRange,
     pub pipeline: PipelineKey,
     pub material: MaterialKey,
-    pub flags: RenderFlags,
-    pub aabb: Aabb,
+    pub instance_type: InstanceType,
+    pub local_aabb: Aabb,
     pub default_instance: InstanceHandle,
     pub occurrence_range: std::ops::Range<usize>,
 }
@@ -26,7 +26,7 @@ pub struct SceneFrameOccurrence {
     pub mesh_index: usize,
     pub model: ModelTransform,
     pub normal: NormalMatrix,
-    pub flags: RenderFlags,
+    pub instance_type: InstanceType,
     pub is_default: bool,
     pub world_aabb: Aabb,
 }
@@ -84,9 +84,9 @@ impl SceneFramePlan {
                 mesh_index,
                 model: occurrence.model,
                 normal: occurrence.normal,
-                flags: occurrence.flags,
+                instance_type: occurrence.instance_type,
                 is_default: handle == mesh.default_instance,
-                world_aabb: affine_world_aabb(mesh.aabb, occurrence.model)
+                world_aabb: affine_world_aabb(mesh.local_aabb, occurrence.model)
                     .map_err(|_| SceneFrameError::InvalidWorldBounds)?,
             });
         }
@@ -117,8 +117,8 @@ impl SceneFramePlan {
                 geometry: mesh.geometry,
                 pipeline: mesh.pipeline,
                 material: mesh.material,
-                flags: mesh.flags,
-                aabb: mesh.aabb,
+                instance_type: mesh.default_instance_type,
+                local_aabb: mesh.local_aabb,
                 default_instance: mesh.default_instance,
                 occurrence_range: offsets[dense]..offsets[dense + 1],
             })
@@ -170,12 +170,11 @@ mod tests {
             indices: &[0, 1, 2],
             pipeline: PipelineKey::new(0),
             material: crate::render_data::MaterialKey::DEFAULT,
-            flags: if visible {
-                RenderFlags::VISIBLE
+            default_instance_type: if visible {
+                InstanceType::VISIBLE
             } else {
-                RenderFlags::NONE
+                InstanceType::ZERO
             },
-            default_instance_flags: RenderFlags::VISIBLE,
             default_transform: IDENTITY_MODEL_TRANSFORM,
         })
         .unwrap()
@@ -190,8 +189,7 @@ mod tests {
         let created = mesh(&mut data, true);
         let second = cache.get_or_build(&data).unwrap() as *const _;
         assert_ne!(first, second);
-        data.set_mesh_flags(created.mesh, RenderFlags::NONE)
-            .unwrap();
+        data.set_mesh_visible(created.mesh, false).unwrap();
         let third = cache.get_or_build(&data).unwrap() as *const _;
         assert_ne!(second, third);
         let mut moved = IDENTITY_MODEL_TRANSFORM;
@@ -213,7 +211,7 @@ mod tests {
         translated[3][0] = 5.;
         translated[3][1] = -2.;
         let extra = data
-            .create_instance(hidden.mesh, translated, RenderFlags::NONE)
+            .create_instance(hidden.mesh, translated, InstanceType::ZERO)
             .unwrap();
         let plan = SceneFramePlan::build(&data).unwrap();
         assert_eq!((plan.meshes.len(), plan.occurrences.len()), (2, 3));
@@ -247,13 +245,13 @@ mod tests {
         let doomed = mesh(&mut data, true);
         let c = mesh(&mut data, true);
         let a_extra = data
-            .create_instance(a.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::VISIBLE)
+            .create_instance(a.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::VISIBLE)
             .unwrap();
         let doomed_extra = data
-            .create_instance(doomed.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::VISIBLE)
+            .create_instance(doomed.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::VISIBLE)
             .unwrap();
         let c_extra = data
-            .create_instance(c.mesh, IDENTITY_MODEL_TRANSFORM, RenderFlags::VISIBLE)
+            .create_instance(c.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::VISIBLE)
             .unwrap();
         data.destroy_instance(a_extra).unwrap();
         data.destroy_mesh(doomed.mesh).unwrap();
@@ -262,7 +260,7 @@ mod tests {
             .create_instance(
                 replacement.mesh,
                 IDENTITY_MODEL_TRANSFORM,
-                RenderFlags::VISIBLE,
+                InstanceType::VISIBLE,
             )
             .unwrap();
         assert_eq!(replacement.mesh.slot(), doomed.mesh.slot());

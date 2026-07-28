@@ -166,12 +166,6 @@ pub struct RuntimeAllocationClass {
     pub slots: Vec<RuntimeAllocationSlot>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MeshQueryRuntimeKey {
-    pub visible: RuntimePredicate,
-    pub frustum_culled: RuntimePredicate,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeExecution {
     pub execution: u32,
@@ -182,13 +176,13 @@ pub struct RuntimeExecution {
 pub struct RuntimeAllocationPlan {
     pub classes: Vec<RuntimeAllocationClass>,
     pub resource_allocations: Vec<Option<AllocationRef>>,
-    pub query: MeshQueryRuntimeKey,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RuntimePlan {
     pub allocations: RuntimeAllocationPlan,
     pub executions: Vec<RuntimeExecution>,
+    pub instance_traversal: Option<InstanceTraversalPlan>,
     pub surface: RuntimeSurfaceContract,
 }
 
@@ -381,11 +375,7 @@ fn valid_pipeline_name(name: &str) -> bool {
 
 fn execution_supported(key: &str) -> bool {
     contract(key).is_some_and(|contract| {
-        contract.fullscreen_policy.is_some()
-            || matches!(
-                key,
-                "frustum_cull" | "mesh_query" | "pipeline_registry" | "pipeline" | "frame_out"
-            )
+        contract.fullscreen_policy.is_some() || matches!(key, "pipeline" | "frame_out")
     })
 }
 
@@ -393,19 +383,6 @@ fn resource_is_mesh(graph: &CompiledGraph, id: u32) -> bool {
     graph.resources.get(id as usize).is_some_and(|resource| {
         resource.semantic_type == SemanticType::MeshData
             && matches!(resource.plan, ResourcePlan::MeshData)
-    })
-}
-
-fn has_exact_producer(
-    graph: &CompiledGraph,
-    consumer: usize,
-    resource: u32,
-    executor: &str,
-    socket: &str,
-) -> bool {
-    graph.executions[..consumer].iter().any(|execution| {
-        execution.executor.key == executor
-            && matches!(execution.outputs.as_slice(), [output] if output.socket == socket && output.resource == resource)
     })
 }
 
@@ -704,181 +681,15 @@ fn validate_fullscreen_execution(
     Ok(())
 }
 
-fn validate_compute_execution(
-    graph: &CompiledGraph,
-    i: usize,
-    execution: &CompiledExecution,
-) -> Result<(), GraphError> {
-    let path = |field| format!("executions[{i}].{field}");
-    match execution.executor.key.as_str() {
-        "frustum_cull" => {
-            if !matches!(
-                execution.parameters,
-                NormalizedParameters::FrustumCull {
-                    camera: ActiveCamera::Active
-                }
-            ) {
-                return Err(invalid(
-                    "frustum cull parameters mismatch",
-                    path("parameters"),
-                ));
-            }
-            if !matches!(
-                execution.kind,
-                ExecutionKind::Compute {
-                    work: ComputeWork::FrustumCull
-                }
-            ) {
-                return Err(invalid("frustum cull work mismatch", path("kind")));
-            }
-            let [mesh, aabbs] = execution.inputs.as_slice() else {
-                return Err(invalid("frustum cull inputs mismatch", path("inputs")));
-            };
-            let [flags] = execution.outputs.as_slice() else {
-                return Err(invalid("frustum cull outputs mismatch", path("outputs")));
-            };
-            if mesh.socket != "mesh"
-                || aabbs.socket != "localAabbs"
-                || flags.socket != "isFrustumCulled"
-            {
-                return Err(invalid(
-                    "frustum cull socket order mismatch",
-                    path("inputs"),
-                ));
-            }
-            if !matches!(execution.accesses.as_slice(),
-                [CompiledAccess { socket: s0, resource: r0, mode: AccessMode::StorageRead },
-                 CompiledAccess { socket: s1, resource: r1, mode: AccessMode::StorageRead },
-                 CompiledAccess { socket: s2, resource: r2, mode: AccessMode::StorageWrite { full_overwrite: true } }]
-                if s0 == "mesh" && *r0 == mesh.resource && s1 == "localAabbs" && *r1 == aabbs.resource
-                    && s2 == "isFrustumCulled" && *r2 == flags.resource)
-            {
-                return Err(invalid("frustum cull accesses mismatch", path("accesses")));
-            }
-            if !resource_is_mesh(graph, mesh.resource)
-                || !matches!(graph.resources[aabbs.resource as usize], CompiledResource { semantic_type: SemanticType::LocalAabbBuffer, plan: ResourcePlan::LocalAabbBuffer { mesh: m }, .. } if m == mesh.resource)
-                || !matches!(graph.resources[flags.resource as usize], CompiledResource { semantic_type: SemanticType::BooleanFlagBuffer, plan: ResourcePlan::BooleanFlagBuffer { mesh: m, flag: MeshFlag::IsFrustumCulled }, .. } if m == mesh.resource)
-            {
-                return Err(invalid(
-                    "frustum cull mesh provenance mismatch",
-                    path("inputs"),
-                ));
-            }
-        }
-        "mesh_query" => {
-            let NormalizedParameters::MeshQuery {
-                visible_predicate,
-                frustum_culled_predicate,
-            } = execution.parameters
-            else {
-                return Err(invalid(
-                    "mesh query parameters mismatch",
-                    path("parameters"),
-                ));
-            };
-            if (visible_predicate == RuntimePredicate::Never)
-                != (frustum_culled_predicate == RuntimePredicate::Never)
-            {
-                return Err(invalid(
-                    "mesh query never predicates must be paired",
-                    path("parameters"),
-                ));
-            }
-            if !matches!(
-                execution.kind,
-                ExecutionKind::Compute {
-                    work: ComputeWork::MeshQuery
-                }
-            ) {
-                return Err(invalid("mesh query work mismatch", path("kind")));
-            }
-            let active = |p| {
-                matches!(
-                    p,
-                    RuntimePredicate::RequiredTrue | RuntimePredicate::RequiredFalse
-                )
-            };
-            let mut sockets = vec!["mesh"];
-            if active(visible_predicate) {
-                sockets.push("isVisible");
-            }
-            if active(frustum_culled_predicate) {
-                sockets.push("isFrustumCulled");
-            }
-            if execution.inputs.len() != sockets.len()
-                || execution
-                    .inputs
-                    .iter()
-                    .zip(&sockets)
-                    .any(|(v, s)| v.socket != *s)
-                || !matches!(execution.outputs.as_slice(), [CompiledSocketOutput { socket, .. }] if socket == "draws")
-            {
-                return Err(invalid("mesh query socket order mismatch", path("inputs")));
-            }
-            let output = execution.outputs[0].resource;
-            if execution.accesses.len() != sockets.len() + 1
-                || execution
-                    .inputs
-                    .iter()
-                    .zip(&execution.accesses)
-                    .any(|(input, access)| {
-                        access.socket != input.socket
-                            || access.resource != input.resource
-                            || !matches!(access.mode, AccessMode::StorageRead)
-                    })
-                || !matches!(&execution.accesses[sockets.len()], CompiledAccess { socket, resource, mode: AccessMode::StorageWrite { full_overwrite: true } } if socket == "draws" && *resource == output)
-            {
-                return Err(invalid("mesh query accesses mismatch", path("accesses")));
-            }
-            let mesh = execution.inputs[0].resource;
-            if !resource_is_mesh(graph, mesh) {
-                return Err(invalid(
-                    "mesh query mesh provenance mismatch",
-                    path("inputs"),
-                ));
-            }
-            for input in execution.inputs.iter().skip(1) {
-                let flag = if input.socket == "isVisible" {
-                    MeshFlag::IsVisible
-                } else {
-                    MeshFlag::IsFrustumCulled
-                };
-                if !matches!(graph.resources[input.resource as usize], CompiledResource { semantic_type: SemanticType::BooleanFlagBuffer, plan: ResourcePlan::BooleanFlagBuffer { mesh: m, flag: f }, .. } if m == mesh && f == flag)
-                {
-                    return Err(invalid(
-                        "mesh query flag provenance mismatch",
-                        path("inputs"),
-                    ));
-                }
-                if flag == MeshFlag::IsFrustumCulled
-                    && !has_exact_producer(
-                        graph,
-                        i,
-                        input.resource,
-                        "frustum_cull",
-                        "isFrustumCulled",
-                    )
-                {
-                    return Err(invalid(
-                        "mesh query frustum flag producer mismatch",
-                        path("inputs"),
-                    ));
-                }
-            }
-            if !matches!(graph.resources[output as usize], CompiledResource { semantic_type: SemanticType::DrawStream, plan: ResourcePlan::DrawStream { mesh: m }, .. } if m == mesh)
-            {
-                return Err(invalid(
-                    "mesh query output provenance mismatch",
-                    path("outputs"),
-                ));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
+    for (i, resource) in graph.resources.iter().enumerate() {
+        if resource.semantic_type.is_virtual() {
+            return Err(invalid(
+                "virtual semantic type was materialized",
+                format!("resources[{i}].semanticType"),
+            ));
+        }
+    }
     for (i, execution) in graph.executions.iter().enumerate() {
         if !execution_supported(&execution.executor.key) {
             return Err(error(
@@ -939,7 +750,6 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
             }
             referenced.insert(access.resource);
         }
-        validate_compute_execution(graph, i, execution)?;
         validate_fullscreen_execution(graph, i, execution, contract)?;
         for resource in referenced {
             uses.get_mut(resource as usize)
@@ -1071,6 +881,291 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
     Ok(())
 }
 
+fn validate_instance_traversal(graph: &CompiledGraph) -> Result<(), GraphError> {
+    let pipeline_indices: Vec<_> = graph
+        .executions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| (e.executor.key == "pipeline").then_some(i as u32))
+        .collect();
+    let Some(plan) = &graph.instance_traversal else {
+        return if pipeline_indices.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid(
+                "live pipelines require instance traversal",
+                "instanceTraversal",
+            ))
+        };
+    };
+    if pipeline_indices.is_empty() {
+        return Err(invalid(
+            "instance traversal has no live pipelines",
+            "instanceTraversal",
+        ));
+    }
+    if !resource_is_mesh(graph, plan.mesh) {
+        return Err(invalid(
+            "traversal mesh is invalid",
+            "instanceTraversal.mesh",
+        ));
+    }
+    let expressions = &plan.expressions.expressions;
+    if expressions.len() > MAX_EXPRESSIONS || plan.pipelines.len() > MAX_PREDICATE_PIPELINES {
+        return Err(invalid(
+            "instance traversal exceeds runtime limits",
+            "instanceTraversal",
+        ));
+    }
+    let ty = |id: ExprId| expressions.get(id.0 as usize).map(|e| e.semantic_type);
+    for (i, expression) in expressions.iter().enumerate() {
+        let path = format!("instanceTraversal.expressions.expressions[{i}]");
+        let ids: Vec<ExprId> = match &expression.op {
+            ExpressionOp::Literal { literal } => {
+                if literal.semantic_type() != expression.semantic_type || !literal.is_finite() {
+                    return Err(invalid("literal type or value is invalid", &path));
+                }
+                vec![]
+            }
+            ExpressionOp::InstanceType { mesh } => {
+                if expression.semantic_type != SemanticType::U32x16 || *mesh != plan.mesh {
+                    return Err(invalid("instance type signature is invalid", &path));
+                }
+                vec![]
+            }
+            ExpressionOp::LocalAabb { mesh } => {
+                if expression.semantic_type != SemanticType::LocalAabb || *mesh != plan.mesh {
+                    return Err(invalid("local aabb signature is invalid", &path));
+                }
+                vec![]
+            }
+            ExpressionOp::Not { value } => {
+                if expression.semantic_type != SemanticType::Bool
+                    || ty(*value) != Some(SemanticType::Bool)
+                {
+                    return Err(invalid("not signature is invalid", &path));
+                }
+                vec![*value]
+            }
+            ExpressionOp::BooleanBinary { left, right, .. } => {
+                if expression.semantic_type != SemanticType::Bool
+                    || ty(*left) != Some(SemanticType::Bool)
+                    || ty(*right) != Some(SemanticType::Bool)
+                {
+                    return Err(invalid("boolean signature is invalid", &path));
+                }
+                vec![*left, *right]
+            }
+            ExpressionOp::CompareF32 { left, right, .. } => {
+                if expression.semantic_type != SemanticType::Bool
+                    || ty(*left) != Some(SemanticType::F32)
+                    || ty(*right) != Some(SemanticType::F32)
+                {
+                    return Err(invalid("f32 comparison signature is invalid", &path));
+                }
+                vec![*left, *right]
+            }
+            ExpressionOp::CompareU32 { left, right, .. } => {
+                if expression.semantic_type != SemanticType::Bool
+                    || ty(*left) != Some(SemanticType::U32)
+                    || ty(*right) != Some(SemanticType::U32)
+                {
+                    return Err(invalid("u32 comparison signature is invalid", &path));
+                }
+                vec![*left, *right]
+            }
+            ExpressionOp::VectorProject { vector, index } => {
+                let n = match ty(*vector) {
+                    Some(SemanticType::Vec2) => 2,
+                    Some(SemanticType::Vec3) => 3,
+                    Some(SemanticType::Vec4) => 4,
+                    _ => 0,
+                };
+                if expression.semantic_type != SemanticType::F32 || usize::from(*index) >= n {
+                    return Err(invalid("vector projection signature is invalid", &path));
+                }
+                vec![*vector]
+            }
+            ExpressionOp::VectorConstruct { components } => {
+                let n = match expression.semantic_type {
+                    SemanticType::Vec2 => 2,
+                    SemanticType::Vec3 => 3,
+                    SemanticType::Vec4 => 4,
+                    _ => 0,
+                };
+                if components.len() != n
+                    || components
+                        .iter()
+                        .any(|id| ty(*id) != Some(SemanticType::F32))
+                {
+                    return Err(invalid("vector constructor signature is invalid", &path));
+                }
+                components.clone()
+            }
+            ExpressionOp::MatrixColumn { matrix, index } => {
+                let (n, out) = match ty(*matrix) {
+                    Some(SemanticType::Mat2) => (2, SemanticType::Vec2),
+                    Some(SemanticType::Mat3) => (3, SemanticType::Vec3),
+                    Some(SemanticType::Mat4) => (4, SemanticType::Vec4),
+                    _ => (0, SemanticType::Bool),
+                };
+                if usize::from(*index) >= n || expression.semantic_type != out {
+                    return Err(invalid("matrix column signature is invalid", &path));
+                }
+                vec![*matrix]
+            }
+            ExpressionOp::MatrixConstruct { columns } => {
+                let (n, col) = match expression.semantic_type {
+                    SemanticType::Mat2 => (2, SemanticType::Vec2),
+                    SemanticType::Mat3 => (3, SemanticType::Vec3),
+                    SemanticType::Mat4 => (4, SemanticType::Vec4),
+                    _ => (0, SemanticType::Bool),
+                };
+                if columns.len() != n || columns.iter().any(|id| ty(*id) != Some(col)) {
+                    return Err(invalid("matrix constructor signature is invalid", &path));
+                }
+                columns.clone()
+            }
+            ExpressionOp::TypeWord { value, index } => {
+                if expression.semantic_type != SemanticType::U32
+                    || ty(*value) != Some(SemanticType::U32x16)
+                    || *index >= 16
+                {
+                    return Err(invalid("type word signature is invalid", &path));
+                }
+                vec![*value]
+            }
+            ExpressionOp::TypeConstruct { words } => {
+                if expression.semantic_type != SemanticType::U32x16
+                    || words.len() != 16
+                    || words.iter().any(|id| ty(*id) != Some(SemanticType::U32))
+                {
+                    return Err(invalid("type constructor signature is invalid", &path));
+                }
+                words.clone()
+            }
+            ExpressionOp::U32Bit { value, index } => {
+                if expression.semantic_type != SemanticType::Bool
+                    || ty(*value) != Some(SemanticType::U32)
+                    || *index >= 32
+                {
+                    return Err(invalid("bit signature is invalid", &path));
+                }
+                vec![*value]
+            }
+            ExpressionOp::U32Construct { bits } => {
+                if expression.semantic_type != SemanticType::U32
+                    || bits.len() != 32
+                    || bits.iter().any(|id| ty(*id) != Some(SemanticType::Bool))
+                {
+                    return Err(invalid("u32 constructor signature is invalid", &path));
+                }
+                bits.clone()
+            }
+            ExpressionOp::AabbMin { aabb } | ExpressionOp::AabbMax { aabb } => {
+                if expression.semantic_type != SemanticType::Vec3
+                    || ty(*aabb) != Some(SemanticType::LocalAabb)
+                {
+                    return Err(invalid("aabb projection signature is invalid", &path));
+                }
+                vec![*aabb]
+            }
+            ExpressionOp::FrustumCulled { mesh, local_aabb } => {
+                if expression.semantic_type != SemanticType::Bool
+                    || *mesh != plan.mesh
+                    || ty(*local_aabb) != Some(SemanticType::LocalAabb)
+                    || expressions
+                        .get(local_aabb.0 as usize)
+                        .and_then(|e| e.mesh_provenance)
+                        != Some(plan.mesh)
+                {
+                    return Err(invalid("frustum signature or provenance is invalid", &path));
+                }
+                vec![*local_aabb]
+            }
+        };
+        if ids.iter().any(|id| id.0 as usize >= i) {
+            return Err(invalid("expression operands must precede consumer", &path));
+        }
+        let expected_provenance = match &expression.op {
+            ExpressionOp::Literal { .. } => None,
+            ExpressionOp::InstanceType { .. } | ExpressionOp::LocalAabb { .. } => Some(plan.mesh),
+            _ => {
+                let mut p = ids
+                    .iter()
+                    .filter_map(|id| expressions[id.0 as usize].mesh_provenance);
+                let first = p.next();
+                if p.any(|v| Some(v) != first) {
+                    return Err(invalid("expression mixes mesh provenance", &path));
+                }
+                first
+            }
+        };
+        if expression.mesh_provenance != expected_provenance {
+            return Err(invalid("expression provenance is not canonical", &path));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut reachable = vec![false; expressions.len()];
+    for (ordinal, entry) in plan.pipelines.iter().enumerate() {
+        if entry.ordinal as usize != ordinal
+            || pipeline_indices.get(ordinal) != Some(&entry.execution)
+            || !seen.insert(entry.execution)
+            || ty(entry.predicate) != Some(SemanticType::Bool)
+        {
+            return Err(invalid(
+                "pipeline predicate table is not canonical",
+                format!("instanceTraversal.pipelines[{ordinal}]"),
+            ));
+        }
+        let mut stack = vec![entry.predicate];
+        while let Some(id) = stack.pop() {
+            if reachable[id.0 as usize] {
+                continue;
+            }
+            reachable[id.0 as usize] = true;
+            stack.extend(expression_operands(&expressions[id.0 as usize].op));
+        }
+    }
+    if plan.pipelines.len() != pipeline_indices.len() {
+        return Err(invalid(
+            "pipeline predicate table is incomplete",
+            "instanceTraversal.pipelines",
+        ));
+    }
+    let requires_camera = expressions
+        .iter()
+        .enumerate()
+        .any(|(i, e)| reachable[i] && matches!(e.op, ExpressionOp::FrustumCulled { .. }));
+    if plan.requires_camera != requires_camera {
+        return Err(invalid(
+            "requires_camera is not canonical",
+            "instanceTraversal.requiresCamera",
+        ));
+    }
+    Ok(())
+}
+
+fn expression_operands(op: &ExpressionOp) -> Vec<ExprId> {
+    match op {
+        ExpressionOp::Not { value }
+        | ExpressionOp::VectorProject { vector: value, .. }
+        | ExpressionOp::MatrixColumn { matrix: value, .. }
+        | ExpressionOp::TypeWord { value, .. }
+        | ExpressionOp::U32Bit { value, .. } => vec![*value],
+        ExpressionOp::AabbMin { aabb } | ExpressionOp::AabbMax { aabb } => vec![*aabb],
+        ExpressionOp::FrustumCulled { local_aabb, .. } => vec![*local_aabb],
+        ExpressionOp::BooleanBinary { left, right, .. }
+        | ExpressionOp::CompareF32 { left, right, .. }
+        | ExpressionOp::CompareU32 { left, right, .. } => vec![*left, *right],
+        ExpressionOp::VectorConstruct { components } => components.clone(),
+        ExpressionOp::MatrixConstruct { columns } => columns.clone(),
+        ExpressionOp::TypeConstruct { words } => words.clone(),
+        ExpressionOp::U32Construct { bits } => bits.clone(),
+        _ => vec![],
+    }
+}
+
 pub fn prepare_runtime_plan(
     graph: &CompiledGraph,
     surface: RuntimeSurfaceContract,
@@ -1095,35 +1190,13 @@ pub fn prepare_runtime_plan(
         ));
     }
     let mut frame_out_index = None;
-    let mut query = None;
     let mut executions = Vec::with_capacity(graph.executions.len());
     for (i, execution) in graph.executions.iter().enumerate() {
         let path = format!("executions[{i}]");
         match execution.executor.key.as_str() {
-            "mesh_query" => {
-                let NormalizedParameters::MeshQuery {
-                    visible_predicate,
-                    frustum_culled_predicate,
-                } = &execution.parameters
-                else {
-                    return Err(invalid("mesh query parameters mismatch", &path));
-                };
-                let key = MeshQueryRuntimeKey {
-                    visible: *visible_predicate,
-                    frustum_culled: *frustum_culled_predicate,
-                };
-                if query.replace(key).is_some() {
-                    return Err(error(
-                        "GRAPH_EXECUTION_UNSUPPORTED",
-                        "multiple draw stream queries",
-                        &path,
-                    ));
-                }
-            }
-            "pipeline_registry" | "pipeline" => {}
+            "pipeline" => {}
             _ if contract(&execution.executor.key)
                 .is_some_and(|contract| contract.fullscreen_policy.is_some()) => {}
-            "frustum_cull" => {}
             "frame_out" => {
                 if frame_out_index.replace(i).is_some() {
                     return Err(error(
@@ -1153,115 +1226,7 @@ pub fn prepare_runtime_plan(
             "executions",
         )
     })?;
-    let query = query.ok_or_else(|| {
-        error(
-            "GRAPH_EXECUTION_UNSUPPORTED",
-            "one mesh query is required",
-            "executions",
-        )
-    })?;
-
-    for (i, execution) in graph.executions.iter().enumerate() {
-        if execution.executor.key != "pipeline_registry" {
-            continue;
-        }
-        if !matches!(execution.parameters, NormalizedParameters::PipelineRegistry) {
-            return Err(invalid(
-                "pipeline registry parameters mismatch",
-                format!("executions[{i}].parameters"),
-            ));
-        }
-        if !matches!(execution.kind, ExecutionKind::CpuPreparation) {
-            return Err(invalid(
-                "pipeline registry kind mismatch",
-                format!("executions[{i}].kind"),
-            ));
-        }
-        let [CompiledSocketInput {
-            socket: input_socket,
-            resource: pipeline_indices,
-        }] = execution.inputs.as_slice()
-        else {
-            return Err(invalid(
-                "pipeline registry input shape mismatch",
-                format!("executions[{i}].inputs"),
-            ));
-        };
-        if input_socket != "pipelineIndices" {
-            return Err(invalid(
-                "pipeline registry input socket mismatch",
-                format!("executions[{i}].inputs"),
-            ));
-        }
-        let [CompiledSocketOutput {
-            socket: output_socket,
-            resource: activation,
-        }] = execution.outputs.as_slice()
-        else {
-            return Err(invalid(
-                "pipeline registry output shape mismatch",
-                format!("executions[{i}].outputs"),
-            ));
-        };
-        if output_socket != "activation" {
-            return Err(invalid(
-                "pipeline registry output socket mismatch",
-                format!("executions[{i}].outputs"),
-            ));
-        }
-        if !matches!(
-            execution.accesses.as_slice(),
-            [CompiledAccess { socket, resource, mode: AccessMode::SemanticRead }]
-                if socket == "pipelineIndices" && resource == pipeline_indices
-        ) {
-            return Err(invalid(
-                "pipeline registry access mismatch",
-                format!("executions[{i}].accesses"),
-            ));
-        }
-        let indices_resource =
-            graph
-                .resources
-                .get(*pipeline_indices as usize)
-                .ok_or_else(|| {
-                    invalid(
-                        "pipeline index stream is out of bounds",
-                        format!("executions[{i}].inputs"),
-                    )
-                })?;
-        let ResourcePlan::PipelineIndexStream { mesh } = indices_resource.plan else {
-            return Err(invalid(
-                "pipeline registry input is not a pipeline index stream",
-                format!("resources[{pipeline_indices}].plan"),
-            ));
-        };
-        if indices_resource.semantic_type != SemanticType::PipelineIndexStream
-            || !graph.resources.get(mesh as usize).is_some_and(|resource| {
-                resource.semantic_type == SemanticType::MeshData
-                    && matches!(resource.plan, ResourcePlan::MeshData)
-            })
-        {
-            return Err(invalid(
-                "pipeline index stream mesh provenance is invalid",
-                format!("resources[{pipeline_indices}].plan"),
-            ));
-        }
-        let activation_resource = graph.resources.get(*activation as usize).ok_or_else(|| {
-            invalid(
-                "pipeline activation is out of bounds",
-                format!("executions[{i}].outputs"),
-            )
-        })?;
-        if activation_resource.semantic_type != SemanticType::PipelineActivation
-            || !matches!(activation_resource.plan, ResourcePlan::PipelineActivation { pipeline_indices: source } if source == *pipeline_indices)
-            || activation_resource.producer_execution != Some(i as u32)
-        {
-            return Err(invalid(
-                "pipeline activation provenance is invalid",
-                format!("resources[{activation}].plan"),
-            ));
-        }
-    }
+    validate_instance_traversal(graph)?;
 
     for (i, execution) in graph.executions.iter().enumerate() {
         if execution.executor.key != "pipeline" {
@@ -1305,9 +1270,7 @@ pub fn prepare_runtime_plan(
                 format!("executions[{i}].kind"),
             ));
         };
-        let [mesh_input, draws_input, activation_input, color_input, depth_input] =
-            execution.inputs.as_slice()
-        else {
+        let [mesh_input, color_input, depth_input] = execution.inputs.as_slice() else {
             return Err(invalid(
                 "pipeline input shape mismatch",
                 format!("executions[{i}].inputs"),
@@ -1315,11 +1278,9 @@ pub fn prepare_runtime_plan(
         };
         if [
             mesh_input.socket.as_str(),
-            draws_input.socket.as_str(),
-            activation_input.socket.as_str(),
             color_input.socket.as_str(),
             depth_input.socket.as_str(),
-        ] != ["mesh", "draws", "activation", "colorTarget", "depthTarget"]
+        ] != ["mesh", "colorTarget", "depthTarget"]
         {
             return Err(invalid(
                 "pipeline input sockets mismatch",
@@ -1394,9 +1355,7 @@ pub fn prepare_runtime_plan(
                 format!("executions[{i}].kind"),
             ));
         }
-        let [mesh_access, draws_access, activation_access, color_access, depth_access] =
-            execution.accesses.as_slice()
-        else {
+        let [mesh_access, color_access, depth_access] = execution.accesses.as_slice() else {
             return Err(invalid(
                 "pipeline access shape mismatch",
                 format!("executions[{i}].accesses"),
@@ -1405,12 +1364,6 @@ pub fn prepare_runtime_plan(
         if mesh_access.socket != "mesh"
             || mesh_access.resource != mesh_input.resource
             || !matches!(mesh_access.mode, AccessMode::SemanticRead)
-            || draws_access.socket != "draws"
-            || draws_access.resource != draws_input.resource
-            || !matches!(draws_access.mode, AccessMode::IndirectRead)
-            || activation_access.socket != "activation"
-            || activation_access.resource != activation_input.resource
-            || !matches!(activation_access.mode, AccessMode::SemanticRead)
         {
             return Err(invalid(
                 "pipeline semantic accesses mismatch",
@@ -1457,73 +1410,6 @@ pub fn prepare_runtime_plan(
             return Err(invalid(
                 "pipeline mesh is invalid",
                 format!("resources[{}].plan", mesh_input.resource),
-            ));
-        }
-        let draws_mesh = match graph.resources.get(draws_input.resource as usize) {
-            Some(CompiledResource {
-                semantic_type: SemanticType::DrawStream,
-                plan: ResourcePlan::DrawStream { mesh },
-                ..
-            }) => *mesh,
-            _ => {
-                return Err(invalid(
-                    "pipeline draw stream is invalid",
-                    format!("resources[{}].plan", draws_input.resource),
-                ))
-            }
-        };
-        let activation_resource = graph
-            .resources
-            .get(activation_input.resource as usize)
-            .ok_or_else(|| {
-                invalid(
-                    "pipeline activation is out of bounds",
-                    format!("executions[{i}].inputs"),
-                )
-            })?;
-        let indices = match activation_resource.plan {
-            ResourcePlan::PipelineActivation { pipeline_indices }
-                if activation_resource.semantic_type == SemanticType::PipelineActivation =>
-            {
-                pipeline_indices
-            }
-            _ => {
-                return Err(invalid(
-                    "pipeline activation is invalid",
-                    format!("resources[{}].plan", activation_input.resource),
-                ))
-            }
-        };
-        let activation_mesh = match graph.resources.get(indices as usize) {
-            Some(CompiledResource {
-                semantic_type: SemanticType::PipelineIndexStream,
-                plan: ResourcePlan::PipelineIndexStream { mesh },
-                ..
-            }) => *mesh,
-            _ => {
-                return Err(invalid(
-                    "pipeline activation index stream is invalid",
-                    format!("resources[{indices}].plan"),
-                ))
-            }
-        };
-        let valid_activation_producer = activation_resource
-            .producer_execution
-            .and_then(|producer| graph.executions.get(producer as usize))
-            .is_some_and(|producer| producer.executor.key == "pipeline_registry");
-        if draws_mesh != mesh_input.resource
-            || activation_mesh != mesh_input.resource
-            || !valid_activation_producer
-        {
-            return Err(invalid(
-                "pipeline mesh provenance disagrees",
-                format!("executions[{i}].inputs"),
-            ));
-        }
-        if !has_exact_producer(graph, i, draws_input.resource, "mesh_query", "draws") {
-            return Err(invalid(
-                "pipeline draw stream producer mismatch",
-                format!("executions[{i}].inputs"),
             ));
         }
         for (output, target) in [
@@ -1969,9 +1855,9 @@ pub fn prepare_runtime_plan(
         allocations: RuntimeAllocationPlan {
             classes,
             resource_allocations,
-            query,
         },
         executions,
+        instance_traversal: graph.instance_traversal.clone(),
         surface,
     })
 }

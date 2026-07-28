@@ -106,41 +106,6 @@ pub struct TextureDescriptor {
     pub view_formats: Vec<TextureFormat>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum TriStatePredicate {
-    Any,
-    RequiredTrue,
-    RequiredFalse,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimePredicate {
-    Any,
-    RequiredTrue,
-    RequiredFalse,
-    Never,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "camelCase")]
-pub enum MeshFlag {
-    IsVisible,
-    IsFrustumCulled,
-}
-
-impl MeshFlag {
-    pub const ORDERED: [Self; 2] = [Self::IsVisible, Self::IsFrustumCulled];
-
-    pub const fn input_socket(self) -> &'static str {
-        match self {
-            Self::IsVisible => "isVisible",
-            Self::IsFrustumCulled => "isFrustumCulled",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompareFunction {

@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 7;
+export const CATALOG_VERSION = 8;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, required = true, authoringType) => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -7,6 +7,45 @@ const i = (type, required = true, authoringType) => ({
   ...(authoringType ? { authoringType } : {}),
 });
 const o = (type) => ({ type });
+const expression = (inputs, outputs) => ({
+  version: 1,
+  execution: "expression",
+  inputs: Object.fromEntries(Object.entries(inputs).map(([name, type]) => [name, i(type, false)])),
+  outputs: Object.fromEntries(Object.entries(outputs).map(([name, type]) => [name, o(type)])),
+  parameters: {},
+});
+const numbered = (prefix, count, type) =>
+  Object.fromEntries(Array.from({ length: count }, (_, index) => [`${prefix}${index}`, type]));
+const expressionCatalog = {
+  and: expression({ left: "bool", right: "bool" }, { value: "bool" }),
+  or: expression({ left: "bool", right: "bool" }, { value: "bool" }),
+  not: expression({ operand: "bool" }, { value: "bool" }),
+  xor: expression({ left: "bool", right: "bool" }, { value: "bool" }),
+  xnor: expression({ left: "bool", right: "bool" }, { value: "bool" }),
+  greater_than_f32: expression({ left: "f32", right: "f32" }, { value: "bool" }),
+  less_than_f32: expression({ left: "f32", right: "f32" }, { value: "bool" }),
+  equals_f32: expression({ left: "f32", right: "f32" }, { value: "bool" }),
+  greater_than_u32: expression({ left: "u32", right: "u32" }, { value: "bool" }),
+  less_than_u32: expression({ left: "u32", right: "u32" }, { value: "bool" }),
+  equals_u32: expression({ left: "u32", right: "u32" }, { value: "bool" }),
+  separate_vec2: expression({ vector: "vec2" }, { x: "f32", y: "f32" }),
+  combine_vec2: expression({ x: "f32", y: "f32" }, { vector: "vec2" }),
+  separate_vec3: expression({ vector: "vec3" }, { x: "f32", y: "f32", z: "f32" }),
+  combine_vec3: expression({ x: "f32", y: "f32", z: "f32" }, { vector: "vec3" }),
+  separate_vec4: expression({ vector: "vec4" }, { x: "f32", y: "f32", z: "f32", w: "f32" }),
+  combine_vec4: expression({ x: "f32", y: "f32", z: "f32", w: "f32" }, { vector: "vec4" }),
+  separate_mat2: expression({ matrix: "mat2" }, numbered("column", 2, "vec2")),
+  combine_mat2: expression(numbered("column", 2, "vec2"), { matrix: "mat2" }),
+  separate_mat3: expression({ matrix: "mat3" }, numbered("column", 3, "vec3")),
+  combine_mat3: expression(numbered("column", 3, "vec3"), { matrix: "mat3" }),
+  separate_mat4: expression({ matrix: "mat4" }, numbered("column", 4, "vec4")),
+  combine_mat4: expression(numbered("column", 4, "vec4"), { matrix: "mat4" }),
+  separate_u32x16: expression({ value: "u32x16" }, numbered("word", 16, "u32")),
+  combine_u32x16: expression(numbered("word", 16, "u32"), { value: "u32x16" }),
+  separate_u32_bits: expression({ value: "u32" }, numbered("bit", 32, "bool")),
+  combine_u32_bits: expression(numbered("bit", 32, "bool"), { value: "u32" }),
+  separate_local_aabb: expression({ value: "local_aabb" }, { min: "vec3", max: "vec3" }),
+};
 const texture = {
   residency: "transient",
   texture: {
@@ -25,17 +64,13 @@ const texture = {
 };
 export const semanticCatalog = Object.freeze({
   mesh: {
-    version: 1,
+    version: 2,
     execution: "source",
     inputs: {},
     outputs: {
       mesh: o("mesh_data"),
-      localAabbs: o("local_aabb_buffer"),
-      isVisible: {
-        ...o("boolean_flag_buffer"),
-        authoringType: "visibility_flag_buffer",
-      },
-      pipelineIndices: o("pipeline_index_stream"),
+      type: o("u32x16"),
+      localAabb: o("local_aabb"),
     },
     parameters: {},
   },
@@ -62,54 +97,28 @@ export const semanticCatalog = Object.freeze({
     },
   },
   frustum_cull: {
-    version: 1,
-    execution: "compute",
+    version: 2,
+    execution: "expression",
     inputs: {
       mesh: i("mesh_data"),
-      localAabbs: i("local_aabb_buffer"),
+      localAabb: i("local_aabb"),
     },
-    outputs: {
-      isFrustumCulled: {
-        ...o("boolean_flag_buffer"),
-        authoringType: "frustum_flag_buffer",
-      },
-    },
+    outputs: { isFrustumCulled: o("bool") },
     parameters: { cameraSelection: "active" },
   },
-  mesh_query: {
-    version: 1,
-    execution: "compute",
-    inputs: {
-      mesh: i("mesh_data"),
-      isVisible: i("boolean_flag_buffer", false, "visibility_flag_buffer"),
-      isFrustumCulled: i("boolean_flag_buffer", false, "frustum_flag_buffer"),
-    },
-    outputs: { draws: o("draw_stream") },
-    parameters: {
-      visiblePredicate: "required_true",
-      frustumCulledPredicate: "required_false",
-    },
-  },
-  pipeline_registry: {
-    version: 1,
-    execution: "cpu_preparation",
-    inputs: { pipelineIndices: i("pipeline_index_stream") },
-    outputs: { activation: o("pipeline_activation") },
-    parameters: {},
-  },
   pipeline: {
-    version: 1,
+    version: 2,
     execution: "render",
     inputs: {
       mesh: i("mesh_data"),
-      draws: i("draw_stream"),
-      activation: i("pipeline_activation"),
+      predicate: i("bool", false),
       colorTarget: i("texture"),
       depthTarget: i("texture"),
     },
     outputs: { color: o("texture"), depth: o("texture") },
     parameters: { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] },
   },
+  ...expressionCatalog,
   fullscreen_copy: {
     version: 1,
     execution: "render",
@@ -210,13 +219,8 @@ export const socketTypes = Object.fromEntries(
   [
     "texture",
     "mesh_data",
-    "local_aabb_buffer",
-    "boolean_flag_buffer",
-    "pipeline_index_stream",
-    "draw_stream",
-    "pipeline_activation",
-    "visibility_flag_buffer",
-    "frustum_flag_buffer",
+    "bool", "f32", "u32", "vec2", "vec3", "vec4",
+    "mat2", "mat3", "mat4", "u32x16", "local_aabb",
   ].map((type, index) => [
     type,
     {
@@ -226,11 +230,6 @@ export const socketTypes = Object.fromEntries(
     },
   ]),
 );
-socketTypes.boolean_flag_buffer.acceptsFrom = [
-  "boolean_flag_buffer",
-  "visibility_flag_buffer",
-  "frustum_flag_buffer",
-];
 export const theme = {
   background: "#151820",
   grid: "#292e3a",
@@ -266,6 +265,7 @@ export const theme = {
 export const styles = {
   source: { header: "#3977a8" },
   compute: { header: "#725a9b" },
+  expression: { header: "#725a9b" },
   cpu_preparation: { header: "#8a6d3b" },
   render: { header: "#426b43" },
   frame: { header: "#a75d37" },
@@ -283,8 +283,8 @@ const tagged = (kind, value) => ({ kind, value: structuredClone(value) });
 const number = (value, minimum, maximum) => ({
   type: "number",
   default: tagged("number", value),
-  minimum,
-  maximum,
+  ...(minimum !== undefined ? { minimum } : {}),
+  ...(maximum !== undefined ? { maximum } : {}),
 });
 const enumeration = (value, values) => ({
   type: "string",
@@ -302,8 +302,38 @@ const color = (value, minimum = 0, maximum = 1) => ({
   minimum,
   maximum,
 });
-const vector = (value, minimum, maximum) => ({ type: "vector", default: tagged("vector", value), minimum, maximum });
+const vector = (value, minimum, maximum) => ({
+  type: "vector", default: tagged("vector", value),
+  ...(minimum !== undefined ? { minimum } : {}),
+  ...(maximum !== undefined ? { maximum } : {}),
+});
 const json = (value) => ({ type: "json", default: tagged("json", value) });
+const socketDefault = (type, value) => {
+  if (type === "bool") return boolean(value);
+  if (type === "f32") return number(value);
+  if (type === "u32") return { ...number(value, 0, 0xffffffff), integer: true };
+  if (type === "vec3") return vector(value);
+  return json(value);
+};
+const zero = (type) => {
+  if (type === "bool") return false;
+  if (type === "f32" || type === "u32") return 0;
+  if (/^vec[234]$/.test(type)) return Array(Number(type.at(-1))).fill(0);
+  if (type === "u32x16") return Array(16).fill(0);
+  if (type === "local_aabb") return { min: [0, 0, 0], max: [0, 0, 0] };
+  const size = Number(type.at(-1));
+  return Array.from({ length: size }, (_, column) =>
+    Array.from({ length: size }, (_, row) => Number(column === row)));
+};
+const defaultForInput = (key, name, type) => {
+  if (key === "pipeline" && name === "predicate") return true;
+  if (key === "and") return true;
+  if (/^combine_mat[234]$/.test(key)) {
+    const index = Number(name.replace("column", ""));
+    return zero(type).map((_, row) => Number(index === row));
+  }
+  return zero(type);
+};
 const parameterSchemas = {
   texture: {
     residency: enumeration("transient", ["transient", "persistent"]),
@@ -343,19 +373,6 @@ const parameterSchemas = {
   },
   mesh: {},
   frustum_cull: { cameraSelection: enumeration("active", ["active"]) },
-  mesh_query: {
-    visiblePredicate: enumeration("required_true", [
-      "any",
-      "required_true",
-      "required_false",
-    ]),
-    frustumCulledPredicate: enumeration("required_false", [
-      "any",
-      "required_true",
-      "required_false",
-    ]),
-  },
-  pipeline_registry: {},
   pipeline: {
     pipeline: string("gltf_standard"),
     depthCompare: enumeration("less_equal", [
@@ -399,6 +416,7 @@ const parameterSchemas = {
     backgroundColor: color([0, 0, 0, 1]),
   },
 };
+for (const key of Object.keys(expressionCatalog)) parameterSchemas[key] = {};
 export const nodeDefinitions = Object.fromEntries(
   Object.entries(semanticCatalog).map(([key, c]) => {
     const sockets = {
@@ -409,11 +427,7 @@ export const nodeDefinitions = Object.fromEntries(
               n,
               "input",
               v.authoringType ?? v.accepted.types[0],
-              key === "mesh_query" && n === "isVisible"
-                ? boolean(true)
-                : key === "mesh_query" && n === "isFrustumCulled"
-                  ? boolean(false)
-                  : null,
+              !v.required ? socketDefault(v.accepted.types[0], defaultForInput(key, n, v.accepted.types[0])) : null,
             ),
           ]),
         ),
@@ -458,6 +472,7 @@ export const nodeDefinitions = Object.fromEntries(
     ];
   }),
 );
+nodeDefinitions.mesh.sockets.localAabb.title = "Local AABB";
 nodeDefinitions.color_balance.ui = [
   { kind: "parameter", parameter: "mode" },
   { kind: "widget", widget: "grading-wheels", bindings: [

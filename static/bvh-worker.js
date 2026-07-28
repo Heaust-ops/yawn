@@ -19,7 +19,7 @@ function coalescedUpdate(hint = 0) {
 addEventListener("message", event => {
   const m = event.data;
   try {
-    if (m.type === "init") { reader = new SnapshotReader(m.memory, m.controlPtr); if (m.controlVersion !== 1 || m.schemaVersion !== 1) throw Object.assign(new Error("version"), {code: "PICK_PROTOCOL_MISMATCH"}); postMessage({type: "ready"}); }
+    if (m.type === "init") { reader = new SnapshotReader(m.memory, m.controlPtr); if (m.controlVersion !== 1 || m.schemaVersion !== 2) throw Object.assign(new Error("version"), {code: "PICK_PROTOCOL_MISMATCH"}); postMessage({type: "ready"}); }
     else if (m.type === "update") coalescedUpdate(m.epoch);
     else if (m.type === "pick") { if (!ensureEpoch(m.epoch)) { postMessage({type: "pick", request: m.request, stale: true, epoch}); return; } const hits = bvh.pick(m.origin, m.direction, m.maxDistance, m.maxHits); const latest = reader.latest().epoch; postMessage({type: "pick", request: m.request, stale: latest !== m.epoch || epoch !== m.epoch, epoch, hits}); }
     else if (m.type === "dispose") close();

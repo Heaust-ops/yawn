@@ -16,6 +16,8 @@ pub struct CompiledGraph {
     pub culled_node_count: u32,
     pub culled_resource_count: u32,
     pub transient_slot_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_traversal: Option<InstanceTraversalPlan>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -47,22 +49,6 @@ pub enum ResourcePlan {
         allocation: Option<AllocationRef>,
     },
     MeshData,
-    LocalAabbBuffer {
-        mesh: u32,
-    },
-    BooleanFlagBuffer {
-        mesh: u32,
-        flag: MeshFlag,
-    },
-    PipelineIndexStream {
-        mesh: u32,
-    },
-    PipelineActivation {
-        pipeline_indices: u32,
-    },
-    DrawStream {
-        mesh: u32,
-    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -95,10 +81,6 @@ pub struct CompiledSocketOutput {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionKind {
-    CpuPreparation,
-    Compute {
-        work: ComputeWork,
-    },
     Render {
         color_attachments: Vec<ColorAttachmentPlan>,
         depth_stencil: Option<DepthStencilAttachmentPlan>,
@@ -106,13 +88,6 @@ pub enum ExecutionKind {
     FrameOut {
         color: u32,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ComputeWork {
-    FrustumCull,
-    MeshQuery,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -196,17 +171,16 @@ pub enum NormalizedParameters {
     FrustumCull {
         camera: ActiveCamera,
     },
-    MeshQuery {
-        visible_predicate: RuntimePredicate,
-        frustum_culled_predicate: RuntimePredicate,
+    ExpressionDefaults {
+        defaults: Vec<TypedLiteral>,
     },
-    PipelineRegistry,
     Pipeline {
         pipeline: String,
         depth_compare: CompareFunction,
         depth_write_enabled: bool,
         clear_depth: f32,
         clear_color: [f64; 4],
+        predicate_default: bool,
     },
     FullscreenCopy,
     ColorBalance {

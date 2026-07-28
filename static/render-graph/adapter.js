@@ -94,7 +94,7 @@ const mapValuePaths = (paths, path, source, value) => {
       mapValuePaths(paths, `${path}.${key}`, source, value[key]);
 };
 
-function parameterValue(raw, schema, nodeId, key) {
+function parameterValue(raw, schema, nodeId, key, semanticType) {
   if (!exactKeys(raw, ["kind", "value"]) || raw.kind !== schema.type)
     fail("AUTHORING_PARAMETER", { nodeId, parameter: key });
   const value = raw.value;
@@ -112,11 +112,31 @@ function parameterValue(raw, schema, nodeId, key) {
           ? typeof value === "boolean"
           : schema.type === "vector" || schema.type === "color"
             ? Array.isArray(value) &&
-              value.length === (schema.type === "vector" ? 3 : 4) &&
+              value.length === (semanticType?.startsWith("vec") ? Number(semanticType.at(-1)) : (schema.type === "vector" ? 3 : 4)) &&
               value.every(bounded)
-            : schema.type === "json" && finiteJson(value);
+            : schema.type === "json" && finiteJson(value) && validSemanticValue(value, semanticType);
   if (!valid) fail("AUTHORING_PARAMETER", { nodeId, parameter: key });
   return canonical(structuredClone(raw.value));
+}
+
+function validSemanticValue(value, type) {
+  if (!type) return true;
+  const finiteVector = (candidate, size) =>
+    Array.isArray(candidate) && candidate.length === size && candidate.every(Number.isFinite);
+  const vector = /^vec([24])$/.exec(type);
+  if (vector) return finiteVector(value, Number(vector[1]));
+  if (type === "u32x16")
+    return Array.isArray(value) && value.length === 16 &&
+      value.every((word) => Number.isInteger(word) && word >= 0 && word <= 0xffffffff);
+  if (type === "local_aabb")
+    return exactKeys(value, ["min", "max"]) && finiteVector(value.min, 3) && finiteVector(value.max, 3);
+  const match = /^mat([234])$/.exec(type);
+  if (match) {
+    const size = Number(match[1]);
+    return Array.isArray(value) && value.length === size &&
+      value.every((column) => finiteVector(column, size));
+  }
+  return false;
 }
 
 export function adaptFxNodeSnapshot(raw, revision = 1) {
@@ -300,6 +320,7 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
                     socketDefinition.value,
                     n.id,
                     s.key,
+                    input.accepted.types[0],
                   );
                   return false;
                 } catch {
@@ -327,13 +348,16 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       }
       if (new Set(n.sockets.map((s) => s.key)).size !== expected.length)
         fail("AUTHORING_SOCKET_SET", { nodeId: n.id });
-      if (n.typeId === "mesh_query") {
-        parameters.visibleDefault = sockets.get(
-          `${n.id}:isVisible`,
-        ).defaultValue.value;
-        parameters.frustumCulledDefault = sockets.get(
-          `${n.id}:isFrustumCulled`,
-        ).defaultValue.value;
+      for (const key of Object.keys(descriptor.inputs)) {
+        const authoredDefault = sockets.get(`${n.id}:${key}`).defaultValue;
+        if (authoredDefault)
+          parameters[`${key}Default`] = parameterValue(
+            authoredDefault,
+            definition.sockets[key].value,
+            n.id,
+            key,
+            descriptor.inputs[key].accepted.types[0],
+          );
       }
       nodes.set(n.id, {
         ordinal,
@@ -507,13 +531,12 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
           mapValuePaths(
             paths,
             `${base}.parameters.${key}`,
-            item.value.executor.key === "mesh_query" && key.endsWith("Default")
+            key.endsWith("Default") && Object.hasOwn(descriptors[item.value.executor.key].inputs, key.slice(0, -7))
               ? {
                   kind: "input",
                   nodeId: item.value.id,
-                  input:
-                    key === "visibleDefault" ? "isVisible" : "isFrustumCulled",
-                  socketId: `${item.value.id}:${key === "visibleDefault" ? "isVisible" : "isFrustumCulled"}`,
+                  input: key.slice(0, -7),
+                  socketId: `${item.value.id}:${key.slice(0, -7)}`,
                   unconnected: true,
                 }
               : parameterSource(

@@ -3,19 +3,8 @@ import { CATALOG_VERSION, GRAPH_ID, fxNodeComposition } from "./catalog.js";
 import { prepareBrowserHost } from "./browser-host.js";
 import { createAddNodeMenu } from "./add-node-menu.js";
 import { createNodeIdAllocator, spawnRequestedNode } from "./node-spawn.js";
+import { culling } from "./presets.js";
 
-const spec = [
-  ["hdr", "texture", { x: 40, y: 170 }],
-  ["depth", "texture", { x: 40, y: 300 }],
-  ["mesh", "mesh", { x: 40, y: 470 }],
-  ["cull", "frustum_cull", { x: 540, y: 480 }],
-  ["query", "mesh_query", { x: 790, y: 330 }],
-  ["registry", "pipeline_registry", { x: 790, y: 620 }],
-  ["ground", "pipeline", { x: 1040, y: 290 }],
-  ["pbr", "pipeline", { x: 1300, y: 290 }],
-  ["pbr_double", "pipeline", { x: 1560, y: 290 }],
-  ["frame_out", "frame_out", { x: 1820, y: 250 }],
-];
 async function seed(root) {
   await root.setState({
     graphId: GRAPH_ID,
@@ -24,28 +13,11 @@ async function seed(root) {
     links: [],
     metadata: {},
   });
-  for (const [nodeId, nodeType, position] of spec)
-    await root.dispatch({ type: "node.add", nodeId, nodeType, position });
-  const links = [
-    ["mesh", "mesh", "cull", "mesh"],
-    ["mesh", "localAabbs", "cull", "localAabbs"],
-    ["mesh", "mesh", "query", "mesh"],
-    ["mesh", "isVisible", "query", "isVisible"],
-    ["cull", "isFrustumCulled", "query", "isFrustumCulled"],
-    ["mesh", "pipelineIndices", "registry", "pipelineIndices"],
-    ...["ground", "pbr", "pbr_double"].flatMap((pipeline) => [
-      ["mesh", "mesh", pipeline, "mesh"],
-      ["query", "draws", pipeline, "draws"],
-      ["registry", "activation", pipeline, "activation"],
-    ]),
-    ["hdr", "texture", "ground", "colorTarget"],
-    ["depth", "texture", "ground", "depthTarget"],
-    ["ground", "color", "pbr", "colorTarget"],
-    ["ground", "depth", "pbr", "depthTarget"],
-    ["pbr", "color", "pbr_double", "colorTarget"],
-    ["pbr", "depth", "pbr_double", "depthTarget"],
-    ["pbr_double", "color", "frame_out", "color"],
-  ];
+  for (const [index, item] of culling.nodes.entries())
+    await root.dispatch({ type: "node.add", nodeId: item.id, nodeType: item.executor.key,
+      position: { x: 40 + (index % 6) * 280, y: 120 + Math.floor(index / 6) * 260 } });
+  const links = culling.nodes.flatMap((item) => Object.entries(item.inputs).map(([socket, from]) =>
+    [from.node, from.socket, item.id, socket]));
   for (const [a, as, b, bs] of links) {
     const id = `${a}_${as}_${b}_${bs}`;
     await root.dispatch({
@@ -61,11 +33,43 @@ async function seed(root) {
       },
     });
   }
-  const authored = await root.getState(),
-    depth = authored.nodes.find((node) => node.id === "depth");
-  depth.parameters.format = { kind: "string", value: "depth32_float" };
-  for (const [id, name] of [["ground", "ground_plane"], ["pbr", "gltf_standard"], ["pbr_double", "gltf_standard_double_sided"]])
-    authored.nodes.find((node) => node.id === id).parameters.pipeline = { kind: "string", value: name };
+  const authored = await root.getState();
+  for (const item of culling.nodes) {
+    const target = authored.nodes.find((candidate) => candidate.id === item.id);
+    if (item.executor.key === "texture") {
+      const texture = item.parameters.texture;
+      const relative = texture.extent.kind === "surface_relative";
+      const values = {
+        residency: item.parameters.residency,
+        format: texture.format,
+        dimension: texture.dimension,
+        extentMode: texture.extent.kind,
+        absoluteWidth: relative ? 1 : texture.extent.width,
+        absoluteHeight: relative ? 1 : texture.extent.height,
+        relativeWidthNumerator: relative ? texture.extent.width.numerator : 1,
+        relativeWidthDenominator: relative ? texture.extent.width.denominator : 1,
+        relativeHeightNumerator: relative ? texture.extent.height.numerator : 1,
+        relativeHeightDenominator: relative ? texture.extent.height.denominator : 1,
+        depthOrArrayLayers: texture.extent.depthOrArrayLayers,
+        mipLevelCount: texture.mipLevelCount,
+        sampleCount: String(texture.sampleCount),
+        viewFormat: texture.viewFormats[0] ?? "none",
+      };
+      for (const [key, value] of Object.entries(values))
+        target.parameters[key].value = structuredClone(value);
+      continue;
+    }
+    for (const [key, value] of Object.entries(item.parameters)) {
+      const input = key.endsWith("Default") ? key.slice(0, -7) : null;
+      if (input) {
+        const socket = target.sockets.find((candidate) => candidate.key === input);
+        if (socket?.defaultValue) socket.defaultValue.value = structuredClone(value);
+      } else {
+        const authoredKey = item.executor.key === "frustum_cull" && key === "camera" ? "cameraSelection" : key;
+        if (target.parameters[authoredKey]) target.parameters[authoredKey].value = structuredClone(value);
+      }
+    }
+  }
   await root.setState(authored);
 }
 export async function createRenderGraphEditor(canvas) {
