@@ -42,6 +42,46 @@ struct ToneMapParameters {
     exposure: f32,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ColorBalanceParameters {
+    mode: ColorBalanceMode,
+    factor: f32,
+    lift: f32,
+    lift_color: [f32; 4],
+    gamma: f32,
+    gamma_color: [f32; 4],
+    gain: f32,
+    gain_color: [f32; 4],
+    offset: f32,
+    offset_color: [f32; 4],
+    power: f32,
+    power_color: [f32; 4],
+    slope: f32,
+    slope_color: [f32; 4],
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ExposureContrastParameters {
+    exposure_stops: f32,
+    contrast: f32,
+    pivot: f32,
+    factor: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaturationParameters {
+    saturation: f32,
+    factor: f32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ChannelMixerParameters {
+    red_output: [f32; 3],
+    green_output: [f32; 3],
+    blue_output: [f32; 3],
+    factor: f32,
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BloomExtractParameters {
     threshold: f32,
@@ -74,6 +114,23 @@ fn range(value: f32, min: f32, max: f32, path: String) -> Result<f32, GraphError
             path,
         ))
     }
+}
+
+fn components<const N: usize>(
+    value: [f32; N],
+    min: f32,
+    max: f32,
+    base: &str,
+) -> Result<[f32; N], GraphError> {
+    let mut result = value;
+    for (i, component) in result.iter_mut().enumerate() {
+        *component = range(*component, min, max, format!("{base}[{i}]"))?;
+    }
+    Ok(result)
+}
+fn color(value: [f32; 4], min: f32, max: f32, base: &str) -> Result<[f32; 3], GraphError> {
+    let value = components(value, min, max, base)?;
+    Ok([value[0], value[1], value[2]])
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -372,6 +429,64 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
             NormalizedParameters::ToneMap {
                 exposure: range(p.exposure, 0.0, 32.0, format!("{base}.exposure"))?,
+            }
+        }
+        "color_balance" => {
+            let p: ColorBalanceParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::ColorBalance {
+                mode: p.mode,
+                factor: range(p.factor, 0.0, 1.0, format!("{base}.factor"))?,
+                lift: range(p.lift, -1.0, 1.0, format!("{base}.lift"))?,
+                lift_color: color(p.lift_color, 0.0, 4.0, &format!("{base}.liftColor"))?,
+                gamma: range(p.gamma, 0.01, 4.0, format!("{base}.gamma"))?,
+                gamma_color: color(p.gamma_color, 0.0, 4.0, &format!("{base}.gammaColor"))?,
+                gain: range(p.gain, 0.0, 4.0, format!("{base}.gain"))?,
+                gain_color: color(p.gain_color, 0.0, 4.0, &format!("{base}.gainColor"))?,
+                offset: range(p.offset, -1.0, 1.0, format!("{base}.offset"))?,
+                offset_color: color(p.offset_color, 0.0, 2.0, &format!("{base}.offsetColor"))?,
+                power: range(p.power, 0.01, 4.0, format!("{base}.power"))?,
+                power_color: color(p.power_color, 0.0, 4.0, &format!("{base}.powerColor"))?,
+                slope: range(p.slope, 0.0, 4.0, format!("{base}.slope"))?,
+                slope_color: color(p.slope_color, 0.0, 4.0, &format!("{base}.slopeColor"))?,
+            }
+        }
+        "exposure_contrast" => {
+            let p: ExposureContrastParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::ExposureContrast {
+                exposure_stops: range(
+                    p.exposure_stops,
+                    -10.0,
+                    10.0,
+                    format!("{base}.exposureStops"),
+                )?,
+                contrast: range(p.contrast, 0.01, 4.0, format!("{base}.contrast"))?,
+                pivot: range(p.pivot, 0.001, 4.0, format!("{base}.pivot"))?,
+                factor: range(p.factor, 0.0, 1.0, format!("{base}.factor"))?,
+            }
+        }
+        "saturation" => {
+            let p: SaturationParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::Saturation {
+                saturation: range(p.saturation, 0.0, 4.0, format!("{base}.saturation"))?,
+                factor: range(p.factor, 0.0, 1.0, format!("{base}.factor"))?,
+            }
+        }
+        "channel_mixer" => {
+            let p: ChannelMixerParameters =
+                serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
+            NormalizedParameters::ChannelMixer {
+                red_output: components(p.red_output, -2.0, 2.0, &format!("{base}.redOutput"))?,
+                green_output: components(
+                    p.green_output,
+                    -2.0,
+                    2.0,
+                    &format!("{base}.greenOutput"),
+                )?,
+                blue_output: components(p.blue_output, -2.0, 2.0, &format!("{base}.blueOutput"))?,
+                factor: range(p.factor, 0.0, 1.0, format!("{base}.factor"))?,
             }
         }
         "bloom_extract" => {

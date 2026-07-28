@@ -247,7 +247,7 @@ fn fullscreen_copy_parameters_are_exactly_empty() {
     let copy = node_index(&g, "copy");
     g["nodes"][copy]["parameters"] = json!({"obsolete":true});
     assert_eq!(compile_error(g).code, "GRAPH_PARAMETERS_INVALID");
-    assert_eq!(CONTRACTS.len(), 13);
+    assert_eq!(CONTRACTS.len(), 17);
 }
 
 #[test]
@@ -840,6 +840,10 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("pipeline", 1),
             ("fullscreen_copy", 1),
             ("tone_map", 1),
+            ("color_balance", 1),
+            ("exposure_contrast", 1),
+            ("saturation", 1),
+            ("channel_mixer", 1),
             ("bloom_extract", 1),
             ("bloom_blur", 1),
             ("bloom_composite", 1),
@@ -861,6 +865,10 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("pipeline", None),
             ("fullscreen_copy", Some(FullscreenPolicy::Copy)),
             ("tone_map", Some(FullscreenPolicy::ToneMap)),
+            ("color_balance", Some(FullscreenPolicy::HdrSameExtent)),
+            ("exposure_contrast", Some(FullscreenPolicy::HdrSameExtent)),
+            ("saturation", Some(FullscreenPolicy::HdrSameExtent)),
+            ("channel_mixer", Some(FullscreenPolicy::HdrSameExtent)),
             ("bloom_extract", Some(FullscreenPolicy::BloomExtract)),
             ("bloom_blur", Some(FullscreenPolicy::HdrSameExtent)),
             ("bloom_composite", Some(FullscreenPolicy::BloomComposite)),

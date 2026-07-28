@@ -212,6 +212,38 @@ pub enum NormalizedParameters {
     ToneMap {
         exposure: f32,
     },
+    ColorBalance {
+        mode: ColorBalanceMode,
+        factor: f32,
+        lift: f32,
+        lift_color: [f32; 3],
+        gamma: f32,
+        gamma_color: [f32; 3],
+        gain: f32,
+        gain_color: [f32; 3],
+        offset: f32,
+        offset_color: [f32; 3],
+        power: f32,
+        power_color: [f32; 3],
+        slope: f32,
+        slope_color: [f32; 3],
+    },
+    ExposureContrast {
+        exposure_stops: f32,
+        contrast: f32,
+        pivot: f32,
+        factor: f32,
+    },
+    Saturation {
+        saturation: f32,
+        factor: f32,
+    },
+    ChannelMixer {
+        red_output: [f32; 3],
+        green_output: [f32; 3],
+        blue_output: [f32; 3],
+        factor: f32,
+    },
     BloomExtract {
         threshold: f32,
         knee: f32,
@@ -227,6 +259,13 @@ pub enum NormalizedParameters {
         strength: f32,
     },
     FrameOut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorBalanceMode {
+    LiftGammaGain,
+    OffsetPowerSlope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]

@@ -326,10 +326,76 @@ fn validate_fullscreen_execution(
         return Ok(());
     };
     let path = |field| format!("executions[{i}].{field}");
+    let scalar = |v: &f32, min, max| v.is_finite() && (min..=max).contains(v);
+    let vector = |v: &[f32], min, max| v.iter().all(|x| scalar(x, min, max));
     let valid_parameters = match (key, &execution.parameters) {
         ("fullscreen_copy", NormalizedParameters::FullscreenCopy) => true,
         ("tone_map", NormalizedParameters::ToneMap { exposure }) => {
             exposure.is_finite() && (0.0..=32.0).contains(exposure)
+        }
+        (
+            "color_balance",
+            NormalizedParameters::ColorBalance {
+                factor,
+                lift,
+                lift_color,
+                gamma,
+                gamma_color,
+                gain,
+                gain_color,
+                offset,
+                offset_color,
+                power,
+                power_color,
+                slope,
+                slope_color,
+                ..
+            },
+        ) => {
+            scalar(factor, 0.0, 1.0)
+                && scalar(lift, -1.0, 1.0)
+                && vector(lift_color, 0.0, 4.0)
+                && scalar(gamma, 0.01, 4.0)
+                && vector(gamma_color, 0.0, 4.0)
+                && scalar(gain, 0.0, 4.0)
+                && vector(gain_color, 0.0, 4.0)
+                && scalar(offset, -1.0, 1.0)
+                && vector(offset_color, 0.0, 2.0)
+                && scalar(power, 0.01, 4.0)
+                && vector(power_color, 0.0, 4.0)
+                && scalar(slope, 0.0, 4.0)
+                && vector(slope_color, 0.0, 4.0)
+        }
+        (
+            "exposure_contrast",
+            NormalizedParameters::ExposureContrast {
+                exposure_stops,
+                contrast,
+                pivot,
+                factor,
+            },
+        ) => {
+            scalar(exposure_stops, -10.0, 10.0)
+                && scalar(contrast, 0.01, 4.0)
+                && scalar(pivot, 0.001, 4.0)
+                && scalar(factor, 0.0, 1.0)
+        }
+        ("saturation", NormalizedParameters::Saturation { saturation, factor }) => {
+            scalar(saturation, 0.0, 4.0) && scalar(factor, 0.0, 1.0)
+        }
+        (
+            "channel_mixer",
+            NormalizedParameters::ChannelMixer {
+                red_output,
+                green_output,
+                blue_output,
+                factor,
+            },
+        ) => {
+            vector(red_output, -2.0, 2.0)
+                && vector(green_output, -2.0, 2.0)
+                && vector(blue_output, -2.0, 2.0)
+                && scalar(factor, 0.0, 1.0)
         }
         ("bloom_extract", NormalizedParameters::BloomExtract { threshold, knee }) => {
             threshold.is_finite()

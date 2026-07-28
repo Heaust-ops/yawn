@@ -9,6 +9,7 @@ const order = [
   "hdr",
   "culling",
   "tone",
+  "grading",
   "edges",
   "bloom",
   "combined",
@@ -71,6 +72,12 @@ const sequences = {
     ["pbr_double", "pipeline"],
     ["tone", "tone_map"],
     ["frame_out", "frame_out"],
+  ],
+  grading: [
+    ["balance_hdr", "texture"], ["exposure_hdr", "texture"], ["saturation_hdr", "texture"], ["mixer_hdr", "texture"], ["ldr", "texture"],
+    ["hdr", "texture"], ["depth", "texture"], ["mesh", "mesh"], ["query", "mesh_query"], ["registry", "pipeline_registry"],
+    ["ground", "pipeline"], ["pbr", "pipeline"], ["pbr_double", "pipeline"], ["balance", "color_balance"], ["exposure", "exposure_contrast"],
+    ["saturation", "saturation"], ["mixer", "channel_mixer"], ["tone", "tone_map"], ["frame_out", "frame_out"],
   ],
   edges: [
     ["ldr", "texture"],
@@ -143,6 +150,7 @@ test("presets have the exact canonical pipeline identities, schemas, and node se
       "preset_hdr_fullscreen",
       "preset_gpu_culling",
       "preset_tone",
+      "preset_grading",
       "preset_edges",
       "preset_bloom",
       "preset_combined",
@@ -175,6 +183,16 @@ test("presets have the exact canonical pipeline identities, schemas, and node se
       ),
     );
   }
+  const grading = presets.grading;
+  assert.deepEqual(grading.nodes.find((n) => n.id === "balance").parameters, {
+    mode: "lift_gamma_gain", factor: 1, lift: 0, liftColor: [1,1,1,1],
+    gamma: 1, gammaColor: [1,1,1,1], gain: 1, gainColor: [1,1,1,1],
+    offset: 0, offsetColor: [1,1,1,1], power: 1, powerColor: [1,1,1,1],
+    slope: 1, slopeColor: [1,1,1,1],
+  });
+  assert.deepEqual(grading.nodes.find((n) => n.id === "exposure").parameters, { exposureStops: 0, contrast: 1, pivot: .18, factor: 1 });
+  assert.deepEqual(grading.nodes.find((n) => n.id === "saturation").parameters, { saturation: 1, factor: 1 });
+  assert.deepEqual(grading.nodes.find((n) => n.id === "mixer").parameters, { redOutput: [1,0,0], greenOutput: [0,1,0], blueOutput: [0,0,1], factor: 1 });
 });
 
 test("presets preserve common mesh, texture, query, pipeline, culling and post wiring", () => {
@@ -264,12 +282,13 @@ test("presets preserve common mesh, texture, query, pipeline, culling and post w
     node: "cull",
     socket: "isFrustumCulled",
   });
-  for (const name of ["tone", "edges", "bloom", "combined"])
+  for (const name of ["tone", "grading", "edges", "bloom", "combined"])
     assert.ok(!presets[name].nodes.some((node) => node.id === "copy"));
   const finalSource = {
     hdr: "pbr_double",
     culling: "pbr_double",
     tone: "tone",
+    grading: "tone",
     edges: "tone",
     bloom: "tone",
     combined: "tone",

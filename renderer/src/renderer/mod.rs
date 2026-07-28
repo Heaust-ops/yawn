@@ -38,12 +38,84 @@ fn pack_fullscreen_uniforms(
     parameters: &crate::render_graph::NormalizedParameters,
 ) -> Option<FullscreenUniforms> {
     use crate::render_graph::NormalizedParameters;
+    let mut values = [[0.; 4]; 8];
     let first = match (key, parameters) {
         (
             "fullscreen_copy" | "frame_out",
             NormalizedParameters::FullscreenCopy | NormalizedParameters::FrameOut,
         ) => [0.; 4],
         ("tone_map", NormalizedParameters::ToneMap { exposure }) => [*exposure, 0., 0., 0.],
+        (
+            "color_balance",
+            NormalizedParameters::ColorBalance {
+                mode,
+                factor,
+                lift,
+                lift_color,
+                gamma,
+                gamma_color,
+                gain,
+                gain_color,
+                offset,
+                offset_color,
+                power,
+                power_color,
+                slope,
+                slope_color,
+            },
+        ) => {
+            values[0] = [
+                if *mode == crate::render_graph::ColorBalanceMode::LiftGammaGain {
+                    0.
+                } else {
+                    1.
+                },
+                *factor,
+                *lift,
+                *gamma,
+            ];
+            values[1] = [*gain, *offset, *power, *slope];
+            for (lane, color) in [
+                lift_color,
+                gamma_color,
+                gain_color,
+                offset_color,
+                power_color,
+                slope_color,
+            ]
+            .iter()
+            .enumerate()
+            {
+                values[lane + 2] = [color[0], color[1], color[2], 0.];
+            }
+            return Some(FullscreenUniforms { values });
+        }
+        (
+            "exposure_contrast",
+            NormalizedParameters::ExposureContrast {
+                exposure_stops,
+                contrast,
+                pivot,
+                factor,
+            },
+        ) => [*exposure_stops, *contrast, *pivot, *factor],
+        ("saturation", NormalizedParameters::Saturation { saturation, factor }) => {
+            [*saturation, *factor, 0., 0.]
+        }
+        (
+            "channel_mixer",
+            NormalizedParameters::ChannelMixer {
+                red_output,
+                green_output,
+                blue_output,
+                factor,
+            },
+        ) => {
+            values[0] = [red_output[0], red_output[1], red_output[2], *factor];
+            values[1] = [green_output[0], green_output[1], green_output[2], 0.];
+            values[2] = [blue_output[0], blue_output[1], blue_output[2], 0.];
+            return Some(FullscreenUniforms { values });
+        }
         ("bloom_extract", NormalizedParameters::BloomExtract { threshold, knee }) => {
             [*threshold, *knee, 0., 0.]
         }
@@ -58,7 +130,6 @@ fn pack_fullscreen_uniforms(
         }
         _ => return None,
     };
-    let mut values = [[0.; 4]; 8];
     values[0] = first;
     Some(FullscreenUniforms { values })
 }
@@ -67,6 +138,10 @@ fn resolve_fullscreen_entry(key: &str) -> Option<&'static str> {
     match key {
         "fullscreen_copy" | "frame_out" => Some("fs_copy"),
         "tone_map" => Some("fs_tone_map"),
+        "color_balance" => Some("fs_color_balance"),
+        "exposure_contrast" => Some("fs_exposure_contrast"),
+        "saturation" => Some("fs_saturation"),
+        "channel_mixer" => Some("fs_channel_mixer"),
         "bloom_extract" => Some("fs_bloom_extract"),
         "bloom_blur" => Some("fs_bloom_blur"),
         "bloom_composite" => Some("fs_bloom_composite"),
@@ -78,7 +153,15 @@ fn resolve_fullscreen_entry(key: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod fullscreen_tests {
     use super::*;
-    use crate::render_graph::NormalizedParameters;
+    use crate::render_graph::{ColorBalanceMode, NormalizedParameters};
+
+    fn assert_packed(key: &str, parameters: NormalizedParameters, expected: &[[f32; 4]]) {
+        let packed = pack_fullscreen_uniforms(key, &parameters).unwrap();
+        assert_eq!(&packed.values[..expected.len()], expected);
+        assert!(packed.values[expected.len()..]
+            .iter()
+            .all(|lane| *lane == [0.; 4]));
+    }
 
     #[test]
     fn fullscreen_uniform_abi_and_packer_are_fixed() {
@@ -106,6 +189,22 @@ mod fullscreen_tests {
         assert_eq!(resolve_fullscreen_entry("frame_out"), Some("fs_copy"));
         assert_eq!(resolve_fullscreen_entry("tone_map"), Some("fs_tone_map"));
         assert_eq!(
+            resolve_fullscreen_entry("color_balance"),
+            Some("fs_color_balance")
+        );
+        assert_eq!(
+            resolve_fullscreen_entry("exposure_contrast"),
+            Some("fs_exposure_contrast")
+        );
+        assert_eq!(
+            resolve_fullscreen_entry("saturation"),
+            Some("fs_saturation")
+        );
+        assert_eq!(
+            resolve_fullscreen_entry("channel_mixer"),
+            Some("fs_channel_mixer")
+        );
+        assert_eq!(
             resolve_fullscreen_entry("bloom_extract"),
             Some("fs_bloom_extract")
         );
@@ -122,6 +221,157 @@ mod fullscreen_tests {
             Some("fs_luminance_edge")
         );
         assert_eq!(resolve_fullscreen_entry("unknown"), None);
+    }
+
+    fn balance(mode: ColorBalanceMode) -> NormalizedParameters {
+        NormalizedParameters::ColorBalance {
+            mode,
+            factor: 0.5,
+            lift: -0.1,
+            lift_color: [1., 2., 3.],
+            gamma: 1.1,
+            gamma_color: [1.1, 1.2, 1.3],
+            gain: 1.2,
+            gain_color: [2.1, 2.2, 2.3],
+            offset: 0.1,
+            offset_color: [0.1, 0.2, 0.3],
+            power: 1.3,
+            power_color: [3.1, 3.2, 3.3],
+            slope: 1.4,
+            slope_color: [0.4, 0.5, 0.6],
+        }
+    }
+
+    #[test]
+    fn grading_uniforms_are_exact_and_zero_filled() {
+        for (mode, tag) in [
+            (ColorBalanceMode::LiftGammaGain, 0.),
+            (ColorBalanceMode::OffsetPowerSlope, 1.),
+        ] {
+            assert_packed(
+                "color_balance",
+                balance(mode),
+                &[
+                    [tag, 0.5, -0.1, 1.1],
+                    [1.2, 0.1, 1.3, 1.4],
+                    [1., 2., 3., 0.],
+                    [1.1, 1.2, 1.3, 0.],
+                    [2.1, 2.2, 2.3, 0.],
+                    [0.1, 0.2, 0.3, 0.],
+                    [3.1, 3.2, 3.3, 0.],
+                    [0.4, 0.5, 0.6, 0.],
+                ],
+            );
+        }
+        assert_packed(
+            "exposure_contrast",
+            NormalizedParameters::ExposureContrast {
+                exposure_stops: -2.,
+                contrast: 1.5,
+                pivot: 0.18,
+                factor: 0.5,
+            },
+            &[[-2., 1.5, 0.18, 0.5]],
+        );
+        assert_packed(
+            "saturation",
+            NormalizedParameters::Saturation {
+                saturation: 2.,
+                factor: 0.25,
+            },
+            &[[2., 0.25, 0., 0.]],
+        );
+        assert_packed(
+            "channel_mixer",
+            NormalizedParameters::ChannelMixer {
+                red_output: [1., 2., 3.],
+                green_output: [4., 5., 6.],
+                blue_output: [7., 8., 9.],
+                factor: 0.5,
+            },
+            &[[1., 2., 3., 0.5], [4., 5., 6., 0.], [7., 8., 9., 0.]],
+        );
+        assert!(
+            pack_fullscreen_uniforms("saturation", &NormalizedParameters::FullscreenCopy).is_none()
+        );
+        assert!(pack_fullscreen_uniforms(
+            "wrong",
+            &NormalizedParameters::Saturation {
+                saturation: 1.,
+                factor: 1.
+            }
+        )
+        .is_none());
+    }
+
+    fn mix(a: [f32; 4], b: [f32; 3], factor: f32) -> [f32; 4] {
+        [
+            a[0] + (b[0] - a[0]) * factor,
+            a[1] + (b[1] - a[1]) * factor,
+            a[2] + (b[2] - a[2]) * factor,
+            a[3],
+        ]
+    }
+    fn exposure(c: [f32; 4], stops: f32, contrast: f32, pivot: f32, factor: f32) -> [f32; 4] {
+        let mut out = [0.; 3];
+        for i in 0..3 {
+            let x = c[i] * 2f32.powf(stops);
+            out[i] = x.signum() * pivot * (x.abs() / pivot).powf(contrast);
+        }
+        mix(c, out, factor)
+    }
+    fn saturation(c: [f32; 4], amount: f32, factor: f32) -> [f32; 4] {
+        let l = c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+        mix(
+            c,
+            [
+                l + (c[0] - l) * amount,
+                l + (c[1] - l) * amount,
+                l + (c[2] - l) * amount,
+            ],
+            factor,
+        )
+    }
+    fn mixer(c: [f32; 4], rows: [[f32; 3]; 3], factor: f32) -> [f32; 4] {
+        mix(
+            c,
+            rows.map(|r| c[0] * r[0] + c[1] * r[1] + c[2] * r[2]),
+            factor,
+        )
+    }
+
+    #[test]
+    fn grading_cpu_references_cover_factors_and_neutral_cases() {
+        let c = [0.2, 0.4, 0.8, 0.3];
+        for f in [0., 0.5, 1.] {
+            assert_eq!(exposure(c, 0., 1., 0.18, f), c);
+        }
+        assert_eq!(exposure(c, 2., 1., 0.18, 1.), [0.8, 1.6, 3.2, 0.3]);
+        let dark = exposure(c, -2., 1., 0.18, 1.);
+        assert!(dark
+            .iter()
+            .zip([0.05, 0.1, 0.2, 0.3])
+            .all(|(a, b)| (a - b).abs() < 1e-6));
+        let gray = saturation(c, 0., 1.);
+        assert!((gray[0] - gray[1]).abs() < 1e-6 && (gray[1] - gray[2]).abs() < 1e-6);
+        assert_eq!(saturation(c, 1., 1.), c);
+        assert_eq!(saturation(c, 2., 0.), c);
+        let identity = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+        assert_eq!(mixer(c, identity, 1.), c);
+        assert_eq!(
+            mixer(c, [[0., 1., 0.], [1., 0., 0.], [0., 0., 1.]], 1.),
+            [0.4, 0.2, 0.8, 0.3]
+        );
+        for x in [-1e-7, 0., 1e-7] {
+            assert!(exposure([x, x, x, 0.7], 0., 1.1, 0.18, 1.)
+                .iter()
+                .all(|v| v.is_finite()));
+        }
+        // Both WGSL balance branches are neutral on nonnegative RGB with neutral controls.
+        let lgg = c; // lift=0/color=1, gamma=1/color=1, gain=1/color=1
+        let ops = c; // offset=0/color=1, power=1/color=1, slope=1/color=1
+        assert_eq!(lgg, c);
+        assert_eq!(ops, c);
     }
 }
 

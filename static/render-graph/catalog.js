@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 4;
+export const CATALOG_VERSION = 5;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, required = true, authoringType) => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -129,6 +129,32 @@ export const semanticCatalog = Object.freeze({
     },
     outputs: { color: o("texture") },
     parameters: { exposure: 1 },
+  },
+  color_balance: {
+    version: 1,
+    execution: "render",
+    inputs: { source: i("texture"), colorTarget: i("texture") },
+    outputs: { color: o("texture") },
+    parameters: {
+      mode: "lift_gamma_gain", factor: 1,
+      lift: 0, liftColor: [1, 1, 1, 1], gamma: 1, gammaColor: [1, 1, 1, 1], gain: 1, gainColor: [1, 1, 1, 1],
+      offset: 0, offsetColor: [1, 1, 1, 1], power: 1, powerColor: [1, 1, 1, 1], slope: 1, slopeColor: [1, 1, 1, 1],
+    },
+  },
+  exposure_contrast: {
+    version: 1, execution: "render",
+    inputs: { source: i("texture"), colorTarget: i("texture") }, outputs: { color: o("texture") },
+    parameters: { exposureStops: 0, contrast: 1, pivot: 0.18, factor: 1 },
+  },
+  saturation: {
+    version: 1, execution: "render",
+    inputs: { source: i("texture"), colorTarget: i("texture") }, outputs: { color: o("texture") },
+    parameters: { saturation: 1, factor: 1 },
+  },
+  channel_mixer: {
+    version: 1, execution: "render",
+    inputs: { source: i("texture"), colorTarget: i("texture") }, outputs: { color: o("texture") },
+    parameters: { redOutput: [1, 0, 0], greenOutput: [0, 1, 0], blueOutput: [0, 0, 1], factor: 1 },
   },
   bloom_extract: {
     version: 1,
@@ -280,12 +306,13 @@ const boolean = (value) => ({
   type: "boolean",
   default: tagged("boolean", value),
 });
-const color = (value) => ({
+const color = (value, minimum = 0, maximum = 1) => ({
   type: "color",
   default: tagged("color", value),
-  minimum: 0,
-  maximum: 1,
+  minimum,
+  maximum,
 });
+const vector = (value, minimum, maximum) => ({ type: "vector", default: tagged("vector", value), minimum, maximum });
 const json = (value) => ({ type: "json", default: tagged("json", value) });
 const parameterSchemas = {
   texture: {
@@ -357,6 +384,14 @@ const parameterSchemas = {
   },
   fullscreen_copy: {},
   tone_map: { exposure: number(1, 0, 32) },
+  color_balance: {
+    mode: enumeration("lift_gamma_gain", ["lift_gamma_gain", "offset_power_slope"]), factor: number(1, 0, 1),
+    lift: number(0, -1, 1), liftColor: color([1, 1, 1, 1], 0, 4), gamma: number(1, 0.01, 4), gammaColor: color([1, 1, 1, 1], 0, 4), gain: number(1, 0, 4), gainColor: color([1, 1, 1, 1], 0, 4),
+    offset: number(0, -1, 1), offsetColor: color([1, 1, 1, 1], 0, 2), power: number(1, 0.01, 4), powerColor: color([1, 1, 1, 1], 0, 4), slope: number(1, 0, 4), slopeColor: color([1, 1, 1, 1], 0, 4),
+  },
+  exposure_contrast: { exposureStops: number(0, -10, 10), contrast: number(1, 0.01, 4), pivot: number(0.18, 0.001, 4), factor: number(1, 0, 1) },
+  saturation: { saturation: number(1, 0, 4), factor: number(1, 0, 1) },
+  channel_mixer: { redOutput: vector([1, 0, 0], -2, 2), greenOutput: vector([0, 1, 0], -2, 2), blueOutput: vector([0, 0, 1], -2, 2), factor: number(1, 0, 1) },
   bloom_extract: { threshold: number(1, 0, 64), knee: number(0.5, 0, 1) },
   bloom_blur: {
     direction: enumeration("horizontal", ["horizontal", "vertical"]),
@@ -425,6 +460,17 @@ export const nodeDefinitions = Object.fromEntries(
     ];
   }),
 );
+nodeDefinitions.color_balance.ui = [
+  { kind: "parameter", parameter: "mode" },
+  { kind: "widget", widget: "grading-wheels", bindings: [
+    { title: "Lift", scalar: "lift", color: "liftColor" }, { title: "Gamma", scalar: "gamma", color: "gammaColor" }, { title: "Gain", scalar: "gain", color: "gainColor" },
+  ], visibleWhen: { parameter: "mode", equals: "lift_gamma_gain" } },
+  { kind: "widget", widget: "grading-wheels", bindings: [
+    { title: "Offset", scalar: "offset", color: "offsetColor" }, { title: "Power", scalar: "power", color: "powerColor" }, { title: "Slope", scalar: "slope", color: "slopeColor" },
+  ], visibleWhen: { parameter: "mode", equals: "offset_power_slope" } },
+  { kind: "parameter", parameter: "factor" },
+  { kind: "socket", socket: "source" }, { kind: "socket", socket: "colorTarget" }, { kind: "socket", socket: "color" },
+];
 export const fxNodeComposition = Object.freeze({
   schemaVersion: 2,
   id: "yawn.render-graph",

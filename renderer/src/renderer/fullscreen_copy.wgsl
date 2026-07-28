@@ -21,6 +21,25 @@ fn linear_to_srgb(x: vec3<f32>) -> vec3<f32> {
     return select(high, low, x <= vec3(0.0031308));
 }
 @fragment fn fs_tone_map(in: VertexOut) -> @location(0) vec4<f32> { let c=sample_source(in.uv); return vec4(linear_to_srgb(aces(c.rgb * parameters.values[0].x)), c.a); }
+fn grading_result(source: vec4<f32>, graded: vec3<f32>, factor: f32) -> vec4<f32> { return vec4(mix(source.rgb, graded, vec3(factor)), source.a); }
+@fragment fn fs_color_balance(in: VertexOut) -> @location(0) vec4<f32> {
+    let c=sample_source(in.uv); var graded: vec3<f32>;
+    if parameters.values[0].x < 0.5 {
+        let lift=parameters.values[2].xyz+vec3(parameters.values[0].z); let lifted=(c.rgb-vec3(1.0))*(vec3(2.0)-lift)+vec3(1.0);
+        let gain=parameters.values[4].xyz*parameters.values[1].x; let gained=max(lifted*gain,vec3(0.0));
+        let gamma=max(parameters.values[3].xyz*parameters.values[0].w,vec3(0.000001)); graded=pow(gained,vec3(1.0)/gamma);
+    } else {
+        let slope=parameters.values[7].xyz*parameters.values[1].w; let offset=vec3(parameters.values[1].y)+(parameters.values[5].xyz-vec3(1.0));
+        let power=max(parameters.values[6].xyz*parameters.values[1].z,vec3(0.000001)); graded=pow(max(c.rgb*slope+offset,vec3(0.0)),power);
+    }
+    return grading_result(c,graded,parameters.values[0].y);
+}
+@fragment fn fs_exposure_contrast(in: VertexOut) -> @location(0) vec4<f32> {
+    let c=sample_source(in.uv); let exposed=c.rgb*exp2(parameters.values[0].x); let pivot=parameters.values[0].z;
+    let graded=sign(exposed)*vec3(pivot)*pow(abs(exposed)/vec3(pivot),vec3(parameters.values[0].y)); return grading_result(c,graded,parameters.values[0].w);
+}
+@fragment fn fs_saturation(in: VertexOut) -> @location(0) vec4<f32> { let c=sample_source(in.uv); let l=dot(c.rgb,vec3(0.2126,0.7152,0.0722)); return grading_result(c,mix(vec3(l),c.rgb,vec3(parameters.values[0].x)),parameters.values[0].y); }
+@fragment fn fs_channel_mixer(in: VertexOut) -> @location(0) vec4<f32> { let c=sample_source(in.uv); let graded=vec3(dot(c.rgb,parameters.values[0].xyz),dot(c.rgb,parameters.values[1].xyz),dot(c.rgb,parameters.values[2].xyz)); return grading_result(c,graded,parameters.values[0].w); }
 @fragment fn fs_bloom_extract(in: VertexOut) -> @location(0) vec4<f32> {
     let c=sample_source(in.uv); let brightness=max(c.r,max(c.g,c.b)); let knee=max(parameters.values[0].y,0.00001); let soft=clamp((brightness-parameters.values[0].x+knee)/(2.0*knee),0.0,1.0); let contribution=max(brightness-parameters.values[0].x,0.0)+soft*soft*knee; return vec4(c.rgb*contribution/max(brightness,0.00001),1.0);
 }

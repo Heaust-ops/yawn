@@ -75,4 +75,13 @@ export const tone = postPreset("preset_tone", "tone");
 export const edges = postPreset("preset_edges", "edges");
 export const bloom = postPreset("preset_bloom", "bloom");
 export const combined = postPreset("preset_combined", "combined");
-export const renderGraphPresets = Object.freeze({ midnight, ember, hdr, culling, tone, edges, bloom, combined });
+export const grading = graph("preset_grading", [
+  node("balance_hdr", "texture", texture("rgba16_float")), node("exposure_hdr", "texture", texture("rgba16_float")), node("saturation_hdr", "texture", texture("rgba16_float")), node("mixer_hdr", "texture", texture("rgba16_float")), node("ldr", "texture", texture("rgba8_unorm")),
+  ...scene("hdr"),
+  node("balance", "color_balance", { mode: "lift_gamma_gain", factor: 1, lift: 0, liftColor: [1,1,1,1], gamma: 1, gammaColor: [1,1,1,1], gain: 1, gainColor: [1,1,1,1], offset: 0, offsetColor: [1,1,1,1], power: 1, powerColor: [1,1,1,1], slope: 1, slopeColor: [1,1,1,1] }, { source: input("pbr_double", "color"), colorTarget: input("balance_hdr", "texture") }),
+  node("exposure", "exposure_contrast", { exposureStops: 0, contrast: 1, pivot: 0.18, factor: 1 }, { source: input("balance", "color"), colorTarget: input("exposure_hdr", "texture") }),
+  node("saturation", "saturation", { saturation: 1, factor: 1 }, { source: input("exposure", "color"), colorTarget: input("saturation_hdr", "texture") }),
+  node("mixer", "channel_mixer", { redOutput: [1,0,0], greenOutput: [0,1,0], blueOutput: [0,0,1], factor: 1 }, { source: input("saturation", "color"), colorTarget: input("mixer_hdr", "texture") }),
+  node("tone", "tone_map", { exposure: 1 }, { source: input("mixer", "color"), colorTarget: input("ldr", "texture") }), node("frame_out", "frame_out", {}, { color: input("tone", "color") }),
+]);
+export const renderGraphPresets = Object.freeze({ midnight, ember, hdr, culling, tone, grading, edges, bloom, combined });

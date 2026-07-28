@@ -111,6 +111,10 @@ test("catalog exhaustively mirrors all current contracts", () => {
       "pipeline",
       "fullscreen_copy",
       "tone_map",
+      "color_balance",
+      "exposure_contrast",
+      "saturation",
+      "channel_mixer",
       "bloom_extract",
       "bloom_blur",
       "bloom_composite",
@@ -130,7 +134,7 @@ test("catalog exhaustively mirrors all current contracts", () => {
       Object.keys(contract.parameters).sort(),
       key,
     );
-  assert.equal(CATALOG_VERSION, 4);
+  assert.equal(CATALOG_VERSION, 5);
   assert.deepEqual(nodeDefinitions.pipeline.parameters, {
     pipeline: {
       type: "string",
@@ -175,6 +179,26 @@ test("catalog exhaustively mirrors all current contracts", () => {
     value: true,
   });
   assert.equal(nodeDefinitions.mesh_query.sockets.isVisible.showValue, true);
+
+  assert.deepEqual(nodeDefinitions.color_balance.ui.slice(0, 4), [
+    { kind: "parameter", parameter: "mode" },
+    { kind: "widget", widget: "grading-wheels", bindings: [
+      { title: "Lift", scalar: "lift", color: "liftColor" },
+      { title: "Gamma", scalar: "gamma", color: "gammaColor" },
+      { title: "Gain", scalar: "gain", color: "gainColor" },
+    ], visibleWhen: { parameter: "mode", equals: "lift_gamma_gain" } },
+    { kind: "widget", widget: "grading-wheels", bindings: [
+      { title: "Offset", scalar: "offset", color: "offsetColor" },
+      { title: "Power", scalar: "power", color: "powerColor" },
+      { title: "Slope", scalar: "slope", color: "slopeColor" },
+    ], visibleWhen: { parameter: "mode", equals: "offset_power_slope" } },
+    { kind: "parameter", parameter: "factor" },
+  ]);
+  for (const name of ["liftColor", "gammaColor", "gainColor", "offsetColor", "powerColor", "slopeColor"])
+    assert.deepEqual(nodeDefinitions.color_balance.parameters[name].default, { kind: "color", value: [1, 1, 1, 1] });
+  assert.deepEqual(nodeDefinitions.channel_mixer.parameters.redOutput, {
+    type: "vector", default: { kind: "vector", value: [1, 0, 0] }, minimum: -2, maximum: 2,
+  });
 });
 
 test("adapter validates and exactly lowers canonical pipeline controls and blur direction", () => {

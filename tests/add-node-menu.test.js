@@ -10,13 +10,13 @@ import {
   spawnRequestedNode,
 } from "../static/render-graph/node-spawn.js";
 
-test("add-node model contains all 13 catalog types in application groups", () => {
-  assert.equal(addNodeItems.length, 13);
+test("add-node model contains all 17 catalog types in application groups", () => {
+  assert.equal(addNodeItems.length, 17);
   assert.deepEqual(
     [...new Set(addNodeItems.map((item) => item.group))],
     ["Source", "Compute", "CPU preparation", "Render / post", "Frame"],
   );
-  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 13);
+  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 17);
   assert.deepEqual(
     searchAddNodeItems("tone render").map((item) => item.typeId),
     ["tone_map"],
@@ -40,7 +40,7 @@ test("allocator avoids existing and session-reserved IDs and is bounded", () => 
   );
 });
 
-test("all 13 types spawn with exact position, current version and generated ID", async () => {
+test("all 17 types spawn with exact position, current version and generated ID", async () => {
   let revision = 5,
     expectedType;
   const request = { compositionRevision: 5, viewPosition: { x: 12.25, y: -4 } };
