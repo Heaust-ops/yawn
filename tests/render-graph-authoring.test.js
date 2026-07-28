@@ -12,6 +12,7 @@ import {
   nodeDefinitions,
   GRAPH_ID,
   CATALOG_VERSION,
+  descriptors,
   socketTypes,
 } from "../static/render-graph/catalog.js";
 import { culling } from "../static/render-graph/presets.js";
@@ -93,6 +94,12 @@ function fixture() {
   };
 }
 test("catalog exhaustively mirrors all current contracts", () => {
+  for (const [key, semantic] of Object.entries(semanticCatalog)) {
+    assert.ok(Object.hasOwn(semantic, "version"));
+    assert.equal(semantic.version, 1);
+    assert.equal(nodeDefinitions[key].version, semantic.version);
+    assert.equal(descriptors[key].version, semantic.version);
+  }
   assert.deepEqual(
     Object.keys(semanticCatalog),
     [
@@ -306,6 +313,7 @@ test("adapter rejects hostile shape, IDs, duplicates, catalog, sockets and type 
   reject((x) => (x.nodes[0].id = "bad id"), "AUTHORING_ID");
   reject((x) => (x.nodes[1].id = x.nodes[0].id), "AUTHORING_ID_DUPLICATE");
   reject((x) => (x.nodes[0].typeId = "wat"), "AUTHORING_NODE_TYPE");
+  reject((x) => (x.nodes[0].typeVersion = 2), "AUTHORING_NODE_INVALID");
   reject((x) => (x.nodes[0].sockets = []), "AUTHORING_SOCKET_SET");
   reject((x) => (x.links[0].toSocketId = "missing:x"), "AUTHORING_LINK");
   reject((x) => {

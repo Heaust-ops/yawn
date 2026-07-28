@@ -172,7 +172,7 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       if (
         !exactKeys(n, nodeKeys) ||
         n.known !== true ||
-        n.typeVersion !== 1 ||
+        n.typeVersion !== descriptor.version ||
         typeof n.muted !== "boolean" ||
         typeof n.collapsed !== "boolean" ||
         typeof n.label !== "string" ||
@@ -340,7 +340,7 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
         value: {
           id: n.id,
           state: n.muted ? "muted" : "enabled",
-          executor: { key: n.typeId, version: 1 },
+          executor: { key: n.typeId, version: descriptor.version },
           parameters,
           inputs: {},
         },

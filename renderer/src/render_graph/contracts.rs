@@ -22,6 +22,15 @@ pub enum ExecutionClass {
     Frame,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullscreenPolicy {
+    Copy,
+    ToneMap,
+    HdrSameExtent,
+    BloomExtract,
+    BloomComposite,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputCardinality {
@@ -81,6 +90,8 @@ pub struct Contract {
     pub inputs: &'static [InputSocketContract],
     pub outputs: &'static [OutputSocketContract],
     pub inherently_observable: bool,
+    #[serde(skip)]
+    pub fullscreen_policy: Option<FullscreenPolicy>,
 }
 
 use SemanticType::*;
@@ -268,6 +279,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: NONE_IN,
         outputs: MESH_OUT,
         inherently_observable: false,
+        fullscreen_policy: None,
     },
     Contract {
         key: "texture",
@@ -276,6 +288,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: NONE_IN,
         outputs: TEXTURE_OUT,
         inherently_observable: false,
+        fullscreen_policy: None,
     },
     Contract {
         key: "frustum_cull",
@@ -284,6 +297,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: CULL_IN,
         outputs: CULLED_OUT,
         inherently_observable: false,
+        fullscreen_policy: None,
     },
     Contract {
         key: "mesh_query",
@@ -292,6 +306,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: QUERY_IN,
         outputs: DRAW_OUT,
         inherently_observable: false,
+        fullscreen_policy: None,
     },
     Contract {
         key: "pipeline_registry",
@@ -300,6 +315,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: REGISTRY_IN,
         outputs: ACTIVATION_OUT,
         inherently_observable: false,
+        fullscreen_policy: None,
     },
     Contract {
         key: "pipeline",
@@ -308,6 +324,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: PIPELINE_IN,
         outputs: PIPELINE_OUT,
         inherently_observable: false,
+        fullscreen_policy: None,
     },
     Contract {
         key: "fullscreen_copy",
@@ -316,6 +333,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: FULLSCREEN_COPY_IN,
         outputs: FULLSCREEN_COPY_OUT,
         inherently_observable: false,
+        fullscreen_policy: Some(FullscreenPolicy::Copy),
     },
     Contract {
         key: "tone_map",
@@ -324,6 +342,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: FULLSCREEN_COPY_IN,
         outputs: FULLSCREEN_COPY_OUT,
         inherently_observable: false,
+        fullscreen_policy: Some(FullscreenPolicy::ToneMap),
     },
     Contract {
         key: "bloom_extract",
@@ -332,6 +351,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: FULLSCREEN_COPY_IN,
         outputs: FULLSCREEN_COPY_OUT,
         inherently_observable: false,
+        fullscreen_policy: Some(FullscreenPolicy::BloomExtract),
     },
     Contract {
         key: "bloom_blur",
@@ -340,6 +360,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: FULLSCREEN_COPY_IN,
         outputs: FULLSCREEN_COPY_OUT,
         inherently_observable: false,
+        fullscreen_policy: Some(FullscreenPolicy::HdrSameExtent),
     },
     Contract {
         key: "bloom_composite",
@@ -348,6 +369,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: BLOOM_COMPOSITE_IN,
         outputs: FULLSCREEN_COPY_OUT,
         inherently_observable: false,
+        fullscreen_policy: Some(FullscreenPolicy::BloomComposite),
     },
     Contract {
         key: "luminance_edge",
@@ -356,6 +378,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: FULLSCREEN_COPY_IN,
         outputs: FULLSCREEN_COPY_OUT,
         inherently_observable: false,
+        fullscreen_policy: Some(FullscreenPolicy::HdrSameExtent),
     },
     Contract {
         key: "frame_out",
@@ -364,6 +387,7 @@ pub static CONTRACTS: &[Contract] = &[
         inputs: FRAME_OUT_IN,
         outputs: NONE_OUT,
         inherently_observable: true,
+        fullscreen_policy: None,
     },
 ];
 

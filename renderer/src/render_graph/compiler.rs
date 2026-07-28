@@ -946,8 +946,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
         let transition_sockets: &[(&str, u16)] = match contracts[i].key {
             "pipeline" => &[("colorTarget", 0), ("depthTarget", 1)],
-            "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur" | "bloom_composite"
-            | "luminance_edge" => &[("colorTarget", 0)],
+            _ if contracts[i].fullscreen_policy.is_some() => &[("colorTarget", 0)],
             _ => continue,
         };
         for &(input_socket, output_ordinal) in transition_sockets {
@@ -1118,12 +1117,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     format!("nodes[{i}].inputs"),
                 ));
             }
-        } else if contracts[i].key != "frame_out"
-            && contracts[i]
-                .inputs
-                .iter()
-                .any(|input| matches!(input.role, InputRole::SampledTexture))
-        {
+        } else if contracts[i].fullscreen_policy.is_some() {
             let hazard = contracts[i].inputs.iter().filter(|input| matches!(input.role, InputRole::SampledTexture)).any(|input| matches!((version_of.get(&bound[i][input.name].producer), version_of.get(&OutputKey(i, 0))), (Some((sf, _, _)), Some((tf, _, _))) if sf == tf));
             if hazard {
                 return Err(error(
@@ -1213,13 +1207,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     }
 
     for i in 0..graph.nodes.len() {
-        if !live.contains(&i)
-            || contracts[i].key == "frame_out"
-            || !contracts[i]
-                .inputs
-                .iter()
-                .any(|input| matches!(input.role, InputRole::SampledTexture))
-        {
+        if !live.contains(&i) || contracts[i].fullscreen_policy.is_none() {
             continue;
         }
         let source_key = bound[i]["source"].producer;
@@ -1244,7 +1232,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let authored_target_ok = target_descriptor.is_some_and(|descriptor| {
             descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
         });
-        let bloom_input_ok = if contracts[i].key == "bloom_composite" {
+        let bloom_input_ok = if contracts[i].fullscreen_policy
+            == Some(FullscreenPolicy::BloomComposite)
+        {
             let bloom_key = bound[i]["bloom"].producer;
             let Some(&(bloom_family_id, _, _)) = version_of.get(&bloom_key) else {
                 return Err(error(
@@ -1264,8 +1254,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let source_is_full_surface = matches!(&source_descriptor.extent, NormalizedTextureExtent::SurfaceRelative { width, height, depth_or_array_layers: 1 } if *width == Ratio { numerator:1, denominator:1 } && *height == Ratio { numerator:1, denominator:1 });
         let target_matches_source = target_descriptor
             .is_some_and(|descriptor| descriptor.extent == source_descriptor.extent);
-        let descriptor_ok = match contracts[i].key {
-            "fullscreen_copy" => {
+        let descriptor_ok = match contracts[i].fullscreen_policy {
+            Some(FullscreenPolicy::Copy) => {
                 target_descriptor.is_none() && source_is_full_surface
                     || target_descriptor.is_some_and(|descriptor| {
                         descriptor.format != TextureFormat::Depth32Float
@@ -1273,15 +1263,17 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                             && descriptor.extent == source_descriptor.extent
                     })
             }
-            "tone_map" => target_descriptor.is_some_and(|descriptor| {
+            Some(FullscreenPolicy::ToneMap) => target_descriptor.is_some_and(|descriptor| {
                 descriptor.format != TextureFormat::Depth32Float
                     && descriptor.format != TextureFormat::R32Float
                     && is_single_view_d2(descriptor)
                     && descriptor.extent == source_descriptor.extent
             }),
-            "bloom_extract" => authored_target_ok,
-            "bloom_blur" | "luminance_edge" => authored_target_ok && target_matches_source,
-            "bloom_composite" => authored_target_ok && target_matches_source && bloom_input_ok,
+            Some(FullscreenPolicy::BloomExtract) => authored_target_ok,
+            Some(FullscreenPolicy::HdrSameExtent) => authored_target_ok && target_matches_source,
+            Some(FullscreenPolicy::BloomComposite) => {
+                authored_target_ok && target_matches_source && bloom_input_ok
+            }
             _ => false,
         };
         if !source_ok || !descriptor_ok {
@@ -1650,21 +1642,19 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     }),
                 }
             }
-            "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur" | "bloom_composite"
-            | "luminance_edge" => {
+            _ if contracts[i].fullscreen_policy.is_some() => {
                 let color = output_ids[&OutputKey(i, 0)];
                 let load = NormalizedColorLoad::Clear {
                     value: [0.0, 0.0, 0.0, 0.0],
                 };
-                accesses.push(CompiledAccess {
-                    socket: "source".into(),
-                    resource: input_resource("source"),
-                    mode: AccessMode::SampledTexture,
-                });
-                if contracts[i].key == "bloom_composite" {
+                for input in contracts[i]
+                    .inputs
+                    .iter()
+                    .filter(|input| input.role == InputRole::SampledTexture)
+                {
                     accesses.push(CompiledAccess {
-                        socket: "bloom".into(),
-                        resource: input_resource("bloom"),
+                        socket: input.name.into(),
+                        resource: input_resource(input.name),
                         mode: AccessMode::SampledTexture,
                     });
                 }

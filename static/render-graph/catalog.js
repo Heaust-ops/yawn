@@ -25,6 +25,7 @@ const texture = {
 };
 export const semanticCatalog = Object.freeze({
   mesh: {
+    version: 1,
     execution: "source",
     inputs: {},
     outputs: {
@@ -39,6 +40,7 @@ export const semanticCatalog = Object.freeze({
     parameters: {},
   },
   texture: {
+    version: 1,
     execution: "source",
     inputs: {},
     outputs: { texture: o("texture") },
@@ -60,6 +62,7 @@ export const semanticCatalog = Object.freeze({
     },
   },
   frustum_cull: {
+    version: 1,
     execution: "compute",
     inputs: {
       mesh: i("mesh_data"),
@@ -74,6 +77,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { cameraSelection: "active" },
   },
   mesh_query: {
+    version: 1,
     execution: "compute",
     inputs: {
       mesh: i("mesh_data"),
@@ -87,12 +91,14 @@ export const semanticCatalog = Object.freeze({
     },
   },
   pipeline_registry: {
+    version: 1,
     execution: "cpu_preparation",
     inputs: { pipelineIndices: i("pipeline_index_stream") },
     outputs: { activation: o("pipeline_activation") },
     parameters: {},
   },
   pipeline: {
+    version: 1,
     execution: "render",
     inputs: {
       mesh: i("mesh_data"),
@@ -105,6 +111,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] },
   },
   fullscreen_copy: {
+    version: 1,
     execution: "render",
     inputs: {
       source: i("texture"),
@@ -114,6 +121,7 @@ export const semanticCatalog = Object.freeze({
     parameters: {},
   },
   tone_map: {
+    version: 1,
     execution: "render",
     inputs: {
       source: i("texture"),
@@ -123,6 +131,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { exposure: 1 },
   },
   bloom_extract: {
+    version: 1,
     execution: "render",
     inputs: {
       source: i("texture"),
@@ -132,6 +141,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { threshold: 1, knee: 0.5 },
   },
   bloom_blur: {
+    version: 1,
     execution: "render",
     inputs: {
       source: i("texture"),
@@ -141,6 +151,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { direction: [1, 0], radius: 1 },
   },
   bloom_composite: {
+    version: 1,
     execution: "render",
     inputs: {
       source: i("texture"),
@@ -151,6 +162,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { intensity: 1 },
   },
   luminance_edge: {
+    version: 1,
     execution: "render",
     inputs: {
       source: i("texture"),
@@ -160,6 +172,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { strength: 2 },
   },
   frame_out: {
+    version: 1,
     execution: "frame",
     inputs: { color: i("texture") },
     outputs: {},
@@ -390,7 +403,7 @@ export const nodeDefinitions = Object.fromEntries(
     return [
       key,
       {
-        version: 1,
+        version: c.version,
         title: key.replaceAll("_", " "),
         behavior: "standard",
         style: c.execution,
@@ -427,7 +440,7 @@ export const descriptors = Object.fromEntries(
   Object.entries(semanticCatalog).map(([key, c]) => [
     key,
     {
-      version: 1,
+      version: c.version,
       inputs: c.inputs,
       outputs: c.outputs,
       parameters: c.parameters,

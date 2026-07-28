@@ -847,6 +847,31 @@ fn exact_phase_four_contract_catalog_and_mesh_metadata() {
             ("frame_out", 1),
         ]
     );
+    assert_eq!(
+        CONTRACTS
+            .iter()
+            .map(|contract| (contract.key, contract.fullscreen_policy))
+            .collect::<Vec<_>>(),
+        [
+            ("mesh", None),
+            ("texture", None),
+            ("frustum_cull", None),
+            ("mesh_query", None),
+            ("pipeline_registry", None),
+            ("pipeline", None),
+            ("fullscreen_copy", Some(FullscreenPolicy::Copy)),
+            ("tone_map", Some(FullscreenPolicy::ToneMap)),
+            ("bloom_extract", Some(FullscreenPolicy::BloomExtract)),
+            ("bloom_blur", Some(FullscreenPolicy::HdrSameExtent)),
+            ("bloom_composite", Some(FullscreenPolicy::BloomComposite)),
+            ("luminance_edge", Some(FullscreenPolicy::HdrSameExtent)),
+            ("frame_out", None),
+        ]
+    );
+    for contract in CONTRACTS {
+        let serialized = serde_json::to_value(contract).unwrap();
+        assert!(serialized.get("fullscreenPolicy").is_none());
+    }
     let mesh = contract("mesh").unwrap();
     assert_eq!(mesh.execution, ExecutionClass::Source);
     assert!(mesh.inputs.is_empty());

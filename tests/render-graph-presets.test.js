@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as presets from "../static/render-graph/presets.js";
+import { descriptors } from "../static/render-graph/catalog.js";
 
 const order = [
   "midnight",
@@ -168,6 +169,11 @@ test("presets have the exact canonical pipeline identities, schemas, and node se
       ),
     );
     assert.ok(!graph.nodes.some((node) => node.id === "copy"));
+    assert.ok(
+      graph.nodes.every(
+        (node) => node.executor.version === descriptors[node.executor.key].version,
+      ),
+    );
   }
 });
 

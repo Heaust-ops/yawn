@@ -256,20 +256,13 @@ fn valid_pipeline_name(name: &str) -> bool {
 }
 
 fn execution_supported(key: &str) -> bool {
-    matches!(
-        key,
-        "frustum_cull"
-            | "mesh_query"
-            | "pipeline_registry"
-            | "pipeline"
-            | "fullscreen_copy"
-            | "tone_map"
-            | "bloom_extract"
-            | "bloom_blur"
-            | "bloom_composite"
-            | "luminance_edge"
-            | "frame_out"
-    )
+    contract(key).is_some_and(|contract| {
+        contract.fullscreen_policy.is_some()
+            || matches!(
+                key,
+                "frustum_cull" | "mesh_query" | "pipeline_registry" | "pipeline" | "frame_out"
+            )
+    })
 }
 
 fn resource_is_mesh(graph: &CompiledGraph, id: u32) -> bool {
@@ -326,19 +319,12 @@ fn validate_fullscreen_execution(
     graph: &CompiledGraph,
     i: usize,
     execution: &CompiledExecution,
+    contract: &Contract,
 ) -> Result<(), GraphError> {
     let key = execution.executor.key.as_str();
-    if !matches!(
-        key,
-        "fullscreen_copy"
-            | "tone_map"
-            | "bloom_extract"
-            | "bloom_blur"
-            | "bloom_composite"
-            | "luminance_edge"
-    ) {
+    let Some(policy) = contract.fullscreen_policy else {
         return Ok(());
-    }
+    };
     let path = |field| format!("executions[{i}].{field}");
     let valid_parameters = match (key, &execution.parameters) {
         ("fullscreen_copy", NormalizedParameters::FullscreenCopy) => true,
@@ -372,16 +358,12 @@ fn validate_fullscreen_execution(
             path("parameters"),
         ));
     }
-    let expected_inputs = if key == "bloom_composite" {
-        &["source", "bloom", "colorTarget"][..]
-    } else {
-        &["source", "colorTarget"][..]
-    };
+    let expected_inputs: Vec<_> = contract.inputs.iter().map(|input| input.name).collect();
     if execution.inputs.len() != expected_inputs.len()
         || execution
             .inputs
             .iter()
-            .zip(expected_inputs)
+            .zip(&expected_inputs)
             .any(|(v, s)| v.socket != *s)
     {
         return Err(invalid("fullscreen inputs mismatch", path("inputs")));
@@ -410,7 +392,18 @@ fn validate_fullscreen_execution(
     {
         return Err(invalid("fullscreen attachment mismatch", path("kind")));
     }
-    let sampled_count = expected_inputs.len() - 1;
+    let sampled_inputs: Vec<_> = contract
+        .inputs
+        .iter()
+        .filter(|input| input.role == InputRole::SampledTexture)
+        .collect();
+    let sampled_count = sampled_inputs.len();
+    if contract.inputs[..sampled_count]
+        .iter()
+        .any(|input| input.role != InputRole::SampledTexture)
+    {
+        return Err(invalid("fullscreen inputs mismatch", path("inputs")));
+    }
     if execution.accesses.len() != sampled_count + 1
         || execution.inputs[..sampled_count]
             .iter()
@@ -501,13 +494,13 @@ fn validate_fullscreen_execution(
         single_view_d2(d) && d.format == TextureFormat::Rgba16Float
     };
     let descriptors_valid = hdr(source)
-        && match key {
-            "fullscreen_copy" => {
+        && match policy {
+            FullscreenPolicy::Copy => {
                 single_view_d2(target_d)
                     && target_d.format != TextureFormat::Depth32Float
                     && target_d.extent == source.extent
             }
-            "tone_map" => {
+            FullscreenPolicy::ToneMap => {
                 single_view_d2(target_d)
                     && !matches!(
                         target_d.format,
@@ -515,14 +508,13 @@ fn validate_fullscreen_execution(
                     )
                     && target_d.extent == source.extent
             }
-            "bloom_extract" => hdr(target_d),
-            "bloom_blur" | "luminance_edge" => hdr(target_d) && target_d.extent == source.extent,
-            "bloom_composite" => {
+            FullscreenPolicy::BloomExtract => hdr(target_d),
+            FullscreenPolicy::HdrSameExtent => hdr(target_d) && target_d.extent == source.extent,
+            FullscreenPolicy::BloomComposite => {
                 hdr(target_d)
                     && target_d.extent == source.extent
                     && texture_descriptor(graph, execution.inputs[1].resource).is_some_and(hdr)
             }
-            _ => false,
         };
     if !descriptors_valid {
         return Err(invalid(
@@ -769,7 +761,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
             referenced.insert(access.resource);
         }
         validate_compute_execution(graph, i, execution)?;
-        validate_fullscreen_execution(graph, i, execution)?;
+        validate_fullscreen_execution(graph, i, execution, contract)?;
         for resource in referenced {
             uses.get_mut(resource as usize)
                 .ok_or_else(|| {
@@ -950,8 +942,8 @@ pub fn prepare_runtime_plan(
                 }
             }
             "pipeline_registry" | "pipeline" => {}
-            "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur" | "bloom_composite"
-            | "luminance_edge" => {}
+            _ if contract(&execution.executor.key)
+                .is_some_and(|contract| contract.fullscreen_policy.is_some()) => {}
             "frustum_cull" => {}
             "frame_out" => {
                 if frame_out_index.replace(i).is_some() {

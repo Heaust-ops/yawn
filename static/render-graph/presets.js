@@ -1,6 +1,8 @@
+import { descriptors } from "./catalog.js";
+
 const input = (node, socket) => ({ node, socket });
 const node = (id, key, parameters = {}, inputs = {}) => ({
-  id, state: "enabled", executor: { key, version: 1 }, parameters, inputs,
+  id, state: "enabled", executor: { key, version: descriptors[key].version }, parameters, inputs,
 });
 const texture = (format, scale = 1) => ({
   texture: {

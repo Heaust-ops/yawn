@@ -27,6 +27,104 @@ pub use pipeline_library::PipelineLibrary;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct FullscreenUniforms {
+    values: [[f32; 4]; 8],
+}
+
+fn pack_fullscreen_uniforms(
+    key: &str,
+    parameters: &crate::render_graph::NormalizedParameters,
+) -> Option<FullscreenUniforms> {
+    use crate::render_graph::NormalizedParameters;
+    let first = match (key, parameters) {
+        (
+            "fullscreen_copy" | "frame_out",
+            NormalizedParameters::FullscreenCopy | NormalizedParameters::FrameOut,
+        ) => [0.; 4],
+        ("tone_map", NormalizedParameters::ToneMap { exposure }) => [*exposure, 0., 0., 0.],
+        ("bloom_extract", NormalizedParameters::BloomExtract { threshold, knee }) => {
+            [*threshold, *knee, 0., 0.]
+        }
+        ("bloom_blur", NormalizedParameters::BloomBlur { direction, radius }) => {
+            [direction[0], direction[1], *radius, 0.]
+        }
+        ("bloom_composite", NormalizedParameters::BloomComposite { intensity }) => {
+            [*intensity, 0., 0., 0.]
+        }
+        ("luminance_edge", NormalizedParameters::LuminanceEdge { strength }) => {
+            [*strength, 0., 0., 0.]
+        }
+        _ => return None,
+    };
+    let mut values = [[0.; 4]; 8];
+    values[0] = first;
+    Some(FullscreenUniforms { values })
+}
+
+fn resolve_fullscreen_entry(key: &str) -> Option<&'static str> {
+    match key {
+        "fullscreen_copy" | "frame_out" => Some("fs_copy"),
+        "tone_map" => Some("fs_tone_map"),
+        "bloom_extract" => Some("fs_bloom_extract"),
+        "bloom_blur" => Some("fs_bloom_blur"),
+        "bloom_composite" => Some("fs_bloom_composite"),
+        "luminance_edge" => Some("fs_luminance_edge"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_tests {
+    use super::*;
+    use crate::render_graph::NormalizedParameters;
+
+    #[test]
+    fn fullscreen_uniform_abi_and_packer_are_fixed() {
+        assert_eq!(std::mem::size_of::<FullscreenUniforms>(), 128);
+        assert_eq!(std::mem::align_of::<FullscreenUniforms>(), 16);
+        let packed = pack_fullscreen_uniforms(
+            "bloom_blur",
+            &NormalizedParameters::BloomBlur {
+                direction: [0.0, 1.0],
+                radius: 3.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(packed.values[0], [0.0, 1.0, 3.0, 0.0]);
+        assert!(packed.values[1..].iter().all(|value| *value == [0.0; 4]));
+        assert_eq!(bytemuck::bytes_of(&packed).len(), 128);
+        assert!(
+            pack_fullscreen_uniforms("tone_map", &NormalizedParameters::FullscreenCopy).is_none()
+        );
+    }
+
+    #[test]
+    fn fullscreen_entries_are_explicit() {
+        assert_eq!(resolve_fullscreen_entry("fullscreen_copy"), Some("fs_copy"));
+        assert_eq!(resolve_fullscreen_entry("frame_out"), Some("fs_copy"));
+        assert_eq!(resolve_fullscreen_entry("tone_map"), Some("fs_tone_map"));
+        assert_eq!(
+            resolve_fullscreen_entry("bloom_extract"),
+            Some("fs_bloom_extract")
+        );
+        assert_eq!(
+            resolve_fullscreen_entry("bloom_blur"),
+            Some("fs_bloom_blur")
+        );
+        assert_eq!(
+            resolve_fullscreen_entry("bloom_composite"),
+            Some("fs_bloom_composite")
+        );
+        assert_eq!(
+            resolve_fullscreen_entry("luminance_edge"),
+            Some("fs_luminance_edge")
+        );
+        assert_eq!(resolve_fullscreen_entry("unknown"), None);
+    }
+}
+
 struct GpuTextureSlot {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -840,7 +938,7 @@ impl<T: Scene + 'static> Renderer<T> {
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
-                                min_binding_size: None,
+                                min_binding_size: wgpu::BufferSize::new(128),
                             },
                             count: None,
                         },
@@ -872,11 +970,14 @@ impl<T: Scene + 'static> Renderer<T> {
             });
         let mut executions = Vec::new();
         for (index, execution) in graph.executions.iter().enumerate() {
+            let contract = crate::render_graph::contract(&execution.executor.key)
+                .ok_or_else(|| fail("executor contract missing"))?;
             match execution.executor.key.as_str() {
                 "frustum_cull" => executions.push(PreparedExecution::FrustumCull),
                 "mesh_query" => executions.push(PreparedExecution::MeshQuery),
-                "frame_out" | "fullscreen_copy" | "tone_map" | "bloom_extract" | "bloom_blur"
-                | "bloom_composite" | "luminance_edge" => {
+                _ if execution.executor.key == "frame_out"
+                    || contract.fullscreen_policy.is_some() =>
+                {
                     let frame_out = execution.executor.key == "frame_out";
                     let (source, second) = if frame_out {
                         let ExecutionKind::FrameOut { color } = execution.kind else {
@@ -884,51 +985,37 @@ impl<T: Scene + 'static> Renderer<T> {
                         };
                         (color, color)
                     } else {
-                        match execution.inputs.as_slice() {
-                            [source, _color_target] => (source.resource, source.resource),
-                            [source, bloom, _color_target]
-                                if execution.executor.key == "bloom_composite" =>
-                            {
-                                (source.resource, bloom.resource)
-                            }
+                        let sampled: Vec<_> = contract
+                            .inputs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, input)| {
+                                input.role == crate::render_graph::InputRole::SampledTexture
+                            })
+                            .map(|(index, _)| {
+                                execution.inputs.get(index).map(|input| input.resource)
+                            })
+                            .collect::<Option<_>>()
+                            .ok_or_else(|| fail("fullscreen inputs mismatch"))?;
+                        match (contract.fullscreen_policy, sampled.as_slice()) {
+                            (
+                                Some(crate::render_graph::FullscreenPolicy::BloomComposite),
+                                [source, second],
+                            ) => (*source, *second),
+                            (Some(_), [source]) => (*source, *source),
                             _ => return Err(fail("fullscreen inputs mismatch")),
                         }
                     };
-                    let values: [f32; 8] =
-                        match (execution.executor.key.as_str(), &execution.parameters) {
-                            (
-                                "fullscreen_copy" | "frame_out",
-                                NormalizedParameters::FullscreenCopy
-                                | NormalizedParameters::FrameOut,
-                            ) => [0.; 8],
-                            ("tone_map", NormalizedParameters::ToneMap { exposure }) => {
-                                [*exposure, 0., 0., 0., 0., 0., 0., 0.]
-                            }
-                            (
-                                "bloom_extract",
-                                NormalizedParameters::BloomExtract { threshold, knee },
-                            ) => [*threshold, *knee, 0., 0., 0., 0., 0., 0.],
-                            (
-                                "bloom_blur",
-                                NormalizedParameters::BloomBlur { direction, radius },
-                            ) => [direction[0], direction[1], *radius, 0., 0., 0., 0., 0.],
-                            (
-                                "bloom_composite",
-                                NormalizedParameters::BloomComposite { intensity },
-                            ) => [*intensity, 0., 0., 0., 0., 0., 0., 0.],
-                            (
-                                "luminance_edge",
-                                NormalizedParameters::LuminanceEdge { strength },
-                            ) => [*strength, 0., 0., 0., 0., 0., 0., 0.],
-                            _ => return Err(fail("executor parameters mismatch")),
-                        };
+                    let values =
+                        pack_fullscreen_uniforms(&execution.executor.key, &execution.parameters)
+                            .ok_or_else(|| fail("executor parameters mismatch"))?;
                     use wgpu::util::DeviceExt;
                     let uniform =
                         self.context
                             .device
                             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                 label: Some(" post parameters"),
-                                contents: bytemuck::cast_slice(&values),
+                                contents: bytemuck::bytes_of(&values),
                                 usage: wgpu::BufferUsages::UNIFORM,
                             });
                     let target_format = if frame_out {
@@ -960,16 +1047,8 @@ impl<T: Scene + 'static> Renderer<T> {
                             .descriptor
                             .format
                     };
-                    let entry = match execution.executor.key.as_str() {
-                        "fullscreen_copy" => "fs_copy",
-                        "tone_map" => "fs_tone_map",
-                        "bloom_extract" => "fs_bloom_extract",
-                        "bloom_blur" => "fs_bloom_blur",
-                        "bloom_composite" => "fs_bloom_composite",
-                        "luminance_edge" => "fs_luminance_edge",
-                        "frame_out" => "fs_copy",
-                        _ => return Err(fail("fullscreen executor mismatch")),
-                    };
+                    let entry = resolve_fullscreen_entry(&execution.executor.key)
+                        .ok_or_else(|| fail("fullscreen executor mismatch"))?;
                     let pipeline = self.context.device.create_render_pipeline(
                         &wgpu::RenderPipelineDescriptor {
                             label: Some(" post pipeline"),
