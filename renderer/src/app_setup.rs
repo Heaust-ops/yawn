@@ -22,7 +22,6 @@ pub struct EventListeners {
     pub click_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
     pub wheel_listener: Option<Closure<dyn FnMut(web_sys::WheelEvent)>>,
     pub contextmenu_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
-    pub keyboard_listener: Option<Closure<dyn FnMut(web_sys::KeyboardEvent)>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -34,7 +33,6 @@ impl EventListeners {
             click_listener: None,
             wheel_listener: None,
             contextmenu_listener: None,
-            keyboard_listener: None,
         }
     }
 }
@@ -153,26 +151,12 @@ pub fn setup_event_listeners(
         contextmenu_listener.as_ref().unchecked_ref(),
     )?;
 
-    let keyboard_worker_chan = worker_chan.clone();
-    let keyboard_listener: Closure<dyn FnMut(web_sys::KeyboardEvent)> =
-        Closure::new(move |event: web_sys::KeyboardEvent| {
-            use crate::message::KeyboardMessage;
-
-            let keyboard_event_data = KeyboardMessage::from_evt(event);
-
-            let _ = keyboard_worker_chan.send(WindowEvent::Keyboard(keyboard_event_data));
-        });
-
-    window
-        .add_event_listener_with_callback("keydown", keyboard_listener.as_ref().unchecked_ref())?;
-
     Ok(EventListeners {
         resize_listener: Some(resize_listener),
         pointer_listener: Some(pointer_listener),
         click_listener: Some(click_listener),
         wheel_listener: Some(wheel_listener),
         contextmenu_listener: Some(contextmenu_listener),
-        keyboard_listener: Some(keyboard_listener),
     })
 }
 

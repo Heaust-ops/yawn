@@ -42,20 +42,6 @@ pub enum WindowEvent {
     PointerMove(MouseMessage),
     PointerClick(MouseMessage),
     PointerWheel(WheelMessage),
-    Keyboard(KeyboardMessage),
-}
-
-// Display for WindowEvent
-impl fmt::Display for WindowEvent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WindowEvent::Resize(msg) => write!(f, "Resize: {:?}", msg),
-            WindowEvent::PointerMove(msg) => write!(f, "PointerMove: {:?}", msg),
-            WindowEvent::PointerClick(msg) => write!(f, "PointerClick: {:?}", msg),
-            WindowEvent::PointerWheel(msg) => write!(f, "PointerWheel: {:?}", msg),
-            WindowEvent::Keyboard(msg) => write!(f, "Keyboard: {:?}", msg),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,10 +54,7 @@ pub struct ResizeMessage {
 #[derive(Debug, Clone)]
 pub struct MouseMessage {
     pub scale_factor: f64,
-    pub button: f64,
     pub buttons: u16,
-    pub client_x: f64,
-    pub client_y: f64,
     pub movement_x: f64,
     pub movement_y: f64,
     pub offset_x: f64,
@@ -84,10 +67,7 @@ impl MouseMessage {
         let window = web_sys::window().unwrap();
         Self {
             scale_factor: window.device_pixel_ratio(),
-            button: event.button() as f64,
             buttons: event.buttons(),
-            client_x: event.client_x() as f64,
-            client_y: event.client_y() as f64,
             movement_x: event.movement_x() as f64,
             movement_y: event.movement_y() as f64,
             offset_x: event.offset_x() as f64,
@@ -110,33 +90,6 @@ impl WheelMessage {
     pub fn from_evt(event: &web_sys::WheelEvent, viewport_height: f64) -> Option<Self> {
         normalize_wheel_delta(event.delta_y(), event.delta_mode(), viewport_height)
             .map(|delta_y_pixels| Self { delta_y_pixels })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct KeyboardMessage {
-    pub key: String,
-    pub code: String,
-    pub alt_key: bool,
-    pub ctrl_key: bool,
-    pub meta_key: bool,
-    pub shift_key: bool,
-    pub location: u32,
-    pub repeat: bool,
-}
-
-impl KeyboardMessage {
-    pub fn from_evt(event: web_sys::KeyboardEvent) -> Self {
-        Self {
-            key: event.key(),
-            code: event.code(),
-            alt_key: event.alt_key(),
-            ctrl_key: event.ctrl_key(),
-            meta_key: event.meta_key(),
-            shift_key: event.shift_key(),
-            location: event.location(),
-            repeat: event.repeat(),
-        }
     }
 }
 

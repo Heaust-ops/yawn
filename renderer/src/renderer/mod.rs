@@ -1,8 +1,6 @@
 use std::{cell::RefCell, rc::Rc, sync::mpsc::Receiver};
 
-use futures::channel::oneshot;
 use log::info;
-use ultraviolet::Vec4;
 use wasm_bindgen::{prelude::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::DedicatedWorkerGlobalScope;
@@ -1632,7 +1630,7 @@ impl<T: Scene + 'static> Renderer<T> {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
 
@@ -2860,98 +2858,6 @@ impl<T: Scene + 'static> Renderer<T> {
         let _ = global.post_message(&value);
     }
 
-    pub async fn read_pixel_from_texture(&self, x: u32, y: u32) -> Vec4 {
-        let width = self.context.depth_texture.width();
-        let height = self.context.depth_texture.height();
-
-        if width == 0 || height == 0 {
-            log::warn!("Depth texture has zero extent ({} x {})", width, height);
-            return Vec4::zero();
-        }
-
-        // Validate coordinates
-        if x >= width || y >= height {
-            log::warn!(
-                "Pixel coordinates ({}, {}) out of bounds for texture size {}x{}",
-                x,
-                y,
-                width,
-                height
-            );
-            return Vec4::zero();
-        }
-
-        let pixel_size = std::mem::size_of::<f32>() as u32;
-        let unpadded_row_bytes = width * pixel_size;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_row_bytes = if unpadded_row_bytes % align == 0 {
-            unpadded_row_bytes
-        } else {
-            (unpadded_row_bytes / align + 1) * align
-        };
-        let buffer_size = padded_row_bytes as u64 * height as u64;
-        let buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("depth pixel read buffer"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        // Copy just the single pixel
-        let mut encoder =
-            self.context
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("copy depth pixel to buffer"),
-                });
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.context.depth_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
-                aspect: wgpu::TextureAspect::DepthOnly,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row_bytes),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        self.context.queue.submit(std::iter::once(encoder.finish()));
-
-        // Map the buffer and read the pixel
-        let slice = buffer.slice(..);
-        let (tx, rx) = oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-
-        // Poll the device to process the mapping
-
-        rx.await.unwrap().unwrap();
-        let depth_value = {
-            let data = slice.get_mapped_range();
-            let row_pitch = padded_row_bytes as usize;
-            let byte_offset = y as usize * row_pitch + x as usize * pixel_size as usize;
-            let mut depth_bytes = [0u8; 4];
-            depth_bytes.copy_from_slice(&data[byte_offset..byte_offset + 4]);
-            f32::from_le_bytes(depth_bytes)
-        };
-        buffer.unmap();
-
-        Vec4::new(depth_value, 0.0, 0.0, 0.0)
-    }
-
     pub async fn handle_event(renderer: Rc<RefCell<Self>>, event: WindowEvent) {
         match event {
             WindowEvent::PointerMove(msg) => {
@@ -2961,36 +2867,18 @@ impl<T: Scene + 'static> Renderer<T> {
                 renderer.borrow_mut().resize(msg);
             }
             WindowEvent::PointerClick(msg) => {
-                {
-                    log::info!("click start");
+                log::info!("click start");
 
-                    let mut r = renderer.borrow_mut();
-                    let x = (msg.offset_x * msg.scale_factor) as f32;
-                    let y = (msg.offset_y * msg.scale_factor) as f32;
-                    r.scene.handle_mouse_click(x, y);
-                    log::info!("clicked");
-                }
-
-                // Read pixel from depth texture at click coordinates
-                // let renderer_clone = renderer.clone();
-                // let x_coord = msg.offset_x as u32;
-                // let y_coord = msg.offset_y as u32;
-                // let pixel_value = renderer_clone
-                //     .borrow()
-                //     .read_pixel_from_texture(x_coord, y_coord)
-                //     .await;
-                // log::info!(
-                //     "Depth pixel at ({}, {}): {:?}",
-                //     x_coord,
-                //     y_coord,
-                //     pixel_value
-                // );
+                let mut r = renderer.borrow_mut();
+                let x = (msg.offset_x * msg.scale_factor) as f32;
+                let y = (msg.offset_y * msg.scale_factor) as f32;
+                r.scene.handle_mouse_click(x, y);
+                log::info!("clicked");
             }
             WindowEvent::PointerWheel(msg) => {
                 let mut r = renderer.borrow_mut();
                 r.scene.handle_zoom(msg.delta_y_pixels);
             }
-            WindowEvent::Keyboard(_) => {}
         }
     }
 

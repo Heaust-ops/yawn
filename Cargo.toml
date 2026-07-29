@@ -21,7 +21,6 @@ web-sys = { version = "0.3.77", features = [
     "MouseEvent",
     "PointerEvent",
     "WheelEvent",
-    "KeyboardEvent",
     "Worker",
     "DedicatedWorkerGlobalScope",
     "Event",

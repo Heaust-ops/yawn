@@ -136,13 +136,14 @@ pub fn generate_wgsl(plan: &InstanceTraversalPlan) -> Result<String, String> {
                 fixed_index(*index, 32, "u32 bit projection")?;
                 format!("(({} & (1u<<{}u))!=0u)", x(*value), index)
             }
-            ExpressionOp::U32Construct { bits } => bits
-                .iter()
-                .enumerate()
-                .map(|(bit, id)| format!("select(0u,{}u,{})", 1u32 << bit, x(*id)))
-                .collect::<Vec<_>>()
-                .join("|")
-                .pipe(|terms| format!("({terms})")),
+            ExpressionOp::U32Construct { bits } => format!(
+                "({})",
+                bits.iter()
+                    .enumerate()
+                    .map(|(bit, id)| format!("select(0u,{}u,{})", 1u32 << bit, x(*id)))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
             ExpressionOp::AabbMin { aabb } => format!("{}.min", x(*aabb)),
             ExpressionOp::AabbMax { aabb } => format!("{}.max", x(*aabb)),
             ExpressionOp::FrustumCulled { local_aabb, .. } => {
@@ -201,13 +202,6 @@ fn matrix_literal<const N: usize>(name: &str, columns: &[[f32; N]; N]) -> Result
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("{name}({})", values.join(",")))
 }
-trait Pipe: Sized {
-    fn pipe<R>(self, f: impl FnOnce(Self) -> R) -> R {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}
-
 pub fn dispatch_count(instances: u32, pipelines: u32) -> u32 {
     if pipelines == 0 {
         0
@@ -403,6 +397,19 @@ impl TraversalGpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_graph::{Expression, ExpressionPlan, NodeOutputRef};
+
+    fn expression(semantic_type: SemanticType, op: ExpressionOp) -> Expression {
+        Expression {
+            semantic_type,
+            op,
+            origin: NodeOutputRef {
+                node: "test".into(),
+                socket: "value".into(),
+            },
+            mesh_provenance: None,
+        }
+    }
 
     #[test]
     fn pipeline_major_offsets_and_single_dispatch_are_deterministic() {
@@ -423,5 +430,45 @@ mod tests {
         );
         assert!(fixed_index(3, 3, "vector projection").is_err());
         assert_eq!(wgsl_type(&SemanticType::Mat4).unwrap(), "mat4x4<f32>");
+    }
+
+    #[test]
+    fn u32_construct_wgsl_is_parenthesized() {
+        let plan = InstanceTraversalPlan {
+            mesh: 0,
+            expressions: ExpressionPlan {
+                expressions: vec![
+                    expression(
+                        SemanticType::Bool,
+                        ExpressionOp::Literal {
+                            literal: TypedLiteral::Bool(true),
+                        },
+                    ),
+                    expression(
+                        SemanticType::Bool,
+                        ExpressionOp::Literal {
+                            literal: TypedLiteral::Bool(false),
+                        },
+                    ),
+                    expression(
+                        SemanticType::U32,
+                        ExpressionOp::U32Construct {
+                            bits: vec![
+                                crate::render_graph::ExprId(0),
+                                crate::render_graph::ExprId(1),
+                            ],
+                        },
+                    ),
+                ],
+            },
+            pipelines: vec![],
+            requires_camera: false,
+        };
+
+        let wgsl = generate_wgsl(&plan).unwrap();
+        assert_eq!(
+            wgsl.lines().find(|line| line.starts_with("let e2=")),
+            Some("let e2=(select(0u,1u,e0)|select(0u,2u,e1));")
+        );
     }
 }
