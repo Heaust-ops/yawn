@@ -204,3 +204,11 @@ export function layoutSocketsCompatible(from: LayoutSocket, to: LayoutSocket): b
     from.direction === "output" && to.direction === "input" && (to.wildcardInput || to.accepts.includes(from.dataType))
   );
 }
+
+export function layoutSocketAcceptsLink(from: LayoutSocket, to: LayoutSocket): boolean {
+  return (
+    from.nodeId !== to.nodeId &&
+    layoutSocketsCompatible(from, to) &&
+    (to.capacity === 1 || to.linkIds.length < to.capacity)
+  );
+}

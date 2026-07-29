@@ -3,7 +3,7 @@ import type { Command } from "../commands/types.js";
 import { viewToWorld } from "../layout/geometry.js";
 import { GEOMETRY as G } from "../layout/constants.js";
 import {
-  layoutSocketsCompatible,
+  layoutSocketAcceptsLink,
   type LayoutControl,
   type LayoutSnapshot,
   type Rect,
@@ -219,7 +219,7 @@ export const boxNodes = (layout: LayoutSnapshot, a: Vec2, b: Vec2): NodeId[] => 
 export const compatibleTargets = (layout: LayoutSnapshot, fromId: SocketId) => {
   const from = layout.sockets.get(fromId);
   if (!from || from.direction !== "output") return [];
-  return [...layout.sockets.values()].filter((to) => to.nodeId !== from.nodeId && layoutSocketsCompatible(from, to));
+  return [...layout.sockets.values()].filter((to) => layoutSocketAcceptsLink(from, to));
 };
 export function planLink(
   layout: LayoutSnapshot,
@@ -230,8 +230,9 @@ export function planLink(
   const from = layout.sockets.get(fromId),
     to = layout.sockets.get(toId);
   if (!from || !to || !compatibleTargets(layout, fromId).some((s) => s.id === toId)) return;
+  const replacing = to.capacity === 1 && to.linkIds.length > 0;
   const link: GraphLink = {
-    id: to.linkIds[0] ?? newId,
+    id: replacing ? to.linkIds[0]! : newId,
     fromNodeId: from.nodeId,
     fromSocketId: from.id,
     toNodeId: to.nodeId,
@@ -239,9 +240,7 @@ export function planLink(
     muted: false,
     extensions: {},
   };
-  return to.capacity === 1 && to.linkIds.length
-    ? { type: "link.replace", removeId: to.linkIds[0]!, link }
-    : { type: "link.add", link };
+  return replacing ? { type: "link.replace", removeId: to.linkIds[0]!, link } : { type: "link.add", link };
 }
 export const clampResize = (layout: LayoutSnapshot, id: NodeId, world: Vec2): Vec2 | undefined => {
   const n = layout.nodes.get(id);

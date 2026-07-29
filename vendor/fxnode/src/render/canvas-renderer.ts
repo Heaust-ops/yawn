@@ -2,7 +2,7 @@ import { GEOMETRY as G } from "../layout/constants.js";
 import { worldToView } from "../layout/geometry.js";
 import type { LinkId, NodeId, ParameterValue, SocketId } from "../core/types.js";
 import {
-  layoutSocketsCompatible,
+  layoutSocketAcceptsLink,
   type LayoutControl,
   type LayoutSnapshot,
   type LayoutSocket,
@@ -755,11 +755,24 @@ export function renderCanvas(
       context.bezierCurveTo(a.x + dx, a.y, b.x - dx, b.y, b.x, b.y);
       context.stroke();
       for (const socket of snapshot.sockets.values()) {
-        if (layoutSocketsCompatible(from, socket)) {
-          const p = worldToView(socket.anchor, t);
+        if (layoutSocketAcceptsLink(from, socket)) {
+          const candidate = socket.id === interaction.linkDrag.candidate;
           context.beginPath();
-          context.arc(p.x, p.y, socket.id === interaction.linkDrag.candidate ? 10 : 8, 0, Math.PI * 2);
-          context.strokeStyle = socket.id === interaction.linkDrag.candidate ? theme.emphasis : socket.color;
+          if (socket.shape === "multi-input" && socket.bounds) {
+            const topLeft = worldToView({ x: socket.bounds.x, y: socket.bounds.y }, t),
+              padding = candidate ? 4 : 2;
+            context.roundRect(
+              topLeft.x - padding,
+              topLeft.y - padding,
+              socket.bounds.width * t.zoom + padding * 2,
+              socket.bounds.height * t.zoom + padding * 2,
+              G.socket * t.zoom + padding,
+            );
+          } else {
+            const p = worldToView(socket.anchor, t);
+            context.arc(p.x, p.y, candidate ? 10 : 8, 0, Math.PI * 2);
+          }
+          context.strokeStyle = candidate ? theme.emphasis : socket.color;
           context.stroke();
         }
       }

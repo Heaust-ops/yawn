@@ -162,6 +162,51 @@ test("logic nodes accept five links through one input and application evaluation
   expect(initial.labels).toContain("AND: false");
 
   await page.evaluate(async () => {
+    const view = window.fxnodeStandalone.view!;
+    const modifiers = { alt: false, control: false, meta: false, shift: false };
+    view.feedInput({
+      kind: "pointer",
+      phase: "down",
+      pointerId: 41,
+      pointerType: "mouse",
+      position: { x: 353, y: 190 },
+      button: 0,
+      buttons: 1,
+      modifiers,
+    });
+    view.feedInput({
+      kind: "pointer",
+      phase: "move",
+      pointerId: 41,
+      pointerType: "mouse",
+      position: { x: 464, y: 468 },
+      button: 0,
+      buttons: 1,
+      modifiers,
+    });
+    await view.whenRendered();
+    view.feedInput({
+      kind: "pointer",
+      phase: "up",
+      pointerId: 41,
+      pointerType: "mouse",
+      position: { x: 464, y: 468 },
+      button: 0,
+      buttons: 0,
+      modifiers,
+    });
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.fxnodeStandalone
+          .root!.getState()
+          .then((state) => state.links.filter((link) => link.toSocketId === "or:inputs").length),
+      ),
+    )
+    .toBe(4);
+
+  await page.evaluate(async () => {
     const root = window.fxnodeStandalone.root!;
     const source = (await root.getState()).nodes.find((node) => node.id === "c")!;
     return root.dispatch({

@@ -497,6 +497,14 @@ test("multi-input sockets use pill hit bounds and stable per-link anchors", () =
   for (const [id, anchor] of socket.linkAnchors) {
     assert.deepEqual(snapshot.links.get(id)!.points.at(-1), anchor);
   }
+  const next = planLink(
+    snapshot,
+    sources[0]!.sockets.find((candidate) => candidate.key === "mesh")!.id,
+    socket.id,
+    linkId("fresh-link"),
+  );
+  assert.equal(next?.type, "link.add");
+  if (next?.type === "link.add") assert.equal(next.link.id, linkId("fresh-link"));
   assert.deepEqual(hitTest(snapshot, worldToView({ x: socket.anchor.x, y: socket.bounds!.y - 2 }, transform)), {
     kind: "socket",
     id: socket.id,
