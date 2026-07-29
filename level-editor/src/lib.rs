@@ -1,11 +1,9 @@
-use std::sync::mpsc::Receiver;
-use std::{cell::RefCell, rc::Rc};
 use ultraviolet::Mat4;
 use wasm_bindgen::prelude::*;
 
-use renderer::app_setup::WebApp;
+#[cfg(target_arch = "wasm32")]
+use renderer::app_setup::WebAppRuntime;
 use renderer::camera::Camera;
-use renderer::message::WindowEvent;
 use renderer::render_data::{InstanceType, MeshCreateInfo, RenderData};
 use renderer::renderer as gpu_renderer;
 use renderer::renderer::gpu_scene::vertex_layouts;
@@ -18,7 +16,7 @@ struct Vertex {
     pos: [f32; 3],
 }
 
-pub struct EditorScene {
+struct EditorScene {
     uniform_buffers: [wgpu::Buffer; 2],
     bind_groups: [wgpu::BindGroup; 2],
     bind_group_layouts: [wgpu::BindGroupLayout; 2],
@@ -111,17 +109,6 @@ impl renderer::renderer::scene::Scene for EditorScene {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-pub struct LevelEditor {
-    #[allow(dead_code)]
-    scene: EditorScene,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl WebApp for LevelEditor {
-    type Scene = EditorScene;
-}
-
 impl EditorScene {
     /// Ground plane vertex data.
     const VERTICES: &[Vertex] = &[
@@ -208,7 +195,7 @@ pub fn main(profile: bool) -> Result<RendererBridge, JsValue> {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     wasm_logger::init(wasm_logger::Config::default());
 
-    let runtime = LevelEditor::setup_runtime(profile)?;
+    let runtime = WebAppRuntime::new::<EditorScene>("main-worker", "#canvas0", profile)?;
     Ok(RendererBridge { runtime })
 }
 

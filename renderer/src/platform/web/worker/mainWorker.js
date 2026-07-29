@@ -2,8 +2,6 @@
 // Works for any application because the relative depth from this file to pkg is stable.
 import initWasm, { clear_payloads, discard_payload, stage_payload, worker_entrypoint } from "/level-editor/pkg/level_editor.js";
 
-export function attachMain() {}
-
 export function listenerReady() {
   if (state !== "waiting-listener") return;
   state = "replaying";

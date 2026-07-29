@@ -14,27 +14,13 @@ use wasm_bindgen_futures::spawn_local;
 #[cfg(target_arch = "wasm32")]
 use web_sys::AddEventListenerOptions;
 
-/// Helper struct to store event listener closures
 #[cfg(target_arch = "wasm32")]
 pub struct EventListeners {
-    pub resize_listener: Option<Closure<dyn FnMut()>>,
-    pub pointer_listener: Option<Closure<dyn FnMut(web_sys::PointerEvent)>>,
-    pub click_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
-    pub wheel_listener: Option<Closure<dyn FnMut(web_sys::WheelEvent)>>,
-    pub contextmenu_listener: Option<Closure<dyn FnMut(web_sys::MouseEvent)>>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl EventListeners {
-    pub fn new() -> Self {
-        Self {
-            resize_listener: None,
-            pointer_listener: None,
-            click_listener: None,
-            wheel_listener: None,
-            contextmenu_listener: None,
-        }
-    }
+    _resize_listener: Closure<dyn FnMut()>,
+    _pointer_listener: Closure<dyn FnMut(web_sys::PointerEvent)>,
+    _click_listener: Closure<dyn FnMut(web_sys::MouseEvent)>,
+    _wheel_listener: Closure<dyn FnMut(web_sys::WheelEvent)>,
+    _contextmenu_listener: Closure<dyn FnMut(web_sys::MouseEvent)>,
 }
 
 /// Setup default window event listeners that forward events to the worker thread
@@ -152,11 +138,11 @@ pub fn setup_event_listeners(
     )?;
 
     Ok(EventListeners {
-        resize_listener: Some(resize_listener),
-        pointer_listener: Some(pointer_listener),
-        click_listener: Some(click_listener),
-        wheel_listener: Some(wheel_listener),
-        contextmenu_listener: Some(contextmenu_listener),
+        _resize_listener: resize_listener,
+        _pointer_listener: pointer_listener,
+        _click_listener: click_listener,
+        _wheel_listener: wheel_listener,
+        _contextmenu_listener: contextmenu_listener,
     })
 }
 
@@ -164,7 +150,6 @@ pub fn setup_event_listeners(
 #[cfg(target_arch = "wasm32")]
 pub struct WebAppRuntime {
     worker: MainWorker,
-    worker_chan: Sender<WindowEvent>,
     _event_listeners: EventListeners,
     ring: Box<CommandRing>,
 }
@@ -199,15 +184,9 @@ impl WebAppRuntime {
 
         Ok(Self {
             worker,
-            worker_chan: sender,
             _event_listeners: event_listeners,
             ring,
         })
-    }
-
-    /// Access the worker channel sender for dispatching custom window events.
-    pub fn sender(&self) -> &Sender<WindowEvent> {
-        &self.worker_chan
     }
 
     /// Access the spawned worker reference.
@@ -216,35 +195,5 @@ impl WebAppRuntime {
     }
     pub fn ring_ptr(&self) -> u32 {
         self.ring.ptr()
-    }
-}
-
-/// Trait for applications that rely on the renderer's default WASM setup.
-#[cfg(target_arch = "wasm32")]
-pub trait WebApp {
-    type Scene: crate::renderer::scene::Scene + 'static;
-
-    /// Name used for the spawned `MainWorker`.
-    fn worker_name() -> &'static str {
-        "main-worker"
-    }
-
-    /// CSS selector for the canvas element that will be transferred to the worker.
-    fn canvas_selector() -> &'static str {
-        "#canvas0"
-    }
-
-    /// Hook invoked after the runtime has been created.
-    fn on_runtime_initialized(_runtime: &mut WebAppRuntime) {}
-
-    /// Perform the default WASM initialization routine.
-    fn setup_runtime(profile: bool) -> Result<WebAppRuntime, JsValue> {
-        let mut runtime = WebAppRuntime::new::<Self::Scene>(
-            Self::worker_name(),
-            Self::canvas_selector(),
-            profile,
-        )?;
-        Self::on_runtime_initialized(&mut runtime);
-        Ok(runtime)
     }
 }

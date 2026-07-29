@@ -20,10 +20,6 @@ extern "C" {
 /// So that bundler can bundle it together.
 #[wasm_bindgen(module = "/src/platform/web/worker/mainWorker.js")]
 extern "C" {
-    /// Nothing to do.
-    #[wasm_bindgen]
-    fn attachMain();
-
     #[wasm_bindgen(js_name = "listenerReady")]
     fn listener_ready();
 }
