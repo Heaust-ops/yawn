@@ -95,6 +95,11 @@ pub struct Contract {
     #[serde(skip)]
     pub fullscreen_policy: Option<FullscreenPolicy>,
 }
+impl Contract {
+    pub const fn is_raster_draw(&self) -> bool {
+        matches!(self.execution, ExecutionClass::Render) && self.fullscreen_policy.is_none()
+    }
+}
 
 use SemanticType::*;
 const R: InputCardinality = InputCardinality { min: 1, max: 1 };
@@ -138,7 +143,7 @@ const MESH_O: &[OutputSocketContract] = &[
     o("localAabb", LocalAabb),
 ];
 const TEXTURE_O: &[OutputSocketContract] = &[o("texture", Texture)];
-const PIPE_I: &[InputSocketContract] = &[
+const RASTER_I: &[InputSocketContract] = &[
     i("mesh", MeshData, R, InputRole::SemanticRead),
     i("predicate", Bool, O, InputRole::Expression),
     i(
@@ -149,7 +154,7 @@ const PIPE_I: &[InputSocketContract] = &[
     ),
     i("depthTarget", Texture, O, InputRole::DepthTarget),
 ];
-const PIPE_O: &[OutputSocketContract] = &[o("color", Texture), o("depth", Texture)];
+const RASTER_O: &[OutputSocketContract] = &[o("color", Texture), o("depth", Texture)];
 const CULL_I: &[InputSocketContract] = &[
     i("mesh", MeshData, R, InputRole::Expression),
     i("localAabb", LocalAabb, R, InputRole::Expression),
@@ -202,7 +207,17 @@ pub static CONTRACTS: &[Contract] = &[
     c!("mesh", 2, Source, NONE_I, MESH_O, false, None),
     c!("texture", 2, Source, NONE_I, TEXTURE_O, false, None),
     c!("frustum_cull", 2, Expression, CULL_I, CULL_O, false, None),
-    c!("pipeline", 4, Render, PIPE_I, PIPE_O, false, None),
+    c!("ground_plane", 1, Render, RASTER_I, RASTER_O, false, None),
+    c!("gltf_standard", 1, Render, RASTER_I, RASTER_O, false, None),
+    c!(
+        "gltf_standard_double_sided",
+        1,
+        Render,
+        RASTER_I,
+        RASTER_O,
+        false,
+        None
+    ),
     c!(
         "and",
         2,

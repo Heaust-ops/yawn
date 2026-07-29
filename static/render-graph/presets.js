@@ -31,20 +31,20 @@ const predicates = (withCulling = false) => {
     result.find((item) => item.id === id).inputs.inputs.push(...input("not_culled", "value"));
   return { nodes: result, classes: { ground: "ground_class", pbr: "standard_class", pbr_double: "double_class" } };
 };
-const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1, withCulling = false) => {
+const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1, withCulling = false, sampleCount = 1) => {
   const classification = predicates(withCulling);
-  const explicit = colorTarget || heightScale !== 1;
   const target = colorTarget || "hdr";
   return [
-  ...(explicit && !colorTarget ? [node("hdr", "texture", texture("rgba16_float", 1, heightScale))] : []),
+  ...(!colorTarget ? [node("hdr", "texture", texture("rgba16_float", 1, heightScale, sampleCount))] : []),
+  node("scene_depth", "texture", texture("depth32_float", 1, heightScale, sampleCount)),
   node("mesh", "mesh"),
   ...classification.nodes,
-  node("ground", "pipeline", { pipeline: "ground_plane", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.ground, "value"), ...(explicit ? { colorTarget: input(target, "texture") } : {}) }),
-  node("pbr", "pipeline", { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr, "value"), colorTarget: input("ground", "color"), depthTarget: input("ground", "depth") }),
-  node("pbr_double", "pipeline", { pipeline: "gltf_standard_double_sided", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr_double, "value"), colorTarget: input("pbr", "color"), depthTarget: input("pbr", "depth") }),
+  node("ground", "ground_plane", { drawOrder: 0, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.ground, "value"), colorTarget: input(target, "texture"), depthTarget: input("scene_depth", "texture") }),
+  node("pbr", "gltf_standard", { drawOrder: 1, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr, "value"), colorTarget: input(target, "texture"), depthTarget: input("scene_depth", "texture") }),
+  node("pbr_double", "gltf_standard_double_sided", { drawOrder: 2, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr_double, "value"), colorTarget: input(target, "texture"), depthTarget: input("scene_depth", "texture") }),
 ];
 };
-const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 3, graphId, revision: 2, nodes });
+const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 3, graphId, revision: 3, nodes });
 const direct = (graphId, clearColor) => graph(graphId, [
   node("ldr", "texture", texture("rgba8_unorm")),
   ...scene("ldr", clearColor),
@@ -58,7 +58,7 @@ export const hdr = graph("preset_hdr_fullscreen", [
 ]);
 export const msaa = graph("preset_msaa", [
   node("msaa_hdr", "texture", texture("rgba16_float", 1, 1, 4)),
-  ...scene("msaa_hdr"),
+  ...scene("msaa_hdr", undefined, 1, false, 4),
   node("frame_out", "frame_out", frameOut(true), { color: input("pbr_double", "color") }),
 ]);
 export const culling = graph("preset_gpu_culling", (() => {

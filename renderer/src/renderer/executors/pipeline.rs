@@ -54,7 +54,7 @@ pub(crate) fn encode_compiled<T: Scene>(
     indirect_commands: &wgpu::Buffer,
     mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) -> Result<(), &'static str> {
-    use crate::render_graph::{ExecutionKind, NormalizedColorLoad, NormalizedDepthLoad, StoreOp};
+    use crate::render_graph::{NormalizedColorLoad, NormalizedDepthLoad, StoreOp};
     let view = |resource: u32| -> Result<&wgpu::TextureView, &'static str> {
         let a = active
             .runtime
@@ -71,176 +71,163 @@ pub(crate) fn encode_compiled<T: Scene>(
             .map(|s| &s.view)
             .ok_or(" allocation out of bounds")
     };
-    for prepared in &active.executions {
-        match prepared {
-            PreparedExecution::Fullscreen {
-                execution,
-                frame_out,
-                bind_group,
-                pipeline,
-                ..
-            } => {
-                let execution = active
+    for physical in &active.runtime.render_passes {
+        let first = *physical.executions.first().ok_or("empty physical pass")? as usize;
+        let last = *physical.executions.last().ok_or("empty physical pass")? as usize;
+        let label = if first == last {
+            active
+                .graph
+                .executions
+                .get(first)
+                .ok_or("execution out of bounds")?
+                .id
+                .clone()
+        } else {
+            format!(
+                "{}..{}",
+                active
                     .graph
                     .executions
-                    .get(*execution)
-                    .ok_or(" execution out of bounds")?;
-                let (target, operations) = if *frame_out {
-                    let ExecutionKind::FrameOut { .. } = execution.kind else {
-                        return Err("frame_out kind mismatch");
-                    };
-                    (
-                        surface,
-                        wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    )
-                } else {
-                    let ExecutionKind::Render {
-                        color_attachments, ..
-                    } = &execution.kind
-                    else {
-                        return Err("fullscreen is not render");
-                    };
-                    let color = color_attachments
-                        .first()
-                        .ok_or("fullscreen target missing")?;
-                    (
-                        view(color.resource)?,
-                        wgpu::Operations {
-                            load: match color.load {
-                                NormalizedColorLoad::Load => wgpu::LoadOp::Load,
-                                NormalizedColorLoad::Clear { value } => {
-                                    wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: value[0],
-                                        g: value[1],
-                                        b: value[2],
-                                        a: value[3],
-                                    })
-                                }
+                    .get(first)
+                    .ok_or("execution out of bounds")?
+                    .id,
+                active
+                    .graph
+                    .executions
+                    .get(last)
+                    .ok_or("execution out of bounds")?
+                    .id
+            )
+        };
+        let (colors, depth) = match &physical.kind {
+            crate::render_graph::PhysicalRenderPassKind::Surface => (
+                vec![Some(wgpu::RenderPassColorAttachment {
+                    view: surface,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                None,
+            ),
+            crate::render_graph::PhysicalRenderPassKind::Texture {
+                color_attachments,
+                depth_stencil,
+            } => {
+                let colors = color_attachments
+                    .iter()
+                    .map(|color| {
+                        Ok(Some(wgpu::RenderPassColorAttachment {
+                            view: view(color.resource)?,
+                            depth_slice: None,
+                            resolve_target: color.resolve_target.map(view).transpose()?,
+                            ops: wgpu::Operations {
+                                load: match color.load {
+                                    NormalizedColorLoad::Load => wgpu::LoadOp::Load,
+                                    NormalizedColorLoad::Clear { value } => {
+                                        wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: value[0],
+                                            g: value[1],
+                                            b: value[2],
+                                            a: value[3],
+                                        })
+                                    }
+                                },
+                                store: if color.store == StoreOp::Store {
+                                    wgpu::StoreOp::Store
+                                } else {
+                                    wgpu::StoreOp::Discard
+                                },
                             },
-                            store: if color.store == StoreOp::Store {
-                                wgpu::StoreOp::Store
-                            } else {
-                                wgpu::StoreOp::Discard
-                            },
-                        },
-                    )
-                };
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&execution.id),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: operations,
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: profile
-                        .as_deref_mut()
-                        .and_then(|p| p.render_writes(&execution.id)),
-                });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.draw(0..3, 0..1);
+                        }))
+                    })
+                    .collect::<Result<Vec<_>, &'static str>>()?;
+                let depth = depth_stencil
+                    .as_ref()
+                    .map(|depth| -> Result<_, &'static str> {
+                        Ok(wgpu::RenderPassDepthStencilAttachment {
+                            view: view(depth.resource)?,
+                            depth_ops: Some(wgpu::Operations {
+                                load: match depth.load {
+                                    NormalizedDepthLoad::Load => wgpu::LoadOp::Load,
+                                    NormalizedDepthLoad::Clear { value } => {
+                                        wgpu::LoadOp::Clear(value)
+                                    }
+                                },
+                                store: if depth.store == StoreOp::Store {
+                                    wgpu::StoreOp::Store
+                                } else {
+                                    wgpu::StoreOp::Discard
+                                },
+                            }),
+                            stencil_ops: None,
+                        })
+                    })
+                    .transpose()?;
+                (colors, depth)
             }
-            PreparedExecution::Pipeline {
-                execution,
-                base,
-                predicate_ordinal,
-                variant,
-            } => {
-                let execution = active
-                    .graph
-                    .executions
-                    .get(*execution)
-                    .ok_or(" execution out of bounds")?;
-                let ExecutionKind::Render {
-                    color_attachments,
-                    depth_stencil,
-                } = &execution.kind
-                else {
-                    return Err("pipeline is not render");
-                };
-                let color = color_attachments.first().ok_or("pipeline color missing")?;
-                let depth = depth_stencil.as_ref().ok_or("pipeline depth missing")?;
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some(&execution.id),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: view(color.resource)?,
-                        depth_slice: None,
-                        resolve_target: color.resolve_target.map(view).transpose()?,
-                        ops: wgpu::Operations {
-                            load: match color.load {
-                                NormalizedColorLoad::Load => wgpu::LoadOp::Load,
-                                NormalizedColorLoad::Clear { value } => {
-                                    wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: value[0],
-                                        g: value[1],
-                                        b: value[2],
-                                        a: value[3],
-                                    })
-                                }
-                            },
-                            store: if color.store == StoreOp::Store {
-                                wgpu::StoreOp::Store
-                            } else {
-                                wgpu::StoreOp::Discard
-                            },
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: view(depth.resource)?,
-                        depth_ops: Some(wgpu::Operations {
-                            load: match depth.load {
-                                NormalizedDepthLoad::Load => wgpu::LoadOp::Load,
-                                NormalizedDepthLoad::Clear { value } => wgpu::LoadOp::Clear(value),
-                            },
-                            store: if depth.store == StoreOp::Store {
-                                wgpu::StoreOp::Store
-                            } else {
-                                wgpu::StoreOp::Discard
-                            },
-                        }),
-                        stencil_ops: None,
-                    }),
-                    occlusion_query_set: None,
-                    timestamp_writes: profile
-                        .as_deref_mut()
-                        .and_then(|p| p.render_writes(&execution.id)),
-                });
-                for (i, group) in scene.bind_groups().iter().enumerate() {
-                    pass.set_bind_group(i as u32, group, &[]);
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(&label),
+            color_attachments: &colors,
+            depth_stencil_attachment: depth,
+            occlusion_query_set: None,
+            timestamp_writes: profile.as_deref_mut().and_then(|p| p.render_writes(&label)),
+        });
+        for &member in &physical.executions {
+            match active
+                .executions
+                .get(member as usize)
+                .ok_or("prepared execution out of bounds")?
+            {
+                PreparedExecution::Fullscreen {
+                    bind_group,
+                    pipeline,
+                    ..
+                } => {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, bind_group, &[]);
+                    pass.draw(0..3, 0..1);
                 }
-                if let (Some(p), Some(n), Some(u), Some(t), Some(ix), Some(inst)) = (
-                    &gpu.positions.buffer,
-                    &gpu.normals.buffer,
-                    &gpu.uvs.buffer,
-                    &gpu.tangents.buffer,
-                    &gpu.indices.buffer,
-                    &gpu.instances.buffer,
-                ) {
-                    pass.set_vertex_buffer(0, p.slice(..));
-                    pass.set_vertex_buffer(1, n.slice(..));
-                    pass.set_vertex_buffer(2, u.slice(..));
-                    pass.set_vertex_buffer(4, t.slice(..));
-                    pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.set_vertex_buffer(3, inst.slice(..));
-                    for (draw_index, draw) in gpu.draws.iter().enumerate() {
-                        pass.set_pipeline(variant);
-                        if pipelines.requires_material(*base) {
-                            pass.set_bind_group(2, materials.group(draw.material), &[]);
+                PreparedExecution::Pipeline {
+                    base,
+                    predicate_ordinal,
+                    variant,
+                    ..
+                } => {
+                    for (i, group) in scene.bind_groups().iter().enumerate() {
+                        pass.set_bind_group(i as u32, group, &[]);
+                    }
+                    if let (Some(p), Some(n), Some(u), Some(t), Some(ix), Some(inst)) = (
+                        &gpu.positions.buffer,
+                        &gpu.normals.buffer,
+                        &gpu.uvs.buffer,
+                        &gpu.tangents.buffer,
+                        &gpu.indices.buffer,
+                        &gpu.instances.buffer,
+                    ) {
+                        pass.set_vertex_buffer(0, p.slice(..));
+                        pass.set_vertex_buffer(1, n.slice(..));
+                        pass.set_vertex_buffer(2, u.slice(..));
+                        pass.set_vertex_buffer(4, t.slice(..));
+                        pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.set_vertex_buffer(3, inst.slice(..));
+                        for (draw_index, draw) in gpu.draws.iter().enumerate() {
+                            pass.set_pipeline(variant);
+                            if pipelines.requires_material(*base) {
+                                pass.set_bind_group(2, materials.group(draw.material), &[]);
+                            }
+                            pass.draw_indexed_indirect(
+                                indirect_commands,
+                                crate::renderer::instance_traversal::command_offset(
+                                    *predicate_ordinal,
+                                    gpu.draws.len(),
+                                    draw_index,
+                                ),
+                            );
                         }
-                        pass.draw_indexed_indirect(
-                            indirect_commands,
-                            crate::renderer::instance_traversal::command_offset(
-                                *predicate_ordinal,
-                                gpu.draws.len(),
-                                draw_index,
-                            ),
-                        );
                     }
                 }
             }

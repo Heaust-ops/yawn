@@ -11,6 +11,7 @@ pub struct CompiledGraph {
     pub node_count: u32,
     pub resources: Vec<CompiledResource>,
     pub executions: Vec<CompiledExecution>,
+    pub render_passes: Vec<PhysicalRenderPass>,
     pub texture_families: Vec<TextureFamily>,
     pub allocation_classes: Vec<AllocationClass>,
     pub culled_node_count: u32,
@@ -108,16 +109,29 @@ pub struct CompiledSocketOutput {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionKind {
-    Render {
+    RasterDraw,
+    Fullscreen,
+    FrameOut { color: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicalRenderPass {
+    pub executions: Vec<u32>,
+    pub kind: PhysicalRenderPassKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PhysicalRenderPassKind {
+    Texture {
         color_attachments: Vec<ColorAttachmentPlan>,
         depth_stencil: Option<DepthStencilAttachmentPlan>,
     },
-    FrameOut {
-        color: u32,
-    },
+    Surface,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColorAttachmentPlan {
     pub resource: u32,
@@ -127,7 +141,7 @@ pub struct ColorAttachmentPlan {
     pub store: StoreOp,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DepthStencilAttachmentPlan {
     pub resource: u32,
@@ -206,8 +220,8 @@ pub enum NormalizedParameters {
     ExpressionDefaults {
         defaults: Vec<TypedLiteral>,
     },
-    Pipeline {
-        pipeline: String,
+    Raster {
+        draw_order: i32,
         depth_compare: CompareFunction,
         depth_write_enabled: bool,
         clear_depth: f32,
@@ -472,6 +486,6 @@ pub enum TextureUsage {
 
 impl CompiledGraph {
     pub fn summary(&self, id: [u32; 2]) -> serde_json::Value {
-        serde_json::json!({"compiledId":id,"graphId":self.graph_id,"revision":self.revision,"schemaVersion":self.schema_version,"nodeCount":self.node_count,"executionCount":self.executions.len(),"resourceCount":self.resources.len(),"culledNodeCount":self.culled_node_count,"culledResourceCount":self.culled_resource_count,"transientSlotCount":self.transient_slot_count})
+        serde_json::json!({"compiledId":id,"graphId":self.graph_id,"revision":self.revision,"schemaVersion":self.schema_version,"nodeCount":self.node_count,"executionCount":self.executions.len(),"physicalPassCount":self.render_passes.len(),"resourceCount":self.resources.len(),"culledNodeCount":self.culled_node_count,"culledResourceCount":self.culled_resource_count,"transientSlotCount":self.transient_slot_count})
     }
 }

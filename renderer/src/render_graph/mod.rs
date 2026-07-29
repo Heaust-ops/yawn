@@ -1,6 +1,7 @@
 //! Device-free render graph compiler and compiled graph registry.
 
 mod compiler;
+pub(crate) use compiler::execution_attachments;
 mod contracts;
 mod expression;
 mod plan;

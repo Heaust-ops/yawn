@@ -11,12 +11,14 @@ import {
 } from "../static/render-graph/node-spawn.js";
 
 test("add-node model contains all final catalog types in application groups", () => {
-  assert.equal(addNodeItems.length, 42);
+  assert.equal(addNodeItems.length, 44);
   assert.deepEqual(
     [...new Set(addNodeItems.map((item) => item.group))],
     ["Source", "Expression", "Render / post", "Frame"],
   );
-  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 42);
+  assert.equal(new Set(addNodeItems.map((item) => item.typeId)).size, 44);
+  assert.deepEqual(addNodeItems.filter((item) => ["ground_plane", "gltf_standard", "gltf_standard_double_sided"].includes(item.typeId)).map((item) => item.title), ["Ground Plane", "glTF Standard", "glTF Standard — Double-Sided"]);
+  assert.ok(!addNodeItems.some((item) => item.typeId === "pipeline" || item.title === "Pipeline"));
   assert.ok(addNodeItems.some((item) => item.typeId === "separate_u32_bits" && item.group === "Expression"));
   assert.ok(!addNodeItems.some((item) => ["mesh_query", "pipeline_registry"].includes(item.typeId)));
   assert.deepEqual(searchAddNodeItems("no such node"), []);

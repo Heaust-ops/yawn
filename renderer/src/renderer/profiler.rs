@@ -4,13 +4,16 @@ use std::{
 };
 use wasm_bindgen::JsValue;
 
-pub const MAX_PROFILE_PASSES: usize = crate::render_graph::MAX_EXECUTIONS;
+// A frame can contain every logical execution as a singleton physical pass and
+// one instance-traversal compute pass.
+pub const MAX_PROFILE_PASSES: usize = crate::render_graph::MAX_EXECUTIONS + 1;
 #[cfg(any(target_arch = "wasm32", test))]
 const SLOT_COUNT: usize = 4;
 #[cfg(any(target_arch = "wasm32", test))]
 const QUERY_COUNT: u32 = (MAX_PROFILE_PASSES * 2) as u32;
 #[cfg(any(target_arch = "wasm32", test))]
-const RESOLVE_SIZE: u64 = QUERY_COUNT as u64 * 8;
+const USED_RESOLVE_SIZE: u64 = QUERY_COUNT as u64 * 8;
+const RESOLVE_SIZE: u64 = USED_RESOLVE_SIZE.next_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlotState {
@@ -396,7 +399,9 @@ mod tests {
     #[test]
     fn capacity_is_aligned() {
         assert_eq!(RESOLVE_SIZE % wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, 0);
-        assert_eq!(QUERY_COUNT, 2048)
+        assert!(RESOLVE_SIZE >= USED_RESOLVE_SIZE);
+        assert!(RESOLVE_SIZE - USED_RESOLVE_SIZE < wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
+        assert_eq!(QUERY_COUNT as usize, MAX_PROFILE_PASSES * 2)
     }
     #[test]
     fn lazy_identity_when_disabled_unavailable_or_full() {

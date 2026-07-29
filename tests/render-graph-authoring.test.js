@@ -30,15 +30,18 @@ const authoredLink = (id, from, to = "target", muted = false) => ({
   toNodeId: to, toSocketId: `${to}:inputs`, muted, extensions: {},
 });
 
-test("catalog v11 exposes the final mesh, pipeline, and typed-expression contracts", () => {
-  assert.equal(CATALOG_VERSION, 11);
+test("catalog v12 exposes raster and typed-expression contracts", () => {
+  assert.equal(CATALOG_VERSION, 12);
   assert.deepEqual(semanticCatalog.mesh.outputs, {
     mesh: { type: "mesh_data" }, type: { type: "u32x16" }, localAabb: { type: "local_aabb" },
   });
   assert.equal(semanticCatalog.mesh.version, 2);
   assert.equal(nodeDefinitions.mesh.sockets.localAabb.title, "Local AABB");
-  assert.equal(semanticCatalog.pipeline.version, 4);
-  assert.deepEqual(semanticCatalog.pipeline.inputs.predicate.cardinality, { minimum: 0, maximum: 1 });
+  assert.equal(semanticCatalog.pipeline, undefined);
+  for (const key of ["ground_plane", "gltf_standard", "gltf_standard_double_sided"]) {
+    assert.equal(semanticCatalog[key].version, 1);
+    assert.deepEqual(semanticCatalog[key].inputs.predicate.cardinality, { minimum: 0, maximum: 1 });
+  }
   assert.deepEqual(semanticCatalog.and.inputs.inputs.cardinality, { minimum: 0, maximum: 8 });
   assert.equal(nodeDefinitions.and.sockets.inputs.maxIncomingLinks, 8);
   assert.equal(nodeDefinitions.and.sockets.inputs.value, null);
@@ -52,21 +55,34 @@ test("catalog v11 exposes the final mesh, pipeline, and typed-expression contrac
   }
 });
 
+test("raster declarations own their defaults and sockets", () => {
+  const keys = ["ground_plane", "gltf_standard", "gltf_standard_double_sided"];
+  assert.deepEqual(keys.map((key) => nodeDefinitions[key].title), [
+    "Ground Plane", "glTF Standard", "glTF Standard — Double-Sided",
+  ]);
+  assert.notStrictEqual(semanticCatalog.ground_plane.inputs, semanticCatalog.gltf_standard.inputs);
+  assert.notStrictEqual(nodeDefinitions.ground_plane.sockets, nodeDefinitions.gltf_standard.sockets);
+  assert.notStrictEqual(nodeDefinitions.ground_plane.parameters, nodeDefinitions.gltf_standard.parameters);
+  assert.notStrictEqual(nodeDefinitions.ground_plane.parameters.clearColor.default.value,
+    nodeDefinitions.gltf_standard.parameters.clearColor.default.value);
+  assert.equal("pipeline" in nodeDefinitions.gltf_standard.parameters, false);
+});
+
 test("current culling fixture uses type-bit predicates and final socket versions", () => {
   const byId = Object.fromEntries(culling.nodes.map((node) => [node.id, node]));
   assert.deepEqual(byId.cull.inputs.localAabb, [{ node: "mesh", socket: "localAabb" }]);
   assert.deepEqual(byId.type_words.inputs.value, [{ node: "mesh", socket: "type" }]);
-  assert.equal(byId.ground.executor.version, 4);
+  assert.equal(byId.ground.executor.version, 1);
   assert.equal(byId.ground.inputs.predicate[0].node, "ground_class");
 });
 
 test("compiler texture sockets expose policy metadata without literal widgets", () => {
   for (const socket of ["colorTarget", "depthTarget"]) {
-    assert.equal(semanticCatalog.pipeline.inputs[socket].defaultPolicy, "compiler_texture");
-    assert.equal(nodeDefinitions.pipeline.sockets[socket].default, undefined);
+    assert.equal(semanticCatalog.gltf_standard.inputs[socket].defaultPolicy, "compiler_texture");
+    assert.equal(nodeDefinitions.gltf_standard.sockets[socket].default, undefined);
   }
-  assert.equal(semanticCatalog.pipeline.inputs.predicate.defaultPolicy, "parameter_literal");
-  assert.notEqual(nodeDefinitions.pipeline.sockets.predicate.default, null);
+  assert.equal(semanticCatalog.gltf_standard.inputs.predicate.defaultPolicy, "parameter_literal");
+  assert.notEqual(nodeDefinitions.gltf_standard.sockets.predicate.default, null);
 });
 
 test("removed architecture is absent from the authoring catalog", () => {

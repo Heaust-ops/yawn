@@ -182,6 +182,7 @@ pub struct RuntimeAllocationPlan {
 pub struct RuntimePlan {
     pub allocations: RuntimeAllocationPlan,
     pub executions: Vec<RuntimeExecution>,
+    pub render_passes: Vec<PhysicalRenderPass>,
     pub instance_traversal: Option<InstanceTraversalPlan>,
     pub surface: RuntimeSurfaceContract,
 }
@@ -365,17 +366,9 @@ fn invalid(message: impl Into<String>, path: impl Into<String>) -> GraphError {
     error("GRAPH_RUNTIME_PLAN_INVALID", message, path)
 }
 
-fn valid_pipeline_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name.bytes().enumerate().all(|(i, byte)| {
-            byte == b'_' || byte.is_ascii_alphanumeric() && (i > 0 || byte.is_ascii_alphabetic())
-        })
-}
-
 fn execution_supported(key: &str) -> bool {
     contract(key).is_some_and(|contract| {
-        contract.fullscreen_policy.is_some() || matches!(key, "pipeline" | "frame_out")
+        contract.fullscreen_policy.is_some() || contract.is_raster_draw() || key == "frame_out"
     })
 }
 
@@ -524,13 +517,13 @@ fn validate_fullscreen_execution(
     if output.socket != "color" {
         return Err(invalid("fullscreen outputs mismatch", path("outputs")));
     }
-    let ExecutionKind::Render {
-        color_attachments,
-        depth_stencil: None,
-    } = &execution.kind
-    else {
+    if !matches!(execution.kind, ExecutionKind::Fullscreen) {
         return Err(invalid("fullscreen render kind mismatch", path("kind")));
-    };
+    }
+    let (color_attachments, depth_stencil) = super::compiler::execution_attachments(execution);
+    if depth_stencil.is_some() {
+        return Err(invalid("fullscreen depth mismatch", path("kind")));
+    }
     let [attachment] = color_attachments.as_slice() else {
         return Err(invalid("fullscreen attachment mismatch", path("kind")));
     };
@@ -749,7 +742,7 @@ fn validate_pipeline_resolve(
             .filter(|access| matches!(access.mode, AccessMode::ColorResolve { .. }))
             .count()
             == 1;
-    if producer.executor.key != "pipeline"
+    if !contract(&producer.executor.key).is_some_and(Contract::is_raster_draw)
         || producer.original_node_index != *producer_node_index
         || !exact_output
         || !matches!(&source.origin,
@@ -808,6 +801,123 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
             "schemaVersion",
         ));
     }
+    let mut expected_execution = 0usize;
+    for (pass_index, pass) in graph.render_passes.iter().enumerate() {
+        if pass.executions.is_empty() {
+            return Err(invalid(
+                "physical pass is empty",
+                format!("renderPasses[{pass_index}]"),
+            ));
+        }
+        for &member in &pass.executions {
+            if member as usize != expected_execution || expected_execution >= graph.executions.len()
+            {
+                return Err(invalid(
+                    "physical passes must partition logical executions in order",
+                    format!("renderPasses[{pass_index}].executions"),
+                ));
+            }
+            expected_execution += 1;
+        }
+        let singleton = pass.executions.len() == 1;
+        let kinds_valid = match &pass.kind {
+            PhysicalRenderPassKind::Surface => {
+                singleton
+                    && matches!(
+                        graph.executions[pass.executions[0] as usize].kind,
+                        ExecutionKind::FrameOut { .. }
+                    )
+            }
+            PhysicalRenderPassKind::Texture {
+                color_attachments,
+                depth_stencil,
+            } => {
+                pass.executions.iter().all(|&member| {
+                    !matches!(
+                        graph.executions[member as usize].kind,
+                        ExecutionKind::FrameOut { .. }
+                    )
+                }) && (singleton
+                    || pass.executions.iter().all(|&member| {
+                        matches!(
+                            graph.executions[member as usize].kind,
+                            ExecutionKind::RasterDraw
+                        )
+                    }))
+                    && color_attachments.iter().all(|attachment| {
+                        (attachment.resource as usize) < graph.resources.len()
+                            && attachment
+                                .resolve_target
+                                .is_none_or(|resource| (resource as usize) < graph.resources.len())
+                    })
+                    && depth_stencil.as_ref().is_none_or(|attachment| {
+                        (attachment.resource as usize) < graph.resources.len()
+                    })
+            }
+        };
+        if !kinds_valid {
+            return Err(invalid(
+                "physical pass kind or attachment is invalid",
+                format!("renderPasses[{pass_index}]"),
+            ));
+        }
+    }
+    if expected_execution != graph.executions.len() {
+        return Err(invalid(
+            "physical passes omit logical executions",
+            "renderPasses",
+        ));
+    }
+    for (resource_index, resource) in graph.resources.iter().enumerate() {
+        if let ResourcePlan::Texture { family, .. } | ResourcePlan::TextureSource { family, .. } =
+            resource.plan
+        {
+            if family as usize >= graph.texture_families.len() {
+                return Err(invalid(
+                    "texture family is out of bounds",
+                    format!("resources[{resource_index}].plan.family"),
+                ));
+            }
+        }
+    }
+    let canonical_passes = super::compiler::build_render_passes(
+        &graph.executions,
+        &graph.resources,
+        &graph.texture_families,
+    );
+    if graph.render_passes != canonical_passes {
+        return Err(invalid(
+            "physical render pass plan is not canonical",
+            "renderPasses",
+        ));
+    }
+    for (pass_index, pass) in graph.render_passes.iter().enumerate() {
+        if !matches!(pass.kind, PhysicalRenderPassKind::Texture { .. }) {
+            continue;
+        }
+        let mut previous = None;
+        for &member in &pass.executions {
+            let execution = &graph.executions[member as usize];
+            let NormalizedParameters::Raster { draw_order, .. } = &execution.parameters else {
+                previous = None;
+                continue;
+            };
+            let key = (*draw_order, execution.original_node_index);
+            if previous.is_some_and(|value| value > key) {
+                return Err(invalid(
+                    "raster pass members are not in canonical draw order",
+                    format!("renderPasses[{pass_index}].executions"),
+                ));
+            }
+            previous = Some(key);
+        }
+    }
+    let execution_pass: Vec<u32> = graph
+        .render_passes
+        .iter()
+        .enumerate()
+        .flat_map(|(pass, value)| value.executions.iter().map(move |_| pass as u32))
+        .collect();
 
     let mut producers = vec![None; graph.resources.len()];
     let mut uses = vec![BTreeSet::new(); graph.resources.len()];
@@ -878,7 +988,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                         format!("executions[{i}]"),
                     )
                 })?
-                .insert(i as u32);
+                .insert(execution_pass[i]);
         }
     }
     for (ri, resource) in graph.resources.iter().enumerate() {
@@ -909,6 +1019,52 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                         "input producer must precede consumer",
                         format!("executions[{i}].inputs"),
                     ));
+                }
+                let consumer_contract =
+                    contract(&execution.executor.key).expect("supported executor has contract");
+                let is_attachment = consumer_contract
+                    .inputs
+                    .iter()
+                    .find(|candidate| candidate.name == input.socket)
+                    .is_some_and(|candidate| {
+                        matches!(
+                            candidate.role,
+                            InputRole::ColorTarget { .. } | InputRole::DepthTarget
+                        )
+                    });
+                let predecessor = &graph.executions[producer as usize];
+                if is_attachment
+                    && matches!(execution.kind, ExecutionKind::RasterDraw)
+                    && matches!(predecessor.kind, ExecutionKind::RasterDraw)
+                {
+                    let NormalizedParameters::Raster {
+                        draw_order: predecessor_order,
+                        ..
+                    } = predecessor.parameters
+                    else {
+                        return Err(invalid(
+                            "raster predecessor parameters mismatch",
+                            format!("executions[{producer}].parameters"),
+                        ));
+                    };
+                    let NormalizedParameters::Raster {
+                        draw_order: consumer_order,
+                        ..
+                    } = execution.parameters
+                    else {
+                        return Err(invalid(
+                            "raster execution parameters mismatch",
+                            format!("executions[{i}].parameters"),
+                        ));
+                    };
+                    if (predecessor_order, predecessor.original_node_index)
+                        > (consumer_order, execution.original_node_index)
+                    {
+                        return Err(invalid(
+                            "raster attachment predecessors must have canonical draw order",
+                            format!("executions[{i}].parameters.drawOrder"),
+                        ));
+                    }
                 }
             }
         }
@@ -1004,8 +1160,9 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                             .count()
                             == 1
                     })
-                    && owner_executions[0].executor.key == "pipeline"
-                    && owner_executions[0].executor.version == 4
+                    && contract(&owner_executions[0].executor.key)
+                        .is_some_and(Contract::is_raster_draw)
+                    && owner_executions[0].executor.version == 1
                     && graph
                         .executions
                         .iter()
@@ -1013,7 +1170,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                         .filter(|input| input.resource == source)
                         .count()
                         == 1
-                    && contract("pipeline")
+                    && contract(&owner_executions[0].executor.key)
                         .and_then(|contract| contract.inputs.get(*input_ordinal as usize))
                         .is_some_and(|input| {
                             input.name == *socket
@@ -1242,7 +1399,11 @@ fn validate_instance_traversal(graph: &CompiledGraph) -> Result<(), GraphError> 
         .executions
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| (e.executor.key == "pipeline").then_some(i as u32))
+        .filter_map(|(i, e)| {
+            contract(&e.executor.key)
+                .is_some_and(Contract::is_raster_draw)
+                .then_some(i as u32)
+        })
         .collect();
     let Some(plan) = &graph.instance_traversal else {
         return if pipeline_indices.is_empty() {
@@ -1552,7 +1713,7 @@ pub fn prepare_runtime_plan(
     for (i, execution) in graph.executions.iter().enumerate() {
         let path = format!("executions[{i}]");
         match execution.executor.key.as_str() {
-            "pipeline" => {}
+            key if contract(key).is_some_and(Contract::is_raster_draw) => {}
             _ if contract(&execution.executor.key)
                 .is_some_and(|contract| contract.fullscreen_policy.is_some()) => {}
             "frame_out" => {
@@ -1587,11 +1748,11 @@ pub fn prepare_runtime_plan(
     validate_instance_traversal(graph)?;
 
     for (i, execution) in graph.executions.iter().enumerate() {
-        if execution.executor.key != "pipeline" {
+        if !contract(&execution.executor.key).is_some_and(Contract::is_raster_draw) {
             continue;
         }
-        let NormalizedParameters::Pipeline {
-            pipeline,
+        let NormalizedParameters::Raster {
+            draw_order: _,
             clear_depth,
             clear_color,
             ..
@@ -1602,8 +1763,7 @@ pub fn prepare_runtime_plan(
                 format!("executions[{i}].parameters"),
             ));
         };
-        if !valid_pipeline_name(pipeline)
-            || !clear_depth.is_finite()
+        if !clear_depth.is_finite()
             || !(0.0..=1.0).contains(clear_depth)
             || clear_color.iter().any(|value| !value.is_finite())
         {
@@ -1612,13 +1772,16 @@ pub fn prepare_runtime_plan(
                 format!("executions[{i}].parameters"),
             ));
         }
-        let ExecutionKind::Render {
-            color_attachments,
-            depth_stencil: Some(depth_attachment),
-        } = &execution.kind
-        else {
+        if !matches!(execution.kind, ExecutionKind::RasterDraw) {
             return Err(invalid(
                 "pipeline render kind mismatch",
+                format!("executions[{i}].kind"),
+            ));
+        }
+        let (color_attachments, depth_stencil) = super::compiler::execution_attachments(execution);
+        let Some(depth_attachment) = depth_stencil.as_ref() else {
+            return Err(invalid(
+                "pipeline depth attachment missing",
                 format!("executions[{i}].kind"),
             ));
         };
@@ -2307,6 +2470,7 @@ pub fn prepare_runtime_plan(
             resource_allocations,
         },
         executions,
+        render_passes: graph.render_passes.clone(),
         instance_traversal: graph.instance_traversal.clone(),
         surface,
     })

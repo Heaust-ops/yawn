@@ -21,8 +21,8 @@ struct CullParameters {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct PipelineParameters {
-    pipeline: String,
+struct RasterParameters {
+    draw_order: i32,
     depth_compare: CompareFunction,
     depth_write_enabled: bool,
     clear_depth: f32,
@@ -137,6 +137,11 @@ fn color(value: [f32; 4], min: f32, max: f32, base: &str) -> Result<[f32; 3], Gr
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct OutputKey(usize, u16);
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum AttachmentRoot {
+    Authored(OutputKey),
+    CompilerDefault { node: usize, ordinal: u16 },
+}
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 enum TransitionTargetKey {
     Authored(OutputKey),
     CompilerDefaultInput {
@@ -244,6 +249,7 @@ fn reaches(
     from: usize,
     to: usize,
     outgoing_edges: &[Vec<usize>],
+    ordering_outgoing: &[Vec<usize>],
     edges: &[DependencyEdge],
     live: &HashSet<usize>,
     memo: &mut HashMap<(usize, usize), bool>,
@@ -264,6 +270,11 @@ fn reaches(
         }
         for &edge_index in &outgoing_edges[node] {
             let next = edges[edge_index].to_node;
+            if live.contains(&next) {
+                stack.push(next);
+            }
+        }
+        for &next in &ordering_outgoing[node] {
             if live.contains(&next) {
                 stack.push(next);
             }
@@ -741,21 +752,9 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 descriptor: normalize_texture(p.texture, &base)?,
             }
         }
-        "pipeline" => {
-            let p: PipelineParameters =
+        key if contract(key).is_some_and(|contract| contract.is_raster_draw()) => {
+            let p: RasterParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
-            let valid_name = !p.pipeline.is_empty()
-                && p.pipeline.len() <= 64
-                && p.pipeline.bytes().enumerate().all(|(i, c)| {
-                    c == b'_' || c.is_ascii_alphanumeric() && (i > 0 || c.is_ascii_alphabetic())
-                });
-            if !valid_name {
-                return Err(error(
-                    "GRAPH_PARAMETERS_INVALID",
-                    "pipeline must be a 1-64 byte identifier",
-                    format!("{base}.pipeline"),
-                ));
-            }
             if !p.clear_depth.is_finite() || !(0.0..=1.0).contains(&p.clear_depth) {
                 return Err(error(
                     "GRAPH_PARAMETERS_INVALID",
@@ -770,8 +769,8 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                     format!("{base}.clearColor"),
                 ));
             }
-            NormalizedParameters::Pipeline {
-                pipeline: p.pipeline,
+            NormalizedParameters::Raster {
+                draw_order: p.draw_order,
                 depth_compare: p.depth_compare,
                 depth_write_enabled: p.depth_write_enabled,
                 clear_depth: p.clear_depth,
@@ -1102,6 +1101,271 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             e.producer_output_ordinal,
         )
     });
+    let is_normalizable_target = |edge: &DependencyEdge| {
+        contracts[edge.from_node].is_raster_draw()
+            && contracts[edge.to_node].is_raster_draw()
+            && matches!(
+                contracts[edge.to_node].inputs[edge.consumer_input_ordinal as usize].role,
+                InputRole::ColorTarget { .. } | InputRole::DepthTarget
+            )
+    };
+    let is_exact_reader = |edge: &DependencyEdge| {
+        let input = &contracts[edge.to_node].inputs[edge.consumer_input_ordinal as usize];
+        input.role == InputRole::SampledTexture
+            || (input.role == InputRole::SemanticRead
+                && contracts[edge.from_node].outputs[edge.producer_output_ordinal as usize]
+                    .semantic_type
+                    == SemanticType::Texture)
+    };
+    // Compute demand from authored resource dependencies only. In particular,
+    // a later WAR ordering edge must never resurrect its reader.
+    let mut provisional_live = HashSet::new();
+    let mut provisional_stack: Vec<_> = contracts
+        .iter()
+        .enumerate()
+        .filter(|(i, contract)| {
+            contract.inherently_observable && graph.nodes[*i].state == NodeState::Enabled
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let mut authored_deps = vec![Vec::new(); graph.nodes.len()];
+    for edge in &edges {
+        authored_deps[edge.to_node].push(edge.from_node);
+    }
+    while let Some(node) = provisional_stack.pop() {
+        if provisional_live.insert(node) {
+            provisional_stack.extend(authored_deps[node].iter().copied());
+        }
+    }
+
+    // Preserve authored, non-normalized dataflow before attachment normalization. It
+    // is used both to diagnose impossible draw-order normalization and to find
+    // readers which must finish before an attachment version is overwritten.
+    let ordinary_edges: Vec<_> = edges
+        .iter()
+        .filter(|edge| !is_normalizable_target(edge))
+        .cloned()
+        .collect();
+    let mut target_consumers = HashMap::<OutputKey, Vec<usize>>::new();
+    let mut ordinary_consumers = HashMap::<OutputKey, Vec<usize>>::new();
+    for edge in &edges {
+        let key = OutputKey(edge.from_node, edge.producer_output_ordinal);
+        if is_normalizable_target(edge) {
+            target_consumers.entry(key).or_default().push(edge.to_node);
+        } else if is_exact_reader(edge) && provisional_live.contains(&edge.to_node) {
+            ordinary_consumers
+                .entry(key)
+                .or_default()
+                .push(edge.to_node);
+        }
+    }
+    let observation_cuts: HashSet<_> = target_consumers
+        .keys()
+        .filter(|key| ordinary_consumers.contains_key(key))
+        .copied()
+        .collect();
+    let mut ordering_edges = Vec::new();
+
+    // Normalize raster attachment versions before liveness. Authored graphs may
+    // express a render-pass cohort either as a chain or as direct siblings of
+    // one texture. Turn both forms into an explicit, deterministic SSA chain.
+    fn attachment_root(
+        node: usize,
+        ordinal: u16,
+        bound: &[BTreeMap<&str, BoundInput>],
+        contracts: &[&Contract],
+        colors: &mut HashMap<(usize, u16), u8>,
+        roots: &mut HashMap<(usize, u16), AttachmentRoot>,
+    ) -> Result<AttachmentRoot, GraphError> {
+        if let Some(&root) = roots.get(&(node, ordinal)) {
+            return Ok(root);
+        }
+        if colors.get(&(node, ordinal)) == Some(&1) {
+            return Err(error(
+                "GRAPH_ATTACHMENT_LINEAGE_INVALID",
+                "attachment lineage is cyclic",
+                format!("nodes[{node}].inputs"),
+            ));
+        }
+        colors.insert((node, ordinal), 1);
+        let socket = if ordinal == 0 {
+            "colorTarget"
+        } else {
+            "depthTarget"
+        };
+        let root = match bound[node].get(socket).map(|binding| binding.producer) {
+            None => AttachmentRoot::CompilerDefault { node, ordinal },
+            Some(output)
+                if !contracts[output.0].is_raster_draw()
+                    && contracts[output.0].outputs[output.1 as usize].semantic_type
+                        == SemanticType::Texture =>
+            {
+                AttachmentRoot::Authored(output)
+            }
+            Some(output) if contracts[output.0].is_raster_draw() && output.1 == ordinal => {
+                attachment_root(output.0, ordinal, bound, contracts, colors, roots)?
+            }
+            Some(_) => {
+                return Err(error(
+                    "GRAPH_ATTACHMENT_LINEAGE_INVALID",
+                    "attachment lineage has no texture or default root",
+                    format!("nodes[{node}].inputs.{socket}"),
+                ))
+            }
+        };
+        colors.insert((node, ordinal), 2);
+        roots.insert((node, ordinal), root);
+        Ok(root)
+    }
+
+    let raster_nodes: Vec<_> = contracts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, contract)| contract.is_raster_draw().then_some(i))
+        .collect();
+    let mut aliases = HashMap::<OutputKey, OutputKey>::new();
+    for ordinal in 0..=1u16 {
+        let mut colors = HashMap::new();
+        let mut roots = HashMap::new();
+        let mut cohorts = BTreeMap::<AttachmentRoot, Vec<usize>>::new();
+        for &node in &raster_nodes {
+            let root = attachment_root(node, ordinal, &bound, &contracts, &mut colors, &mut roots)?;
+            cohorts.entry(root).or_default().push(node);
+        }
+        for (root, mut members) in cohorts {
+            members.sort_by_key(|&node| {
+                let NormalizedParameters::Raster { draw_order, .. } = params[node] else {
+                    unreachable!()
+                };
+                (draw_order, node)
+            });
+            // An observed version ends its aliasing segment. Writers after the
+            // cut continue the same physical lineage, but may not replace the
+            // version seen by the reader.
+            let mut segment_start = 0;
+            for position in 0..members.len() {
+                let at_cut = observation_cuts.contains(&OutputKey(members[position], ordinal));
+                if at_cut || position + 1 == members.len() {
+                    let terminal = OutputKey(members[position], ordinal);
+                    for &member in &members[segment_start..=position] {
+                        aliases.insert(OutputKey(member, ordinal), terminal);
+                    }
+                    if let Some(&next_writer) = members.get(position + 1) {
+                        for &member in &members[segment_start..=position] {
+                            let output = OutputKey(member, ordinal);
+                            for &reader in ordinary_consumers.get(&output).into_iter().flatten() {
+                                if reader != next_writer {
+                                    ordering_edges.push((reader, next_writer));
+                                }
+                            }
+                        }
+                    }
+                    segment_start = position + 1;
+                }
+            }
+            let socket = if ordinal == 0 {
+                "colorTarget"
+            } else {
+                "depthTarget"
+            };
+            for (position, &member) in members.iter().enumerate() {
+                let target = if position == 0 {
+                    match root {
+                        AttachmentRoot::Authored(output) => Some(output),
+                        AttachmentRoot::CompilerDefault { .. } => None,
+                    }
+                } else {
+                    Some(OutputKey(members[position - 1], ordinal))
+                };
+                bound[member].remove(socket);
+                if let Some(producer) = target {
+                    bound[member].insert(socket, BoundInput { producer });
+                }
+            }
+        }
+    }
+    ordering_edges.sort_unstable();
+    ordering_edges.dedup();
+    // Replace authored attachment dependencies with the canonical WAW chain,
+    // and redirect observations of any cohort member to its terminal version.
+    edges.retain(|edge| {
+        !(contracts[edge.to_node].is_raster_draw()
+            && (edge.to_socket == "colorTarget" || edge.to_socket == "depthTarget"))
+    });
+    for &node in &raster_nodes {
+        for (socket, ordinal) in [("colorTarget", 0u16), ("depthTarget", 1u16)] {
+            let Some(binding) = bound[node].get(socket) else {
+                continue;
+            };
+            let input_ordinal = contracts[node]
+                .inputs
+                .iter()
+                .position(|input| input.name == socket)
+                .expect("raster target contract") as u16;
+            edges.push(DependencyEdge {
+                from_node: binding.producer.0,
+                from_socket: contracts[binding.producer.0].outputs[binding.producer.1 as usize]
+                    .name
+                    .into(),
+                producer_output_ordinal: binding.producer.1,
+                to_node: node,
+                to_socket: socket.into(),
+                consumer_input_ordinal: input_ordinal,
+                resource: NodeOutputRef {
+                    node: graph.nodes[binding.producer.0].id.clone(),
+                    socket: contracts[binding.producer.0].outputs[binding.producer.1 as usize]
+                        .name
+                        .into(),
+                },
+            });
+            let _ = ordinal;
+        }
+    }
+    for node in 0..graph.nodes.len() {
+        for input in contracts[node].inputs.iter().filter(|input| {
+            matches!(
+                input.role,
+                InputRole::SampledTexture | InputRole::SemanticRead
+            )
+        }) {
+            let Some(binding) = bound[node].get_mut(input.name) else {
+                continue;
+            };
+            if input.role == InputRole::SemanticRead
+                && contracts[binding.producer.0].outputs[binding.producer.1 as usize].semantic_type
+                    != SemanticType::Texture
+            {
+                continue;
+            }
+            if let Some(&terminal) = aliases.get(&binding.producer) {
+                binding.producer = terminal;
+            }
+        }
+    }
+    for edge in &mut edges {
+        if is_exact_reader(edge) {
+            let key = OutputKey(edge.from_node, edge.producer_output_ordinal);
+            if let Some(&terminal) = aliases.get(&key) {
+                edge.from_node = terminal.0;
+                edge.producer_output_ordinal = terminal.1;
+                edge.from_socket = contracts[terminal.0].outputs[terminal.1 as usize]
+                    .name
+                    .into();
+                edge.resource = NodeOutputRef {
+                    node: graph.nodes[terminal.0].id.clone(),
+                    socket: edge.from_socket.clone(),
+                };
+            }
+        }
+    }
+    edges.sort_by_key(|e| {
+        (
+            e.to_node,
+            e.consumer_input_ordinal,
+            e.from_node,
+            e.producer_output_ordinal,
+        )
+    });
     let mut deps = vec![Vec::new(); graph.nodes.len()];
     for edge in &edges {
         deps[edge.to_node].push(edge.from_node);
@@ -1122,6 +1386,42 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             stack.extend(deps[i].iter().copied());
         }
     }
+    // A canonical attachment writer edge may not reverse authored ordinary
+    // dataflow. Keep this distinct from generic cycle reporting so authors get
+    // the draw-order parameter which made normalization impossible.
+    let mut ordinary_outgoing = vec![Vec::new(); graph.nodes.len()];
+    for edge in &ordinary_edges {
+        ordinary_outgoing[edge.from_node].push(edge.to_node);
+    }
+    let ordinary_reaches = |from: usize, to: usize| {
+        let mut seen = vec![false; graph.nodes.len()];
+        let mut pending = vec![from];
+        while let Some(node) = pending.pop() {
+            if node == to {
+                return true;
+            }
+            if !seen[node] {
+                seen[node] = true;
+                pending.extend(ordinary_outgoing[node].iter().copied());
+            }
+        }
+        false
+    };
+    let mut draw_order_conflicts: Vec<_> = edges
+        .iter()
+        .filter(|edge| {
+            contracts[edge.from_node].is_raster_draw()
+                && contracts[edge.to_node].is_raster_draw()
+                && matches!(
+                    contracts[edge.to_node].inputs[edge.consumer_input_ordinal as usize].role,
+                    InputRole::ColorTarget { .. } | InputRole::DepthTarget
+                )
+                && ordinary_reaches(edge.to_node, edge.from_node)
+        })
+        .map(|edge| edge.to_node)
+        .collect();
+    draw_order_conflicts.sort_unstable();
+    draw_order_conflicts.dedup();
     // IDs are independent of scheduling: original node order, then contract output order.
     // Source nodes expose only outputs that survived active-edge/liveness analysis;
     // executable nodes retain their complete output shape for runtime lowering.
@@ -1215,10 +1515,10 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     let mut default_roots: Vec<DefaultDraft> = Vec::new();
     let mut default_targets = HashMap::new();
     for i in 0..graph.nodes.len() {
-        if !live.contains(&i) || contracts[i].key != "pipeline" {
+        if !live.contains(&i) || !contracts[i].is_raster_draw() {
             continue;
         }
-        for (input_ordinal, (socket, role, format, opposite)) in [
+        for (socket, role, format, opposite) in [
             (
                 "colorTarget",
                 CompilerTextureRole::ColorTarget,
@@ -1233,12 +1533,16 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             ),
         ]
         .into_iter()
-        .enumerate()
         {
             if bound[i].contains_key(socket) {
                 continue;
             }
-            let input_ordinal = input_ordinal as u16 + 2;
+            let input_ordinal = contracts[i]
+                .inputs
+                .iter()
+                .position(|input| input.name == socket)
+                .expect("compiler target has a contract input")
+                as u16;
             let key = TransitionTargetKey::CompilerDefaultInput {
                 owner_node: i,
                 input_ordinal,
@@ -1267,8 +1571,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         if !live.contains(&i) {
             continue;
         }
-        let transition_sockets: &[(&str, u16)] = match contracts[i].key {
-            "pipeline" => &[("colorTarget", 0), ("depthTarget", 1)],
+        let transition_sockets: &[(&str, u16)] = match contracts[i] {
+            ref contract if contract.is_raster_draw() => &[("colorTarget", 0), ("depthTarget", 1)],
             _ if contracts[i].fullscreen_policy.is_some() => &[("colorTarget", 0)],
             _ => continue,
         };
@@ -1388,6 +1692,12 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             outgoing_edges[edge.from_node].push(index);
         }
     }
+    let mut ordering_outgoing = vec![Vec::new(); graph.nodes.len()];
+    for &(from, to) in &ordering_edges {
+        if live.contains(&from) && live.contains(&to) {
+            ordering_outgoing[from].push(to);
+        }
+    }
     for outgoing in &mut outgoing_edges {
         outgoing.sort_by_key(|&index| {
             let edge = &edges[index];
@@ -1404,7 +1714,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         if !live.contains(&i) {
             continue;
         }
-        if contracts[i].key == "pipeline" {
+        if contracts[i].is_raster_draw() {
             if bound[i].get("colorTarget").map(|b| b.producer)
                 == bound[i].get("depthTarget").map(|b| b.producer)
                 && bound[i].contains_key("colorTarget")
@@ -1532,7 +1842,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 format!("nodes[{}].inputs.{}", edge.to_node, edge.to_socket),
             ));
         }
-        if contracts[edge.from_node].key != "pipeline" || edge.producer_output_ordinal != 0 {
+        if !contracts[edge.from_node].is_raster_draw() || edge.producer_output_ordinal != 0 {
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
                 "multisampled color texture is not a produced pipeline color",
@@ -1571,6 +1881,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     i,
                     next.writer_node,
                     &outgoing_edges,
+                    &ordering_outgoing,
                     &edges,
                     &live,
                     &mut reachability,
@@ -1587,7 +1898,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
 
     // Validate every independently resolved attachment before graph cycle reporting.
     for i in 0..graph.nodes.len() {
-        if !live.contains(&i) || contracts[i].key != "pipeline" {
+        if !live.contains(&i) || !contracts[i].is_raster_draw() {
             continue;
         }
         let cd = version_of
@@ -1780,12 +2091,23 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     }
 
     // Stable Kahn scheduling is deliberately after resource and access validation.
+    if let Some(&node) = draw_order_conflicts.iter().find(|node| live.contains(node)) {
+        return Err(error(
+            "GRAPH_DRAW_ORDER_CONFLICT",
+            "draw order conflicts with authored dependencies",
+            format!("nodes[{node}].parameters.drawOrder"),
+        ));
+    }
     let mut indegree = vec![0; graph.nodes.len()];
     for &node in &live {
         indegree[node] = edges
             .iter()
             .filter(|edge| edge.to_node == node && live.contains(&edge.from_node))
-            .count();
+            .count()
+            + ordering_edges
+                .iter()
+                .filter(|(from, to)| *to == node && live.contains(from))
+                .count();
     }
     let mut queue = BinaryHeap::new();
     for &node in &live {
@@ -1803,6 +2125,12 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 queue.push(Reverse(consumer));
             }
         }
+        for &consumer in &ordering_outgoing[node] {
+            indegree[consumer] -= 1;
+            if indegree[consumer] == 0 {
+                queue.push(Reverse(consumer));
+            }
+        }
     }
     if order.len() != live.len() {
         let residual: Vec<_> = (0..graph.nodes.len())
@@ -1811,6 +2139,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         fn cycle_dfs(
             node: usize,
             outgoing_edges: &[Vec<usize>],
+            ordering_outgoing: &[Vec<usize>],
             edges: &[DependencyEdge],
             residual: &[bool],
             colors: &mut [u8],
@@ -1829,6 +2158,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     if let Some(cycle) = cycle_dfs(
                         to,
                         outgoing_edges,
+                        ordering_outgoing,
                         edges,
                         residual,
                         colors,
@@ -1848,6 +2178,31 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     return Some(cycle);
                 }
             }
+            for &to in &ordering_outgoing[node] {
+                if !residual[to] {
+                    continue;
+                }
+                if colors[to] == 0 {
+                    if cycle_dfs(
+                        to,
+                        outgoing_edges,
+                        ordering_outgoing,
+                        edges,
+                        residual,
+                        colors,
+                        node_stack,
+                        edge_stack,
+                    )
+                    .is_some()
+                    {
+                        // Ordering edges are synthetic and have no authored
+                        // socket payload, but still constitute a real cycle.
+                        return Some(Vec::new());
+                    }
+                } else if colors[to] == 1 {
+                    return Some(Vec::new());
+                }
+            }
             node_stack.pop();
             colors[node] = 2;
             None
@@ -1859,6 +2214,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 cycle = cycle_dfs(
                     node,
                     &outgoing_edges,
+                    &ordering_outgoing,
                     &edges,
                     &residual,
                     &mut colors,
@@ -2189,15 +2545,15 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             .collect();
         let mut accesses = Vec::new();
         let kind = match contracts[i].key {
-            "pipeline" => {
+            _ if contracts[i].is_raster_draw() => {
                 let color = output_ids[&OutputKey(i, 0)];
                 let depth = output_ids[&OutputKey(i, 1)];
                 let clear = match params[i] {
-                    NormalizedParameters::Pipeline { clear_color, .. } => clear_color,
+                    NormalizedParameters::Raster { clear_color, .. } => clear_color,
                     _ => unreachable!(),
                 };
                 let clear_depth = match &params[i] {
-                    NormalizedParameters::Pipeline { clear_depth, .. } => *clear_depth,
+                    NormalizedParameters::Raster { clear_depth, .. } => *clear_depth,
                     _ => unreachable!(),
                 };
                 let first_color = version_of[&OutputKey(i, 0)].1 == 0;
@@ -2280,20 +2636,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                         },
                     });
                 }
-                ExecutionKind::Render {
-                    color_attachments: vec![ColorAttachmentPlan {
-                        resource: color,
-                        resolve_target,
-                        location: 0,
-                        load: cl,
-                        store: source_store,
-                    }],
-                    depth_stencil: Some(DepthStencilAttachmentPlan {
-                        resource: depth,
-                        load: dl,
-                        store: StoreOp::Store,
-                    }),
-                }
+                ExecutionKind::RasterDraw
             }
             _ if contracts[i].fullscreen_policy.is_some() => {
                 let color = output_ids[&OutputKey(i, 0)];
@@ -2321,16 +2664,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                         full_overwrite: true,
                     },
                 });
-                ExecutionKind::Render {
-                    color_attachments: vec![ColorAttachmentPlan {
-                        resource: color,
-                        resolve_target: None,
-                        location: 0,
-                        load,
-                        store: StoreOp::Store,
-                    }],
-                    depth_stencil: None,
-                }
+                ExecutionKind::Fullscreen
             }
             "frame_out" => {
                 let r = input_resource("color");
@@ -2584,7 +2918,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     let mut predicates = Vec::new();
     for (execution, compiled) in executions.iter().enumerate() {
         let node = compiled.original_node_index as usize;
-        if contracts[node].key != "pipeline" {
+        if !contracts[node].is_raster_draw() {
             continue;
         }
         let mesh = output_ids[&bound[node]["mesh"].producer];
@@ -2599,7 +2933,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let predicate = if let Some(binding) = bound[node].get("predicate") {
             expression_ids[&binding.producer]
         } else {
-            let NormalizedParameters::Pipeline {
+            let NormalizedParameters::Raster {
                 predicate_default, ..
             } = params[node]
             else {
@@ -2651,9 +2985,15 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             }
         }
     }
-    // Dense lifetimes touch bindings, outputs, and accesses.
+    let render_passes = build_render_passes(&executions, &resources, &families);
+    let execution_pass: Vec<u32> = render_passes
+        .iter()
+        .enumerate()
+        .flat_map(|(pass, value)| value.executions.iter().map(move |_| pass as u32))
+        .collect();
+    // Dense lifetimes use physical pass ordinals; producer metadata remains logical.
     for (ordinal, e) in executions.iter().enumerate() {
-        let ordinal = ordinal as u32;
+        let ordinal = execution_pass[ordinal];
         let mut touched = BTreeSet::new();
         for x in &e.inputs {
             touched.insert(x.resource);
@@ -2710,6 +3050,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         node_count: graph.nodes.len() as u32,
         resources,
         executions,
+        render_passes,
         texture_families: families,
         allocation_classes: classes,
         culled_node_count: (graph.nodes.len() - live.len()) as u32,
@@ -2717,6 +3058,170 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         transient_slot_count: transient,
         instance_traversal,
     })
+}
+
+pub(crate) fn execution_attachments(
+    execution: &CompiledExecution,
+) -> (Vec<ColorAttachmentPlan>, Option<DepthStencilAttachmentPlan>) {
+    let mut colors = Vec::new();
+    let mut depth = None;
+    for access in &execution.accesses {
+        match access.mode {
+            AccessMode::ColorAttachment {
+                location,
+                load,
+                store,
+                ..
+            } => colors.push(ColorAttachmentPlan {
+                resource: access.resource,
+                resolve_target: execution.accesses.iter().find_map(|candidate| {
+                    match candidate.mode {
+                        AccessMode::ColorResolve {
+                            source,
+                            location: l,
+                        } if source == access.resource && l == location => Some(candidate.resource),
+                        _ => None,
+                    }
+                }),
+                location,
+                load,
+                store,
+            }),
+            AccessMode::DepthAttachment { load, store, .. } => {
+                depth = Some(DepthStencilAttachmentPlan {
+                    resource: access.resource,
+                    load,
+                    store,
+                })
+            }
+            _ => {}
+        }
+    }
+    colors.sort_by_key(|color| color.location);
+    (colors, depth)
+}
+
+pub(crate) fn build_render_passes(
+    executions: &[CompiledExecution],
+    resources: &[CompiledResource],
+    families: &[TextureFamily],
+) -> Vec<PhysicalRenderPass> {
+    let family = |resource: u32| {
+        resources
+            .get(resource as usize)
+            .and_then(|resource| match resource.plan {
+                ResourcePlan::Texture { family, .. }
+                | ResourcePlan::TextureSource { family, .. } => Some(family),
+                _ => None,
+            })
+    };
+    let mut passes: Vec<PhysicalRenderPass> = Vec::new();
+    for (index, execution) in executions.iter().enumerate() {
+        if matches!(execution.kind, ExecutionKind::FrameOut { .. }) {
+            passes.push(PhysicalRenderPass {
+                executions: vec![index as u32],
+                kind: PhysicalRenderPassKind::Surface,
+            });
+            continue;
+        }
+        let (colors, depth) = execution_attachments(execution);
+        let mut merged = false;
+        if matches!(execution.kind, ExecutionKind::RasterDraw)
+            && colors.iter().all(|v| v.load == NormalizedColorLoad::Load)
+            && depth
+                .as_ref()
+                .is_none_or(|v| v.load == NormalizedDepthLoad::Load)
+        {
+            if let Some(PhysicalRenderPass {
+                executions: members,
+                kind:
+                    PhysicalRenderPassKind::Texture {
+                        color_attachments: previous_colors,
+                        depth_stencil: previous_depth,
+                    },
+            }) = passes.last_mut()
+            {
+                let previous = &executions[*members.last().unwrap() as usize];
+                let target_input = |socket: &str| {
+                    execution
+                        .inputs
+                        .iter()
+                        .find(|input| input.socket == socket)
+                        .map(|input| input.resource)
+                };
+                let exact = previous.outputs.iter().any(|out| {
+                    out.socket == "color" && Some(out.resource) == target_input("colorTarget")
+                }) && depth.as_ref().is_none_or(|_| {
+                    previous.outputs.iter().any(|out| {
+                        out.socket == "depth" && Some(out.resource) == target_input("depthTarget")
+                    })
+                });
+                let compatible = previous_colors.len() == colors.len()
+                    && previous_colors.iter().zip(&colors).all(|(a, b)| {
+                        a.location == b.location
+                            && family(a.resource) == family(b.resource)
+                            && family(a.resource).is_some_and(|f| {
+                                family(b.resource).is_some_and(|next_family| {
+                                    families.get(f as usize).is_some_and(|first| {
+                                        families.get(next_family as usize).is_some_and(|next| {
+                                            family_descriptor(first) == family_descriptor(next)
+                                        })
+                                    })
+                                })
+                            })
+                    })
+                    && match (previous_depth.as_ref(), depth.as_ref()) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => {
+                            family(a.resource) == family(b.resource)
+                                && family(a.resource).is_some_and(|f| {
+                                    family(b.resource).is_some_and(|next_family| {
+                                        families.get(f as usize).is_some_and(|first| {
+                                            families.get(next_family as usize).is_some_and(|next| {
+                                                family_descriptor(first) == family_descriptor(next)
+                                            })
+                                        })
+                                    })
+                                })
+                        }
+                        _ => false,
+                    };
+                let no_resolve = previous_colors.iter().all(|v| v.resolve_target.is_none());
+                let no_external = previous.outputs.iter().all(|out| {
+                    executions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.inputs.iter().any(|v| v.resource == out.resource))
+                        .all(|(consumer, _)| consumer == index)
+                });
+                if exact && compatible && no_resolve && no_external {
+                    for (physical, final_value) in previous_colors.iter_mut().zip(&colors) {
+                        physical.resource = final_value.resource;
+                        physical.resolve_target = final_value.resolve_target;
+                        physical.store = final_value.store;
+                    }
+                    if let (Some(physical), Some(final_value)) =
+                        (previous_depth.as_mut(), depth.as_ref())
+                    {
+                        physical.resource = final_value.resource;
+                        physical.store = final_value.store;
+                    }
+                    members.push(index as u32);
+                    merged = true;
+                }
+            }
+        }
+        if !merged {
+            passes.push(PhysicalRenderPass {
+                executions: vec![index as u32],
+                kind: PhysicalRenderPassKind::Texture {
+                    color_attachments: colors,
+                    depth_stencil: depth,
+                },
+            });
+        }
+    }
+    passes
 }
 
 fn extent_layers(e: &NormalizedTextureExtent) -> u32 {

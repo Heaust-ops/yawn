@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 11;
+export const CATALOG_VERSION = 12;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, minimum = 1, authoringType, defaultPolicy = minimum ? "none" : "parameter_literal", maximum = 1) => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -63,6 +63,20 @@ const texture = {
     viewFormats: [],
   },
 };
+const rasterInputs = () => ({
+  mesh: i("mesh_data"),
+  predicate: i("bool", 0),
+  colorTarget: i("texture", 0, undefined, "compiler_texture"),
+  depthTarget: i("texture", 0, undefined, "compiler_texture"),
+});
+const rasterOutputs = () => ({ color: o("texture"), depth: o("texture") });
+const rasterParameters = () => ({ drawOrder: 0, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] });
+const raster = () => ({ version: 1, execution: "render", inputs: rasterInputs(), outputs: rasterOutputs(), parameters: rasterParameters() });
+export const NODE_TITLE_OVERRIDES = Object.freeze({
+  ground_plane: "Ground Plane",
+  gltf_standard: "glTF Standard",
+  gltf_standard_double_sided: "glTF Standard — Double-Sided",
+});
 export const semanticCatalog = Object.freeze({
   mesh: {
     version: 2,
@@ -107,18 +121,9 @@ export const semanticCatalog = Object.freeze({
     outputs: { isFrustumCulled: o("bool") },
     parameters: { cameraSelection: "active" },
   },
-  pipeline: {
-    version: 4,
-    execution: "render",
-    inputs: {
-      mesh: i("mesh_data"),
-      predicate: i("bool", 0),
-      colorTarget: i("texture", 0, undefined, "compiler_texture"),
-      depthTarget: i("texture", 0, undefined, "compiler_texture"),
-    },
-    outputs: { color: o("texture"), depth: o("texture") },
-    parameters: { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] },
-  },
+  ground_plane: raster(),
+  gltf_standard: raster(),
+  gltf_standard_double_sided: raster(),
   ...expressionCatalog,
   fullscreen_copy: {
     version: 1,
@@ -292,7 +297,6 @@ const enumeration = (value, values) => ({
   default: tagged("string", value),
   enum: values,
 });
-const string = (value) => ({ type: "string", default: tagged("string", value) });
 const boolean = (value) => ({
   type: "boolean",
   default: tagged("boolean", value),
@@ -327,7 +331,7 @@ const zero = (type) => {
     Array.from({ length: size }, (_, row) => Number(column === row)));
 };
 const defaultForInput = (key, name, type) => {
-  if (key === "pipeline" && name === "predicate") return true;
+  if (["ground_plane", "gltf_standard", "gltf_standard_double_sided"].includes(key) && name === "predicate") return true;
   if (key === "and") return true;
   if (/^combine_mat[234]$/.test(key)) {
     const index = Number(name.replace("column", ""));
@@ -374,8 +378,8 @@ const parameterSchemas = {
   },
   mesh: {},
   frustum_cull: { cameraSelection: enumeration("active", ["active"]) },
-  pipeline: {
-    pipeline: string("gltf_standard"),
+  ground_plane: {
+    drawOrder: { ...number(0, -2147483648, 2147483647), integer: true },
     depthCompare: enumeration("less_equal", [
       "never",
       "less",
@@ -418,6 +422,8 @@ const parameterSchemas = {
   },
 };
 for (const key of Object.keys(expressionCatalog)) parameterSchemas[key] = {};
+parameterSchemas.gltf_standard = structuredClone(parameterSchemas.ground_plane);
+parameterSchemas.gltf_standard_double_sided = structuredClone(parameterSchemas.ground_plane);
 export const nodeDefinitions = Object.fromEntries(
   Object.entries(semanticCatalog).map(([key, c]) => {
     const sockets = {
@@ -453,7 +459,7 @@ export const nodeDefinitions = Object.fromEntries(
       key,
       {
         version: c.version,
-        title: key.replaceAll("_", " "),
+        title: NODE_TITLE_OVERRIDES[key] ?? key.replaceAll("_", " "),
         behavior: "standard",
         style: c.execution,
         parameters,
@@ -475,6 +481,13 @@ export const nodeDefinitions = Object.fromEntries(
   }),
 );
 nodeDefinitions.mesh.sockets.localAabb.title = "Local AABB";
+for (const key of Object.keys(NODE_TITLE_OVERRIDES)) {
+  for (const item of nodeDefinitions[key].ui) {
+    if (item.parameter === "drawOrder") item.title = "Draw Order";
+    if (item.parameter === "clearColor") item.title = "Initial Color";
+    if (item.parameter === "clearDepth") item.title = "Initial Depth";
+  }
+}
 nodeDefinitions.color_balance.ui = [
   { kind: "parameter", parameter: "mode" },
   { kind: "widget", widget: "grading-wheels", bindings: [

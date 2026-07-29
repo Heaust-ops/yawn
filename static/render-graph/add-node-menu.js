@@ -1,4 +1,4 @@
-import { semanticCatalog } from "./catalog.js";
+import { NODE_TITLE_OVERRIDES, semanticCatalog } from "./catalog.js";
 
 const GROUPS = Object.freeze([
   ["source", "Source"],
@@ -16,7 +16,7 @@ export const addNodeItems = Object.freeze(
   GROUPS.flatMap(([execution, group]) =>
     Object.entries(semanticCatalog)
       .filter(([, definition]) => definition.execution === execution)
-      .map(([typeId]) => Object.freeze({ typeId, title: title(typeId), group })),
+      .map(([typeId]) => Object.freeze({ typeId, title: NODE_TITLE_OVERRIDES[typeId] ?? title(typeId), group })),
   ),
 );
 

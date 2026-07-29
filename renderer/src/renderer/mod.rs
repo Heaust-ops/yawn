@@ -815,14 +815,11 @@ struct GpuTextureSlot {
 
 enum PreparedExecution {
     Pipeline {
-        execution: usize,
         base: crate::render_data::PipelineKey,
         predicate_ordinal: u32,
         variant: wgpu::RenderPipeline,
     },
     Fullscreen {
-        execution: usize,
-        frame_out: bool,
         bind_group: wgpu::BindGroup,
         pipeline: wgpu::RenderPipeline,
         _uniform: wgpu::Buffer,
@@ -1687,17 +1684,17 @@ impl<T: Scene + 'static> Renderer<T> {
             .iter()
             .enumerate()
             .map(|(index, execution)| {
-                let NormalizedParameters::Pipeline { pipeline, .. } = &execution.parameters else {
+                let NormalizedParameters::Raster { .. } = &execution.parameters else {
                     return Ok(None);
                 };
                 self.resources
-                    .find_pipeline(pipeline)
+                    .find_pipeline(&execution.executor.key)
                     .map(Some)
                     .ok_or_else(|| {
                         GraphError::at(
                             "GRAPH_EXECUTION_UNSUPPORTED",
-                            format!("pipeline '{pipeline}' is not registered"),
-                            format!("executions[{index}].parameters.pipeline"),
+                            format!("pipeline '{}' is not registered", execution.executor.key),
+                            format!("executions[{index}].executor.key"),
                         )
                     })
             })
@@ -1952,12 +1949,11 @@ impl<T: Scene + 'static> Renderer<T> {
                     let target_format = if frame_out {
                         runtime.surface.format
                     } else {
-                        let ExecutionKind::Render {
-                            color_attachments, ..
-                        } = &execution.kind
-                        else {
+                        if !matches!(execution.kind, ExecutionKind::Fullscreen) {
                             return Err(fail("fullscreen execution is not render"));
-                        };
+                        }
+                        let (color_attachments, _) =
+                            crate::render_graph::execution_attachments(execution);
                         let target = color_attachments
                             .first()
                             .ok_or_else(|| fail("fullscreen target missing"))?
@@ -2045,21 +2041,17 @@ impl<T: Scene + 'static> Renderer<T> {
                                 ],
                             });
                     executions.push(PreparedExecution::Fullscreen {
-                        execution: index,
-                        frame_out,
                         bind_group,
                         pipeline,
                         _uniform: uniform,
                     });
                 }
-                "pipeline" => {
-                    let ExecutionKind::Render {
-                        color_attachments,
-                        depth_stencil,
-                    } = &execution.kind
-                    else {
+                _ if contract.is_raster_draw() => {
+                    if !matches!(execution.kind, ExecutionKind::RasterDraw) {
                         return Err(fail("pipeline is not render"));
-                    };
+                    }
+                    let (color_attachments, depth_stencil) =
+                        crate::render_graph::execution_attachments(execution);
                     let color = color_attachments
                         .first()
                         .ok_or_else(|| fail("pipeline color missing"))?;
@@ -2098,8 +2090,8 @@ impl<T: Scene + 'static> Renderer<T> {
                                 .ok_or_else(|| fail("depth allocation invalid"))
                         })
                         .transpose()?;
-                    let NormalizedParameters::Pipeline {
-                        pipeline: _,
+                    let NormalizedParameters::Raster {
+                        draw_order: _,
                         depth_compare,
                         depth_write_enabled,
                         ..
@@ -2145,7 +2137,6 @@ impl<T: Scene + 'static> Renderer<T> {
                         )
                         .map_err(|e| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", e))?;
                     executions.push(PreparedExecution::Pipeline {
-                        execution: index,
                         base,
                         predicate_ordinal: runtime
                             .instance_traversal
