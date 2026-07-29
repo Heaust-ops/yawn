@@ -4,7 +4,7 @@ import { GEOMETRY as G } from "./constants.js";
 
 const title = (value: string) => value.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const textWidth = (value: string) => value.length * 6.5;
-export const nodeRowUnits = (item: FxNodeUiRow): number =>
+export const nodeRowUnits = (item: FxNodeUiRow, definition?: FxNodeDefinition): number =>
   item.kind === "text" && item.variant === "header"
     ? 2
     : item.kind === "widget"
@@ -13,7 +13,11 @@ export const nodeRowUnits = (item: FxNodeUiRow): number =>
         : 8
       : item.kind === "resource"
         ? 4
-        : 1;
+        : item.kind === "socket" &&
+            definition?.sockets[item.socket]?.direction === "input" &&
+            definition.sockets[item.socket]!.maxIncomingLinks > 1
+          ? 2
+          : 1;
 const controlWidth = (schema: FxNodeValueSchema | undefined, ramp = false) =>
   !schema
     ? 80
@@ -82,7 +86,7 @@ export function minimumNodeSize(
   }
   return {
     x: Math.min(G.maxWidth, Math.ceil(width)),
-    y: G.header + items.reduce((sum, item) => sum + nodeRowUnits(item), 0) * G.row + G.gap,
+    y: G.header + items.reduce((sum, item) => sum + nodeRowUnits(item, definition), 0) * G.row + G.gap,
   };
 }
 export function initialNodeSize(

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>fxnode logic nodes</title>
+    <link rel="stylesheet" href="../shared/example.css" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Composable logic nodes</h1>
+      <p>
+        AND, OR, XOR, and XNOR accept several links through one multi-input pill. Toggle a Boolean value to evaluate the
+        graph in application code.
+      </p>
+      <output id="results" aria-live="polite"></output>
+      <canvas id="graph" width="1200" height="700" aria-label="Logic node graph"></canvas>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

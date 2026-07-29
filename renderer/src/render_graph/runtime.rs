@@ -802,9 +802,9 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
             ));
         }
     }
-    if graph.schema_version != 2 {
+    if graph.schema_version != 3 {
         return Err(invalid(
-            "compiled graph schema version must be 2",
+            "compiled graph schema version must be 3",
             "schemaVersion",
         ));
     }
@@ -1303,14 +1303,16 @@ fn validate_instance_traversal(graph: &CompiledGraph) -> Result<(), GraphError> 
                 }
                 vec![*value]
             }
-            ExpressionOp::BooleanBinary { left, right, .. } => {
+            ExpressionOp::Boolean { operands, .. } => {
                 if expression.semantic_type != SemanticType::Bool
-                    || ty(*left) != Some(SemanticType::Bool)
-                    || ty(*right) != Some(SemanticType::Bool)
+                    || operands.len() > 8
+                    || operands
+                        .iter()
+                        .any(|operand| ty(*operand) != Some(SemanticType::Bool))
                 {
                     return Err(invalid("boolean signature is invalid", &path));
                 }
-                vec![*left, *right]
+                operands.clone()
             }
             ExpressionOp::CompareF32 { left, right, .. } => {
                 if expression.semantic_type != SemanticType::Bool
@@ -1511,8 +1513,8 @@ fn expression_operands(op: &ExpressionOp) -> Vec<ExprId> {
         | ExpressionOp::U32Bit { value, .. } => vec![*value],
         ExpressionOp::AabbMin { aabb } | ExpressionOp::AabbMax { aabb } => vec![*aabb],
         ExpressionOp::FrustumCulled { local_aabb, .. } => vec![*local_aabb],
-        ExpressionOp::BooleanBinary { left, right, .. }
-        | ExpressionOp::CompareF32 { left, right, .. }
+        ExpressionOp::Boolean { operands, .. } => operands.clone(),
+        ExpressionOp::CompareF32 { left, right, .. }
         | ExpressionOp::CompareU32 { left, right, .. } => vec![*left, *right],
         ExpressionOp::VectorConstruct { components } => components.clone(),
         ExpressionOp::MatrixConstruct { columns } => columns.clone(),

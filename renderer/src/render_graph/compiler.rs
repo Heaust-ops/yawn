@@ -306,10 +306,10 @@ pub fn parse_and_compile(bytes: &[u8]) -> Result<CompiledGraph, GraphError> {
         .map_err(|_| GraphError::new("GRAPH_ENCODING_INVALID", "graph payload is not UTF-8"))?;
     let probe: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| GraphError::new("GRAPH_JSON_INVALID", e.to_string()))?;
-    if probe.get("schemaVersion").and_then(|v| v.as_u64()) != Some(2) {
+    if probe.get("schemaVersion").and_then(|v| v.as_u64()) != Some(3) {
         return Err(GraphError::new(
             "GRAPH_SCHEMA_UNSUPPORTED",
-            "schemaVersion must be 2",
+            "schemaVersion must be 3",
         ));
     }
     let graph = serde_json::from_str(text)
@@ -790,15 +790,20 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                     base.clone(),
                 )
             })?;
-            if object.len() != contract.inputs.len() {
+            let default_inputs: Vec<_> = contract
+                .inputs
+                .iter()
+                .filter(|input| input.cardinality.max == 1)
+                .collect();
+            if object.len() != default_inputs.len() {
                 return Err(error(
                     "GRAPH_PARAMETERS_INVALID",
                     "expression defaults must exactly match inputs",
                     base,
                 ));
             }
-            let mut defaults = Vec::with_capacity(contract.inputs.len());
-            for input in contract.inputs {
+            let mut defaults = Vec::with_capacity(default_inputs.len());
+            for input in default_inputs {
                 let key = format!("{}Default", input.name);
                 let value = object.get(&key).ok_or_else(|| {
                     error(
@@ -841,7 +846,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     }
     let mut input_count = 0usize;
     for (i, node) in graph.nodes.iter().enumerate() {
-        input_count = input_count.saturating_add(node.inputs.len());
+        input_count = input_count.saturating_add(node.inputs.values().map(Vec::len).sum::<usize>());
         if input_count > 8192 {
             return Err(error(
                 "GRAPH_LIMIT_EXCEEDED",
@@ -850,10 +855,10 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             ));
         }
     }
-    if graph.schema_version != 2 {
+    if graph.schema_version != 3 {
         return Err(GraphError::new(
             "GRAPH_SCHEMA_UNSUPPORTED",
-            "schemaVersion must be 2",
+            "schemaVersion must be 3",
         ));
     }
     validate_name_length(&graph.graph_id, "graphId")?;
@@ -864,13 +869,14 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         ] {
             validate_name_length(value, path)?;
         }
-        for (socket, r) in &n.inputs {
-            for (value, path) in [
-                (socket, format!("nodes[{i}].inputs.{socket}")),
-                (&r.node, format!("nodes[{i}].inputs.{socket}.node")),
-                (&r.socket, format!("nodes[{i}].inputs.{socket}.socket")),
-            ] {
-                validate_name_length(value, path)?;
+        for (socket, refs) in &n.inputs {
+            validate_name_length(socket, format!("nodes[{i}].inputs.{socket}"))?;
+            for (index, r) in refs.iter().enumerate() {
+                validate_name_length(&r.node, format!("nodes[{i}].inputs.{socket}[{index}].node"))?;
+                validate_name_length(
+                    &r.socket,
+                    format!("nodes[{i}].inputs.{socket}[{index}].socket"),
+                )?;
             }
         }
     }
@@ -891,24 +897,30 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 format!("nodes[{i}].id"),
             ));
         }
-        for (socket, r) in &n.inputs {
-            for (value, path) in [
-                (socket, format!("nodes[{i}].inputs.{socket}")),
-                (&r.node, format!("nodes[{i}].inputs.{socket}.node")),
-                (&r.socket, format!("nodes[{i}].inputs.{socket}.socket")),
-            ] {
-                validate_name_grammar(value, path)?;
+        for (socket, refs) in &n.inputs {
+            validate_name_grammar(socket, format!("nodes[{i}].inputs.{socket}"))?;
+            for (index, r) in refs.iter().enumerate() {
+                validate_name_grammar(
+                    &r.node,
+                    format!("nodes[{i}].inputs.{socket}[{index}].node"),
+                )?;
+                validate_name_grammar(
+                    &r.socket,
+                    format!("nodes[{i}].inputs.{socket}[{index}].socket"),
+                )?;
             }
         }
     }
     for (i, n) in graph.nodes.iter().enumerate() {
-        for (s, r) in &n.inputs {
-            if !ids.contains_key(r.node.as_str()) {
-                return Err(error(
-                    "GRAPH_UNKNOWN_NODE",
-                    "unknown input node",
-                    format!("nodes[{i}].inputs.{s}.node"),
-                ));
+        for (s, refs) in &n.inputs {
+            for (index, r) in refs.iter().enumerate() {
+                if !ids.contains_key(r.node.as_str()) {
+                    return Err(error(
+                        "GRAPH_UNKNOWN_NODE",
+                        "unknown input node",
+                        format!("nodes[{i}].inputs.{s}[{index}].node"),
+                    ));
+                }
             }
         }
     }
@@ -978,27 +990,36 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
     }
     for (i, n) in graph.nodes.iter().enumerate() {
-        for (name, r) in &n.inputs {
-            let pn = ids[r.node.as_str()];
-            if !contracts[pn].outputs.iter().any(|out| out.name == r.socket) {
-                return Err(error(
-                    "GRAPH_UNKNOWN_SOCKET",
-                    "unknown output socket",
-                    format!("nodes[{i}].inputs.{name}.socket"),
-                ));
+        for (name, refs) in &n.inputs {
+            for (index, r) in refs.iter().enumerate() {
+                let pn = ids[r.node.as_str()];
+                if !contracts[pn].outputs.iter().any(|out| out.name == r.socket) {
+                    return Err(error(
+                        "GRAPH_UNKNOWN_SOCKET",
+                        "unknown output socket",
+                        format!("nodes[{i}].inputs.{name}[{index}].socket"),
+                    ));
+                }
             }
         }
     }
     for (i, n) in graph.nodes.iter().enumerate() {
         for input in contracts[i].inputs {
-            if !n.inputs.contains_key(input.name) {
-                if input.cardinality == InputCardinality::RequiredOne {
-                    return Err(error(
-                        "GRAPH_SOCKET_CARDINALITY",
-                        "required input is missing",
-                        format!("nodes[{i}].inputs.{}", input.name),
-                    ));
-                }
+            let sources = n.inputs.get(input.name);
+            if sources.is_some_and(Vec::is_empty) {
+                return Err(error(
+                    "GRAPH_SOCKET_CARDINALITY",
+                    "present input bindings must not be empty",
+                    format!("nodes[{i}].inputs.{}", input.name),
+                ));
+            }
+            let count = sources.map_or(0, Vec::len);
+            if count < input.cardinality.min as usize || count > input.cardinality.max as usize {
+                return Err(error(
+                    "GRAPH_SOCKET_CARDINALITY",
+                    "input binding count is outside the accepted range",
+                    format!("nodes[{i}].inputs.{}", input.name),
+                ));
             }
         }
     }
@@ -1006,35 +1027,59 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     let mut bound: Vec<BTreeMap<&str, BoundInput>> = vec![BTreeMap::new(); graph.nodes.len()];
     for (i, n) in graph.nodes.iter().enumerate() {
         for input in contracts[i].inputs {
-            let Some(r) = n.inputs.get(input.name) else {
+            let Some(refs) = n.inputs.get(input.name) else {
                 continue;
             };
-            let pn = ids[r.node.as_str()];
-            let (ordinal, out) = contracts[pn]
-                .outputs
-                .iter()
-                .enumerate()
-                .find(|(_, o)| o.name == r.socket)
-                .expect("producer sockets were globally validated");
-            if !accepts(input.accepted, out.semantic_type) {
-                return Err(error(
-                    "GRAPH_SOCKET_TYPE_MISMATCH",
-                    "socket type mismatch",
-                    format!("nodes[{i}].inputs.{}", input.name),
-                ));
+            for (source_index, r) in refs.iter().enumerate() {
+                let pn = ids[r.node.as_str()];
+                let (ordinal, out) = contracts[pn]
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, o)| o.name == r.socket)
+                    .expect("producer sockets were globally validated");
+                if !accepts(input.accepted, out.semantic_type) {
+                    return Err(error(
+                        "GRAPH_SOCKET_TYPE_MISMATCH",
+                        "socket type mismatch",
+                        format!("nodes[{i}].inputs.{}[{source_index}]", input.name),
+                    ));
+                }
+                if source_index == 0 {
+                    bound[i].insert(
+                        input.name,
+                        BoundInput {
+                            producer: OutputKey(pn, ordinal as u16),
+                        },
+                    );
+                }
             }
-            bound[i].insert(
-                input.name,
-                BoundInput {
-                    producer: OutputKey(pn, ordinal as u16),
-                },
-            );
         }
     }
     let mut edges = Vec::new();
     for i in 0..graph.nodes.len() {
         for (input_ordinal, input) in contracts[i].inputs.iter().enumerate() {
-            if let Some(b) = bound[i].get(input.name) {
+            for (source_index, b) in graph.nodes[i]
+                .inputs
+                .get(input.name)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(source_index, r)| {
+                    let pn = ids[r.node.as_str()];
+                    let ordinal = contracts[pn]
+                        .outputs
+                        .iter()
+                        .position(|o| o.name == r.socket)
+                        .unwrap();
+                    (
+                        source_index,
+                        BoundInput {
+                            producer: OutputKey(pn, ordinal as u16),
+                        },
+                    )
+                })
+            {
                 edges.push(DependencyEdge {
                     from_node: b.producer.0,
                     from_socket: contracts[b.producer.0].outputs[b.producer.1 as usize]
@@ -1044,7 +1089,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     to_node: i,
                     to_socket: input.name.into(),
                     consumer_input_ordinal: input_ordinal as u16,
-                    resource: graph.nodes[i].inputs[input.name].clone(),
+                    resource: graph.nodes[i].inputs[input.name][source_index].clone(),
                 });
             }
         }
@@ -2346,52 +2391,27 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let mut operands = Vec::new();
         let mut operand_provenance = Vec::new();
         for (ordinal, input) in contracts[i].inputs.iter().enumerate() {
-            if let Some(binding) = bound[i].get(input.name) {
-                let key = binding.producer;
-                let producer_type = contracts[key.0].outputs[key.1 as usize].semantic_type;
-                let operand_mesh = if contracts[key.0].key == "mesh" {
-                    Some(output_ids[&OutputKey(key.0, 0)])
-                } else {
-                    expression_provenance[&key]
-                };
-                let id = if producer_type.is_virtual() {
-                    if contracts[key.0].key == "mesh" {
-                        let mesh = output_ids[&OutputKey(key.0, 0)];
-                        if mesh_root.is_some_and(|root| root != mesh) {
-                            return Err(error(
-                                "GRAPH_SOCKET_TYPE_MISMATCH",
-                                "instance traversal has multiple mesh roots",
-                                format!("nodes[{i}].inputs.{}", input.name),
-                            ));
-                        }
-                        mesh_root = Some(mesh);
-                        let op = match producer_type {
-                            SemanticType::U32x16 => ExpressionOp::InstanceType { mesh },
-                            SemanticType::LocalAabb => ExpressionOp::LocalAabb { mesh },
-                            _ => unreachable!(),
-                        };
-                        intern(
-                            producer_type,
-                            op,
-                            graph.nodes[key.0]
-                                .inputs
-                                .get("")
-                                .cloned()
-                                .unwrap_or(NodeOutputRef {
-                                    node: graph.nodes[key.0].id.clone(),
-                                    socket: contracts[key.0].outputs[key.1 as usize].name.into(),
-                                }),
-                            Some(mesh),
-                        )
-                    } else {
-                        expression_ids[&key]
+            let bindings: Vec<_> = graph.nodes[i]
+                .inputs
+                .get(input.name)
+                .into_iter()
+                .flatten()
+                .map(|r| {
+                    let producer = ids[r.node.as_str()];
+                    let output = contracts[producer]
+                        .outputs
+                        .iter()
+                        .position(|o| o.name == r.socket)
+                        .unwrap();
+                    BoundInput {
+                        producer: OutputKey(producer, output as u16),
                     }
-                } else {
+                })
+                .collect();
+            if bindings.is_empty() {
+                if input.cardinality.max > 1 {
                     continue;
-                };
-                operands.push(id);
-                operand_provenance.push(operand_mesh);
-            } else {
+                }
                 let literal = defaults[ordinal].clone();
                 operands.push(intern(
                     literal.semantic_type(),
@@ -2403,6 +2423,55 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     None,
                 ));
                 operand_provenance.push(None);
+            } else {
+                for binding in bindings {
+                    let key = binding.producer;
+                    let producer_type = contracts[key.0].outputs[key.1 as usize].semantic_type;
+                    let operand_mesh = if contracts[key.0].key == "mesh" {
+                        Some(output_ids[&OutputKey(key.0, 0)])
+                    } else {
+                        expression_provenance[&key]
+                    };
+                    let id = if producer_type.is_virtual() {
+                        if contracts[key.0].key == "mesh" {
+                            let mesh = output_ids[&OutputKey(key.0, 0)];
+                            if mesh_root.is_some_and(|root| root != mesh) {
+                                return Err(error(
+                                    "GRAPH_SOCKET_TYPE_MISMATCH",
+                                    "instance traversal has multiple mesh roots",
+                                    format!("nodes[{i}].inputs.{}", input.name),
+                                ));
+                            }
+                            mesh_root = Some(mesh);
+                            let op = match producer_type {
+                                SemanticType::U32x16 => ExpressionOp::InstanceType { mesh },
+                                SemanticType::LocalAabb => ExpressionOp::LocalAabb { mesh },
+                                _ => unreachable!(),
+                            };
+                            intern(
+                                producer_type,
+                                op,
+                                graph.nodes[key.0]
+                                    .inputs
+                                    .get("")
+                                    .and_then(|refs| refs.first().cloned())
+                                    .unwrap_or(NodeOutputRef {
+                                        node: graph.nodes[key.0].id.clone(),
+                                        socket: contracts[key.0].outputs[key.1 as usize]
+                                            .name
+                                            .into(),
+                                    }),
+                                Some(mesh),
+                            )
+                        } else {
+                            expression_ids[&key]
+                        }
+                    } else {
+                        continue;
+                    };
+                    operands.push(id);
+                    operand_provenance.push(operand_mesh);
+                }
             }
         }
         let mut provenances = operand_provenance.into_iter().flatten();
@@ -2418,15 +2487,14 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             let key = contracts[i].key;
             let op = match key {
                 "not" => ExpressionOp::Not { value: operands[0] },
-                "and" | "or" | "xor" | "xnor" => ExpressionOp::BooleanBinary {
+                "and" | "or" | "xor" | "xnor" => ExpressionOp::Boolean {
                     operation: match key {
-                        "and" => BooleanBinaryOp::And,
-                        "or" => BooleanBinaryOp::Or,
-                        "xor" => BooleanBinaryOp::Xor,
-                        _ => BooleanBinaryOp::Xnor,
+                        "and" => BooleanOp::And,
+                        "or" => BooleanOp::Or,
+                        "xor" => BooleanOp::Xor,
+                        _ => BooleanOp::Xnor,
                     },
-                    left: operands[0],
-                    right: operands[1],
+                    operands: operands.clone(),
                 },
                 "greater_than_f32" | "less_than_f32" | "equals_f32" => ExpressionOp::CompareF32 {
                     operation: if key.starts_with("greater") {
@@ -2636,7 +2704,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         ));
     }
     Ok(CompiledGraph {
-        schema_version: 2,
+        schema_version: 3,
         graph_id: graph.graph_id,
         revision: graph.revision,
         node_count: graph.nodes.len() as u32,

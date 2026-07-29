@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { APPLICATION_COMPILED, APPLICATION_HEADLESS } from "./application.js";
-import { commandId, nodeId } from "@lib/core/types.js";
+import { commandId, linkId, nodeId } from "@lib/core/types.js";
 import { layoutGraph as genericLayoutGraph } from "@lib/layout/layout-graph.js";
 import { viewToWorld, worldToView } from "@lib/layout/geometry.js";
 const layoutGraph = (document: any, transform: Parameters<typeof genericLayoutGraph>[2]) =>
@@ -163,8 +163,8 @@ test("all catalog types lay out deterministically", () => {
       "fxnode.geometry.join-geometry",
       "node",
       "geometry",
-      ["socket:input:geometry:1", "socket:output:result:1"],
-      [175, 76],
+      ["socket:input:geometry:2", "socket:output:result:1"],
+      [175, 100],
       [175, 100],
     ],
     [
@@ -207,8 +207,8 @@ test("all catalog types lay out deterministically", () => {
       "fxnode.common.group-output",
       "node",
       "output",
-      ["control:string:interfaceName:1", "socket:input:input:1"],
-      [257, 76],
+      ["control:string:interfaceName:1", "socket:input:input:2"],
+      [257, 100],
       [257, 100],
     ],
     [
@@ -446,6 +446,75 @@ test("expanded, collapsed, reroute and links have pinned geometry", () => {
     { kind: "node", id: nodeId("math") },
   );
   assert.equal(snapshot.controls.get("math:socket:math:a")?.linked, true, "linked inputs hide controls");
+});
+
+test("multi-input sockets use pill hit bounds and stable per-link anchors", () => {
+  const join = materializeNode("join", "fxnode.geometry.join-geometry", { x: 160, y: 80 });
+  const sources = [0, 1, 2].map((index) =>
+    materializeNode(`cube-${index}`, "fxnode.geometry.mesh-cube", { x: -180, y: 180 - index * 160 }),
+  );
+  const linkIds = ["z-random", "a-random", "m-random"] as const;
+  const links = Object.fromEntries(
+    sources.map((source, index) => {
+      const id = linkIds[index]!;
+      return [
+        id,
+        {
+          id,
+          fromNodeId: source.id,
+          fromSocketId: source.sockets.find((socket) => socket.key === "mesh")!.id,
+          toNodeId: join.id,
+          toSocketId: join.sockets.find((socket) => socket.key === "geometry")!.id,
+          muted: false,
+          extensions: {},
+        },
+      ];
+    }),
+  );
+  const snapshot = layoutGraph(
+    {
+      schemaVersion: 2,
+      graphId: "multi-input",
+      catalogVersion: 1,
+      nodes: Object.fromEntries([join, ...sources].map((node) => [node.id, node])),
+      links,
+      metadata: {},
+    },
+    transform,
+  );
+  const socket = snapshot.sockets.get(join.sockets.find((candidate) => candidate.key === "geometry")!.id)!;
+  assert.equal(socket.shape, "multi-input");
+  assert.deepEqual(socket.bounds, {
+    x: socket.anchor.x - 5,
+    y: socket.anchor.y + 20,
+    width: 10,
+    height: 40,
+  });
+  assert.equal(socket.linkAnchors.size, 3);
+  assert.equal(new Set([...socket.linkAnchors.values()].map((anchor) => anchor.y)).size, 3);
+  assert.ok(socket.linkAnchors.get(linkId("z-random"))!.y > socket.linkAnchors.get(linkId("a-random"))!.y);
+  assert.ok(socket.linkAnchors.get(linkId("a-random"))!.y > socket.linkAnchors.get(linkId("m-random"))!.y);
+  for (const [id, anchor] of socket.linkAnchors) {
+    assert.deepEqual(snapshot.links.get(id)!.points.at(-1), anchor);
+  }
+  assert.deepEqual(hitTest(snapshot, worldToView({ x: socket.anchor.x, y: socket.bounds!.y - 2 }, transform)), {
+    kind: "socket",
+    id: socket.id,
+  });
+
+  const collapsed = layoutGraph(
+    {
+      schemaVersion: 2,
+      graphId: "multi-input-collapsed",
+      catalogVersion: 1,
+      nodes: { join: { ...join, collapsed: true } },
+      links: {},
+      metadata: {},
+    },
+    transform,
+  ).sockets.get(socket.id)!;
+  assert.equal(collapsed.shape, "circle");
+  assert.equal(collapsed.bounds, undefined);
 });
 
 test("frames have labelled fitted bounds around parent-local children", () => {

@@ -479,7 +479,10 @@ function paintSocket(
   const point = worldToView(socket.anchor, transform);
   context.fillStyle = socket.color;
   context.beginPath();
-  context.arc(point.x, point.y, G.socket * zoom, 0, Math.PI * 2);
+  if (socket.shape === "multi-input" && socket.bounds) {
+    const topLeft = worldToView({ x: socket.bounds.x, y: socket.bounds.y }, transform);
+    context.roundRect(topLeft.x, topLeft.y, socket.bounds.width * zoom, socket.bounds.height * zoom, G.socket * zoom);
+  } else context.arc(point.x, point.y, G.socket * zoom, 0, Math.PI * 2);
   context.fill();
   if (showLabel && zoom >= 0.35) {
     context.fillStyle = theme.text;

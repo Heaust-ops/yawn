@@ -109,6 +109,7 @@ export interface FxNodeSocketDefinition<S extends string = string> {
   readonly title: string;
   readonly direction: "input" | "output";
   readonly type: S;
+  /** Maximum incoming links. Inputs above 1 are presented as multi-input pills; outputs must use 0. */
   readonly maxIncomingLinks: number;
   readonly visible: boolean;
   readonly value: FxNodeValueSchema | null;

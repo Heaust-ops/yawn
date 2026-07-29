@@ -1,6 +1,6 @@
 # Examples
 
-The repository has five current experiences. Images below use the examples' existing captured assets—there are no documentation copies.
+The repository has six current experiences. Images below use the examples' existing captured assets—there are no documentation copies.
 
 ## Minimal
 
@@ -25,6 +25,12 @@ _Replacing a node definition and migrating its instance. [Source](https://github
 ![One shared graph rendered in two independent canvas views](../../../examples/assets/multi-view.png)
 
 _One worker and graph with independent cameras and selections. The application-owned toolbar targets the active view, and the canvases forward pointer events only. [Source](https://github.com/Heaust-ops/fxnode/blob/main/examples/multi-view/main.ts)._
+
+## Logic nodes
+
+![Boolean logic nodes connected through vertical multi-input socket pills](../../../examples/assets/logic-nodes.png)
+
+_A Boolean socket, app-composed AND/OR/NOT/XOR/XNOR/NAND/NOR nodes, and five-link inputs. The library presents and edits the graph; the example evaluates it in application code. [Source](https://github.com/Heaust-ops/fxnode/blob/main/examples/logic-nodes/main.ts)._
 
 ## Blender-shaped gallery
 

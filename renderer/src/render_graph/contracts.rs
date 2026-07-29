@@ -39,9 +39,9 @@ pub enum FullscreenPolicy {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InputCardinality {
-    RequiredOne,
-    OptionalOne,
+pub struct InputCardinality {
+    pub min: u8,
+    pub max: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,17 +97,19 @@ pub struct Contract {
 }
 
 use SemanticType::*;
-const R: InputCardinality = InputCardinality::RequiredOne;
-const O: InputCardinality = InputCardinality::OptionalOne;
+const R: InputCardinality = InputCardinality { min: 1, max: 1 };
+const O: InputCardinality = InputCardinality { min: 0, max: 1 };
+const V: InputCardinality = InputCardinality { min: 0, max: 8 };
 const fn i(
     name: &'static str,
     ty: SemanticType,
     cardinality: InputCardinality,
     role: InputRole,
 ) -> InputSocketContract {
-    let default_policy = match cardinality {
-        InputCardinality::RequiredOne => InputDefaultPolicy::None,
-        InputCardinality::OptionalOne => match role {
+    let default_policy = match (cardinality.min, cardinality.max) {
+        (_, 2..) => InputDefaultPolicy::None,
+        (1, _) => InputDefaultPolicy::None,
+        _ => match role {
             InputRole::ColorTarget { .. } | InputRole::DepthTarget => {
                 InputDefaultPolicy::CompilerTexture
             }
@@ -194,17 +196,50 @@ macro_rules! ex {
         c!($k, 1, Expression, $ins, $outs, false, None)
     };
 }
+const BOOL_VARIADIC_I: &[InputSocketContract] = &[i("inputs", Bool, V, InputRole::Expression)];
 
 pub static CONTRACTS: &[Contract] = &[
     c!("mesh", 2, Source, NONE_I, MESH_O, false, None),
     c!("texture", 2, Source, NONE_I, TEXTURE_O, false, None),
     c!("frustum_cull", 2, Expression, CULL_I, CULL_O, false, None),
     c!("pipeline", 4, Render, PIPE_I, PIPE_O, false, None),
-    ex!("and", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
-    ex!("or", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
+    c!(
+        "and",
+        2,
+        Expression,
+        BOOL_VARIADIC_I,
+        outs!("value":Bool),
+        false,
+        None
+    ),
+    c!(
+        "or",
+        2,
+        Expression,
+        BOOL_VARIADIC_I,
+        outs!("value":Bool),
+        false,
+        None
+    ),
     ex!("not", ins!("operand":Bool), outs!("value":Bool)),
-    ex!("xor", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
-    ex!("xnor", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
+    c!(
+        "xor",
+        2,
+        Expression,
+        BOOL_VARIADIC_I,
+        outs!("value":Bool),
+        false,
+        None
+    ),
+    c!(
+        "xnor",
+        2,
+        Expression,
+        BOOL_VARIADIC_I,
+        outs!("value":Bool),
+        false,
+        None
+    ),
     ex!(
         "greater_than_f32",
         ins!("left":F32,"right":F32),

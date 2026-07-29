@@ -4,6 +4,7 @@ const examples = [
   { path: "minimal", nodeId: "value", typeId: "example.minimal.value" },
   { path: "color-balance", nodeId: "color-balance", typeId: "fxnode.compositor.color-balance" },
   { path: "live-composition", nodeId: "live-node", typeId: "example.live.parameter" },
+  { path: "logic-nodes", nodeId: "and", typeId: "example.logic.and" },
 ] as const;
 
 function capturePageErrors(page: Page): Error[] {
@@ -14,11 +15,11 @@ function capturePageErrors(page: Page): Error[] {
 
 test("gallery links every standalone application and loads its images", async ({ page }) => {
   await page.goto("/examples/");
-  await expect(page.locator(".gallery a")).toHaveCount(5);
+  await expect(page.locator(".gallery a")).toHaveCount(6);
   expect(
     await page.locator(".gallery a").evaluateAll((links) => links.map((link) => link.getAttribute("href"))),
-  ).toEqual(["./minimal/", "./color-balance/", "./live-composition/", "./multi-view/", "./blender/"]);
-  await expect(page.locator(".gallery img")).toHaveCount(4);
+  ).toEqual(["./minimal/", "./color-balance/", "./live-composition/", "./logic-nodes/", "./multi-view/", "./blender/"]);
+  await expect(page.locator(".gallery img")).toHaveCount(5);
   expect(
     await page
       .locator(".gallery img")
@@ -142,6 +143,36 @@ test("multi-view keeps view input and selection local while graph changes fan ou
   expect(
     await page.evaluate(() => ({ root: window.fxnodeMultiView.root, views: window.fxnodeMultiView.views.length })),
   ).toEqual({ root: null, views: 0 });
+});
+
+test("logic nodes accept five links through one input and application evaluation follows snapshots", async ({
+  page,
+}) => {
+  const errors = capturePageErrors(page);
+  await page.goto("/examples/logic-nodes/");
+  await page.evaluate(() => window.fxnodeStandalone.ready);
+  const initial = await page.evaluate(async () => {
+    const state = await window.fxnodeStandalone.root!.getState();
+    return {
+      incoming: state.links.filter((link) => link.toSocketId === "and:inputs").length,
+      labels: [...document.querySelectorAll<HTMLElement>("#results span")].map((item) => item.textContent),
+    };
+  });
+  expect(initial.incoming).toBe(5);
+  expect(initial.labels).toContain("AND: false");
+
+  await page.evaluate(async () => {
+    const root = window.fxnodeStandalone.root!;
+    const source = (await root.getState()).nodes.find((node) => node.id === "c")!;
+    return root.dispatch({
+      type: "node.parameter",
+      id: source.id,
+      key: "value",
+      value: { kind: "boolean", value: true },
+    });
+  });
+  await expect(page.locator("#results span").filter({ hasText: "AND:" })).toHaveText("AND: true");
+  expect(errors).toEqual([]);
 });
 
 for (const example of examples) {

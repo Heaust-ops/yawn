@@ -1,6 +1,6 @@
 import { descriptors } from "./catalog.js";
 
-const input = (node, socket) => ({ node, socket });
+const input = (node, socket) => [{ node, socket }];
 const node = (id, key, parameters = {}, inputs = {}) => ({
   id, state: "enabled", executor: { key, version: descriptors[key].version }, parameters, inputs,
 });
@@ -17,20 +17,19 @@ const predicates = (withCulling = false) => {
   const result = [
     node("type_words", "separate_u32x16", { valueDefault: Array(16).fill(0) }, { value: input("mesh", "type") }),
     node("type_bits", "separate_u32_bits", { valueDefault: 0 }, { value: input("type_words", "word0") }),
-    node("ground_class", "and", { leftDefault: true, rightDefault: true }, { left: input("type_bits", "bit0"), right: input("type_bits", "bit1") }),
-    node("visible_pbr", "and", { leftDefault: true, rightDefault: true }, { left: input("type_bits", "bit0"), right: input("type_bits", "bit2") }),
+    node("ground_class", "and", {}, { inputs: [...input("type_bits", "bit0"), ...input("type_bits", "bit1")] }),
     node("not_double", "not", { operandDefault: false }, { operand: input("type_bits", "bit3") }),
-    node("standard_class", "and", { leftDefault: true, rightDefault: true }, { left: input("visible_pbr", "value"), right: input("not_double", "value") }),
-    node("double_class", "and", { leftDefault: true, rightDefault: true }, { left: input("type_bits", "bit0"), right: input("type_bits", "bit3") }),
+    node("standard_class", "and", {}, { inputs: [...input("type_bits", "bit0"), ...input("type_bits", "bit2"), ...input("not_double", "value")] }),
+    node("double_class", "and", {}, { inputs: [...input("type_bits", "bit0"), ...input("type_bits", "bit3")] }),
   ];
   if (!withCulling) return { nodes: result, classes: { ground: "ground_class", pbr: "standard_class", pbr_double: "double_class" } };
   result.push(
     node("cull", "frustum_cull", { camera: "active" }, { mesh: input("mesh", "mesh"), localAabb: input("mesh", "localAabb") }),
     node("not_culled", "not", { operandDefault: false }, { operand: input("cull", "isFrustumCulled") }),
-    ...[["ground", "ground_class"], ["pbr", "standard_class"], ["pbr_double", "double_class"]].map(([name, classification]) =>
-      node(`${name}_final`, "and", { leftDefault: true, rightDefault: true }, { left: input(classification, "value"), right: input("not_culled", "value") })),
   );
-  return { nodes: result, classes: { ground: "ground_final", pbr: "pbr_final", pbr_double: "pbr_double_final" } };
+  for (const id of ["ground_class", "standard_class", "double_class"])
+    result.find((item) => item.id === id).inputs.inputs.push(...input("not_culled", "value"));
+  return { nodes: result, classes: { ground: "ground_class", pbr: "standard_class", pbr_double: "double_class" } };
 };
 const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1, withCulling = false) => {
   const classification = predicates(withCulling);
@@ -45,7 +44,7 @@ const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1
   node("pbr_double", "pipeline", { pipeline: "gltf_standard_double_sided", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr_double, "value"), colorTarget: input("pbr", "color"), depthTarget: input("pbr", "depth") }),
 ];
 };
-const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 2, graphId, revision: 1, nodes });
+const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 3, graphId, revision: 2, nodes });
 const direct = (graphId, clearColor) => graph(graphId, [
   node("ldr", "texture", texture("rgba8_unorm")),
   ...scene("ldr", clearColor),

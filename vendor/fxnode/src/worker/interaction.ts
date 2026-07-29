@@ -138,7 +138,9 @@ export function hitTest(layout: LayoutSnapshot, view: Vec2, preferredDirection?:
     .filter(
       (socket) =>
         (!topNode || socket.nodeId === topNode.id) &&
-        Math.hypot(world.x - socket.anchor.x, world.y - socket.anchor.y) <= tolerance,
+        (socket.shape === "multi-input" && socket.bounds
+          ? inRect(world, socket.bounds, tolerance)
+          : Math.hypot(world.x - socket.anchor.x, world.y - socket.anchor.y) <= tolerance),
     )
     .sort((a, b) => {
       const an = layout.nodes.get(a.nodeId),

@@ -70,7 +70,7 @@ pub enum CompareOp {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BooleanBinaryOp {
+pub enum BooleanOp {
     And,
     Or,
     Xor,
@@ -93,10 +93,9 @@ pub enum ExpressionOp {
     Not {
         value: ExprId,
     },
-    BooleanBinary {
-        operation: BooleanBinaryOp,
-        left: ExprId,
-        right: ExprId,
+    Boolean {
+        operation: BooleanOp,
+        operands: Vec<ExprId>,
     },
     CompareF32 {
         operation: CompareOp,

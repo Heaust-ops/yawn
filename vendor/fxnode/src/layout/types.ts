@@ -36,6 +36,12 @@ export interface LayoutSocket {
   readonly capacity: number;
   readonly linkIds: readonly LinkId[];
   readonly anchor: Vec2;
+  /** Multi-capacity inputs use a vertical pill; ordinary and collapsed sockets remain circular. */
+  readonly shape: "circle" | "multi-input";
+  /** Authoritative world-space paint and hit bounds for a multi-input pill. */
+  readonly bounds?: Rect;
+  /** Stable world-space attachment point for each link occupying a multi-input pill. */
+  readonly linkAnchors: ReadonlyMap<LinkId, Vec2>;
   readonly linked: boolean;
 }
 export type LayoutControlKind =

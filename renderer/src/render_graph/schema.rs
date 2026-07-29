@@ -18,7 +18,7 @@ pub struct Node {
     pub state: NodeState,
     pub executor: ExecutorRef,
     pub parameters: serde_json::Value,
-    pub inputs: BTreeMap<String, NodeOutputRef>,
+    pub inputs: BTreeMap<String, Vec<NodeOutputRef>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

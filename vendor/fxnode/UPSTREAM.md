@@ -1,9 +1,9 @@
 # fxnode upstream provenance
 
 - Source: https://github.com/Heaust-ops/fxnode
-- Commit: `3f8745717bf4574577be72e9769373475cc300c9`
-- Tree: `fb8bf407854b68dad8c0249c9ba63c7fd0bd9332`
-- Imported: 2026-07-26
+- Commit: `4e96585e99742959660d4107b0078c27ff13e708`
+- Tree: `4fcafa60557bcbd760d7aa8d8898c0adbe0bb2c8`
+- Imported: 2026-07-29
 - License: MIT (see `LICENSE` and `NOTICE.md`)
 - Local patches: none
 
@@ -14,8 +14,8 @@ This directory is a committed source snapshot. Application adaptations belong ou
 
 ```sh
 git clone --filter=blob:none https://github.com/Heaust-ops/fxnode /tmp/fxnode
-git -C /tmp/fxnode fetch --depth=1 origin 3f8745717bf4574577be72e9769373475cc300c9
-git -C /tmp/fxnode checkout --detach 3f8745717bf4574577be72e9769373475cc300c9
+git -C /tmp/fxnode fetch --depth=1 origin 4e96585e99742959660d4107b0078c27ff13e708
+git -C /tmp/fxnode checkout --detach 4e96585e99742959660d4107b0078c27ff13e708
 rm -rf vendor/fxnode
 mkdir -p vendor/fxnode
 git -C /tmp/fxnode archive HEAD | tar -x -C vendor/fxnode

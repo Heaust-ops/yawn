@@ -18,7 +18,7 @@ test("examples server explicitly loads the repository Vite config", async () => 
 
 test("standalone examples import library types and values only through the public entrypoint", async () => {
   const root = new URL("../examples/", import.meta.url);
-  const directories = ["shared", "minimal", "color-balance", "live-composition"];
+  const directories = ["shared", "minimal", "color-balance", "live-composition", "logic-nodes"];
   const files: string[] = [];
   async function collect(directory: string): Promise<void> {
     for (const entry of await readdir(new URL(directory, root), { withFileTypes: true })) {

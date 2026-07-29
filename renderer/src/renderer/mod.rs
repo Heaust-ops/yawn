@@ -1155,7 +1155,7 @@ mod switch_request_tests {
         assert_eq!(pending, None);
 
         let invalid_replacement =
-            br#"{"schemaVersion":2,"graphId":"switch","revision":2,"nodes":[],"unexpected":true}"#;
+            br#"{"schemaVersion":3,"graphId":"switch","revision":2,"nodes":[],"unexpected":true}"#;
         assert_eq!(
             registry.compile(invalid_replacement).unwrap_err().code,
             "GRAPH_JSON_INVALID"

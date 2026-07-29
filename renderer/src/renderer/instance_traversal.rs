@@ -1,7 +1,7 @@
 //! Graph-owned instance predicate compute support.
 
 use crate::render_graph::{
-    BooleanBinaryOp, CompareOp, ExpressionOp, InstanceTraversalPlan, SemanticType, TypedLiteral,
+    BooleanOp, CompareOp, ExpressionOp, InstanceTraversalPlan, SemanticType, TypedLiteral,
 };
 
 use super::gpu_scene::{DrawIndexedIndirect, GpuSceneCache};
@@ -58,21 +58,29 @@ pub fn generate_wgsl(plan: &InstanceTraversalPlan) -> Result<String, String> {
             ExpressionOp::InstanceType { .. } => "types[i]".into(),
             ExpressionOp::LocalAabb { .. } => "LocalAabb(aabbs[i].min.xyz,aabbs[i].max.xyz)".into(),
             ExpressionOp::Not { value } => format!("!{}", x(*value)),
-            ExpressionOp::BooleanBinary {
+            ExpressionOp::Boolean {
                 operation,
-                left,
-                right,
-            } => format!(
-                "({} {} {})",
-                x(*left),
-                match operation {
-                    BooleanBinaryOp::And => "&&",
-                    BooleanBinaryOp::Or => "||",
-                    BooleanBinaryOp::Xor => "!=",
-                    BooleanBinaryOp::Xnor => "==",
-                },
-                x(*right)
-            ),
+                operands,
+            } => {
+                let identity = matches!(operation, BooleanOp::And | BooleanOp::Xnor);
+                let operator = match operation {
+                    BooleanOp::And => "&&",
+                    BooleanOp::Or => "||",
+                    BooleanOp::Xor | BooleanOp::Xnor => "!=",
+                };
+                let folded = operands
+                    .iter()
+                    .map(|operand| x(*operand))
+                    .reduce(|left, right| format!("({left} {operator} {right})"))
+                    .unwrap_or_else(|| identity.to_string());
+                if matches!(operation, BooleanOp::Xnor) && operands.len() > 1 {
+                    format!("!{folded}")
+                } else if matches!(operation, BooleanOp::Xnor) && !operands.is_empty() {
+                    format!("!({folded})")
+                } else {
+                    folded
+                }
+            }
             ExpressionOp::CompareF32 {
                 operation,
                 left,
@@ -430,6 +438,55 @@ mod tests {
         );
         assert!(fixed_index(3, 3, "vector projection").is_err());
         assert_eq!(wgsl_type(&SemanticType::Mat4).unwrap(), "mat4x4<f32>");
+    }
+
+    #[test]
+    fn variadic_boolean_wgsl_uses_identities_and_ordered_parity() {
+        let expressions = vec![
+            expression(
+                SemanticType::Bool,
+                ExpressionOp::Boolean {
+                    operation: BooleanOp::And,
+                    operands: vec![],
+                },
+            ),
+            expression(
+                SemanticType::Bool,
+                ExpressionOp::Boolean {
+                    operation: BooleanOp::Xor,
+                    operands: vec![],
+                },
+            ),
+            expression(
+                SemanticType::Bool,
+                ExpressionOp::Boolean {
+                    operation: BooleanOp::Xnor,
+                    operands: vec![crate::render_graph::ExprId(0)],
+                },
+            ),
+            expression(
+                SemanticType::Bool,
+                ExpressionOp::Boolean {
+                    operation: BooleanOp::Xnor,
+                    operands: vec![
+                        crate::render_graph::ExprId(0),
+                        crate::render_graph::ExprId(1),
+                        crate::render_graph::ExprId(2),
+                    ],
+                },
+            ),
+        ];
+        let wgsl = generate_wgsl(&InstanceTraversalPlan {
+            mesh: 0,
+            expressions: ExpressionPlan { expressions },
+            pipelines: vec![],
+            requires_camera: false,
+        })
+        .unwrap();
+        assert!(wgsl.contains("let e0=true;"));
+        assert!(wgsl.contains("let e1=false;"));
+        assert!(wgsl.contains("let e2=!(e0);"));
+        assert!(wgsl.contains("let e3=!((e0 != e1) != e2);"));
     }
 
     #[test]

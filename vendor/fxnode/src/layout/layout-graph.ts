@@ -179,7 +179,7 @@ export function buildLayoutScene<C extends FxNodeCompositionData>(
           ? G.reroute * 2
           : node.collapsed
             ? G.header
-            : G.header + visibleItems.reduce((sum, item) => sum + nodeRowUnits(item), 0) * G.row + G.gap;
+            : G.header + visibleItems.reduce((sum, item) => sum + nodeRowUnits(item, descriptor), 0) * G.row + G.gap;
     const calculated = descriptor ? minimumNodeSize(descriptor, node) : { x: G.minWidth, y: contentHeight };
     const minimumSize = { x: calculated.x, y: kind === "node" && node.collapsed ? G.header : calculated.y };
     const width =
@@ -190,19 +190,60 @@ export function buildLayoutScene<C extends FxNodeCompositionData>(
           : Math.min(G.maxWidth, Math.max(minimumSize.x, node.size.x));
     const height = kind === "node" && !node.collapsed ? Math.max(contentHeight, node.size.y) : contentHeight;
     const nodeBounds = { x: at.x, y: at.y, width, height };
-    const rowBySocket = new Map<string, number>();
+    const rowBySocket = new Map<string, { offset: number; units: number }>();
     let socketRowOffset = 0;
     for (const item of visibleItems) {
-      if (item.kind === "socket") rowBySocket.set(item.socket, socketRowOffset);
-      socketRowOffset += nodeRowUnits(item);
+      const units = nodeRowUnits(item, descriptor);
+      if (item.kind === "socket") rowBySocket.set(item.socket, { offset: socketRowOffset, units });
+      socketRowOffset += units;
     }
     const layoutSockets: LayoutSocket[] = visibleSockets.map((socket) => {
       const linkIds = linksBySocket.get(socket.id) ?? [];
       const linked = linkIds.length > 0;
-      const row = rowBySocket.get(socket.key) ?? 0;
+      const row = rowBySocket.get(socket.key) ?? { offset: 0, units: 1 };
       const placement = descriptor?.ui.find((item) => item.kind === "socket" && item.socket === socket.key);
       const socketType = descriptor ? compiled.socketTypes.get(socket.dataType as never) : undefined;
       if (descriptor && !socketType) throw new Error(`Missing compiled socket type: ${socket.dataType}`);
+      const anchor =
+        kind === "reroute"
+          ? { x: at.x + G.reroute, y: at.y - G.reroute }
+          : {
+              x: at.x + (socket.direction === "output" ? width : 0),
+              y: at.y - (node.collapsed ? G.half : G.header + (row.offset + row.units / 2) * G.row),
+            };
+      const shape =
+        kind === "node" && !node.collapsed && socket.direction === "input" && socket.maxIncomingLinks > 1
+          ? "multi-input"
+          : "circle";
+      const pillHeight = row.units * G.row - 8;
+      const socketBounds =
+        shape === "multi-input"
+          ? { x: anchor.x - G.socket, y: anchor.y + pillHeight / 2, width: G.socket * 2, height: pillHeight }
+          : undefined;
+      const orderedLinks = linkIds.slice().sort((a, b) => {
+        const left = document.links[a],
+          right = document.links[b];
+        return left && right
+          ? `${left.fromNodeId}:${left.fromSocketId}:${left.id}`.localeCompare(
+              `${right.fromNodeId}:${right.fromSocketId}:${right.id}`,
+            )
+          : a.localeCompare(b);
+      });
+      const linkAnchors = new Map<LinkId, Vec2>(
+        orderedLinks.map((id, index) => [
+          id,
+          orderedLinks.length === 1 || shape === "circle"
+            ? anchor
+            : {
+                x: anchor.x,
+                y:
+                  anchor.y +
+                  pillHeight / 2 -
+                  G.socket -
+                  (index * (pillHeight - G.socket * 2)) / (orderedLinks.length - 1),
+              },
+        ]),
+      );
       return {
         id: socket.id,
         nodeId: node.id,
@@ -216,20 +257,17 @@ export function buildLayoutScene<C extends FxNodeCompositionData>(
         capacity: socket.maxIncomingLinks,
         linkIds,
         linked,
-        anchor:
-          kind === "reroute"
-            ? { x: at.x + G.reroute, y: at.y - G.reroute }
-            : {
-                x: at.x + (socket.direction === "output" ? width : 0),
-                y: at.y - (node.collapsed ? G.half : G.header + G.half + row * G.row),
-              },
+        anchor,
+        shape,
+        ...(socketBounds ? { bounds: socketBounds } : {}),
+        linkAnchors,
       };
     });
     for (const socket of layoutSockets) sockets.set(socket.id, socket);
     const rows: LayoutRow[] = [];
     let rowOffset = 0;
     for (const item of visibleItems) {
-      const units = nodeRowUnits(item);
+      const units = nodeRowUnits(item, descriptor);
       const rowBounds: Rect = { x: at.x, y: at.y - G.header - rowOffset * G.row, width, height: units * G.row };
       if (item.kind === "text") {
         rows.push({ kind: item.variant, label: item.title, units, bounds: rowBounds });
@@ -412,7 +450,7 @@ export function buildLayoutScene<C extends FxNodeCompositionData>(
           kind: "socket",
           socketId: socket.id,
           ...(controlId ? { controlId } : {}),
-          units: 1,
+          units,
           bounds: rowBounds,
         });
       }
@@ -491,13 +529,15 @@ export function buildLayoutScene<C extends FxNodeCompositionData>(
     const from = sockets.get(link.fromSocketId) as LayoutSocket | undefined,
       to = sockets.get(link.toSocketId) as LayoutSocket | undefined;
     if (!from || !to) continue;
-    const points = cubic(from.anchor, to.anchor);
-    const dx = Math.max(40, Math.abs(to.anchor.x - from.anchor.x) * 0.5);
+    const fromAnchor = from.linkAnchors.get(link.id) ?? from.anchor,
+      toAnchor = to.linkAnchors.get(link.id) ?? to.anchor;
+    const points = cubic(fromAnchor, toAnchor);
+    const dx = Math.max(40, Math.abs(toAnchor.x - fromAnchor.x) * 0.5);
     const cs = [
-        { x: from.anchor.x + dx, y: from.anchor.y },
-        { x: to.anchor.x - dx, y: to.anchor.y },
+        { x: fromAnchor.x + dx, y: fromAnchor.y },
+        { x: toAnchor.x - dx, y: toAnchor.y },
       ] as const,
-      linkBounds = cubicBounds(from.anchor, cs[0], cs[1], to.anchor);
+      linkBounds = cubicBounds(fromAnchor, cs[0], cs[1], toAnchor);
     links.set(link.id, {
       id: link.id,
       fromNodeId: link.fromNodeId,

@@ -1,0 +1,31 @@
+main {
+  width: 1200px;
+}
+#results {
+  display: flex;
+  min-height: 30px;
+  gap: 7px;
+  margin-bottom: 12px;
+}
+#results span {
+  padding: 5px 9px;
+  color: #d7d9de;
+  background: #292c32;
+  border: 1px solid #3a3e46;
+  border-radius: 999px;
+  font-size: 12px;
+}
+#results .true {
+  color: #dafbe1;
+  background: #183b25;
+  border-color: #2d6b40;
+}
+#results .false {
+  color: #ffd8dc;
+  background: #472126;
+  border-color: #76343c;
+}
+canvas {
+  width: 1200px;
+  height: 700px;
+}

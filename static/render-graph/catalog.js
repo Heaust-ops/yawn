@@ -1,9 +1,9 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 10;
+export const CATALOG_VERSION = 11;
 const exact = (type) => ({ kind: "exact", types: [type] });
-const i = (type, required = true, authoringType, defaultPolicy = required ? "none" : "parameter_literal") => ({
+const i = (type, minimum = 1, authoringType, defaultPolicy = minimum ? "none" : "parameter_literal", maximum = 1) => ({
   accepted: typeof type === "string" ? exact(type) : type,
-  required,
+  cardinality: { minimum, maximum },
   ...(authoringType ? { authoringType } : {}),
   defaultPolicy,
 });
@@ -11,18 +11,18 @@ const o = (type) => ({ type });
 const expression = (inputs, outputs) => ({
   version: 1,
   execution: "expression",
-  inputs: Object.fromEntries(Object.entries(inputs).map(([name, type]) => [name, i(type, false)])),
+  inputs: Object.fromEntries(Object.entries(inputs).map(([name, type]) => [name, i(type, 0)])),
   outputs: Object.fromEntries(Object.entries(outputs).map(([name, type]) => [name, o(type)])),
   parameters: {},
 });
 const numbered = (prefix, count, type) =>
   Object.fromEntries(Array.from({ length: count }, (_, index) => [`${prefix}${index}`, type]));
 const expressionCatalog = {
-  and: expression({ left: "bool", right: "bool" }, { value: "bool" }),
-  or: expression({ left: "bool", right: "bool" }, { value: "bool" }),
+  and: { ...expression({ inputs: "bool" }, { value: "bool" }), version: 2, inputs: { inputs: i("bool", 0, undefined, "none", 8) } },
+  or: { ...expression({ inputs: "bool" }, { value: "bool" }), version: 2, inputs: { inputs: i("bool", 0, undefined, "none", 8) } },
   not: expression({ operand: "bool" }, { value: "bool" }),
-  xor: expression({ left: "bool", right: "bool" }, { value: "bool" }),
-  xnor: expression({ left: "bool", right: "bool" }, { value: "bool" }),
+  xor: { ...expression({ inputs: "bool" }, { value: "bool" }), version: 2, inputs: { inputs: i("bool", 0, undefined, "none", 8) } },
+  xnor: { ...expression({ inputs: "bool" }, { value: "bool" }), version: 2, inputs: { inputs: i("bool", 0, undefined, "none", 8) } },
   greater_than_f32: expression({ left: "f32", right: "f32" }, { value: "bool" }),
   less_than_f32: expression({ left: "f32", right: "f32" }, { value: "bool" }),
   equals_f32: expression({ left: "f32", right: "f32" }, { value: "bool" }),
@@ -112,9 +112,9 @@ export const semanticCatalog = Object.freeze({
     execution: "render",
     inputs: {
       mesh: i("mesh_data"),
-      predicate: i("bool", false),
-      colorTarget: i("texture", false, undefined, "compiler_texture"),
-      depthTarget: i("texture", false, undefined, "compiler_texture"),
+      predicate: i("bool", 0),
+      colorTarget: i("texture", 0, undefined, "compiler_texture"),
+      depthTarget: i("texture", 0, undefined, "compiler_texture"),
     },
     outputs: { color: o("texture"), depth: o("texture") },
     parameters: { pipeline: "gltf_standard", depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] },
@@ -271,11 +271,11 @@ export const styles = {
   render: { header: "#426b43" },
   frame: { header: "#a75d37" },
 };
-const socket = (title, direction, type, value = null) => ({
+const socket = (title, direction, type, value = null, capacity = 1) => ({
   title,
   direction,
   type,
-  maxIncomingLinks: direction === "input" ? 1 : 0,
+  maxIncomingLinks: direction === "input" ? capacity : 0,
   visible: true,
   value,
   showValue: value !== null,
@@ -429,6 +429,7 @@ export const nodeDefinitions = Object.fromEntries(
               "input",
               v.authoringType ?? v.accepted.types[0],
               v.defaultPolicy === "parameter_literal" ? socketDefault(v.accepted.types[0], defaultForInput(key, n, v.accepted.types[0])) : null,
+              v.cardinality.maximum,
             ),
           ]),
         ),

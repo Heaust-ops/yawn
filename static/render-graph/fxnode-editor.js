@@ -16,10 +16,10 @@ async function seed(root) {
   for (const [index, item] of culling.nodes.entries())
     await root.dispatch({ type: "node.add", nodeId: item.id, nodeType: item.executor.key,
       position: { x: 40 + (index % 6) * 280, y: 120 + Math.floor(index / 6) * 260 } });
-  const links = culling.nodes.flatMap((item) => Object.entries(item.inputs).map(([socket, from]) =>
-    [from.node, from.socket, item.id, socket]));
-  for (const [a, as, b, bs] of links) {
-    const id = `${a}_${as}_${b}_${bs}`;
+  const links = culling.nodes.flatMap((item) => Object.entries(item.inputs).flatMap(([socket, sources]) =>
+    sources.map((from, index) => [from.node, from.socket, item.id, socket, index])));
+  for (const [a, as, b, bs, index] of links) {
+    const id = `${a}_${as}_${b}_${bs}_${index}`;
     await root.dispatch({
       type: "link.add",
       link: {

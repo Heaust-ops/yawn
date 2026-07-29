@@ -130,6 +130,59 @@ try {
 Complete sources: [definition](https://github.com/Heaust-ops/fxnode/blob/main/examples/minimal/definition.ts), [bootstrap](https://github.com/Heaust-ops/fxnode/blob/main/examples/minimal/main.ts), and
 [first-node tutorial](https://github.com/Heaust-ops/fxnode/blob/main/docs/learn/tutorials/first-node.md).
 
+## Multi-input sockets and logic gates
+
+An input socket becomes a vertical multi-input pill when `maxIncomingLinks` is greater than `1`. The worker enforces
+the capacity, lays each link onto a stable point along the pill, and keeps the whole pill selectable for link gestures.
+Outputs must continue to use `0`; ordinary single-link inputs use `1`.
+
+```ts
+const andNode = [
+  "example.logic.and",
+  {
+    version: 1,
+    title: "AND",
+    behavior: "standard",
+    style: "logic",
+    parameters: {},
+    sockets: {
+      inputs: {
+        title: "Inputs (up to 5)",
+        direction: "input",
+        type: "boolean",
+        maxIncomingLinks: 5,
+        visible: true,
+        value: null,
+        showValue: false,
+      },
+      result: {
+        title: "Result",
+        direction: "output",
+        type: "boolean",
+        maxIncomingLinks: 0,
+        visible: true,
+        value: null,
+        showValue: false,
+      },
+    },
+    ui: [
+      { kind: "socket", socket: "inputs" },
+      { kind: "socket", socket: "result" },
+    ],
+    muteBypass: [["inputs", "result"]],
+    migrations: [],
+  },
+] as const satisfies readonly [string, FxNodeDefinition];
+
+await api.composeNode(...andNode);
+```
+
+![AND, OR, NOT, XOR, and XNOR nodes using multi-input socket pills](https://raw.githubusercontent.com/Heaust-ops/fxnode/main/examples/assets/logic-nodes.png)
+
+fxnode presents and edits the graph; it does not prescribe graph execution semantics. The
+[logic-node example](https://github.com/Heaust-ops/fxnode/tree/main/examples/logic-nodes) evaluates Boolean operations
+in application code by subscribing to versioned snapshots.
+
 ## One graph, zero or many views
 
 `createFxNode()` creates the shared graph authority and starts one worker, but creates no canvas. This is valid for

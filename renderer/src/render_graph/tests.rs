@@ -7,7 +7,7 @@ fn compile_value(value: Value) -> Result<CompiledGraph, GraphError> {
 }
 
 fn input(node: &str, socket: &str) -> Value {
-    json!({ "node": node, "socket": socket })
+    json!([{ "node": node, "socket": socket }])
 }
 
 fn texture(id: &str, format: &str) -> Value {
@@ -38,7 +38,7 @@ fn node(id: &str, key: &str, version: u32, parameters: Value, inputs: Value) -> 
 }
 
 pub(crate) fn full_cull_graph() -> Value {
-    json!({ "schemaVersion": 2, "graphId": "typed", "revision": 1, "nodes": [
+    json!({ "schemaVersion": 3, "graphId": "typed", "revision": 1, "nodes": [
         texture("color", "rgba16_float"), texture("depth", "depth32_float"),
         node("mesh", "mesh", 2, json!({}), json!({})),
         node("words", "separate_u32x16", 1, json!({"valueDefault":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}),
@@ -47,8 +47,8 @@ pub(crate) fn full_cull_graph() -> Value {
         node("cull", "frustum_cull", 2, json!({"camera":"active"}),
             json!({"mesh":input("mesh","mesh"),"localAabb":input("mesh","localAabb")})),
         node("visible", "not", 1, json!({"operandDefault":false}), json!({"operand":input("cull","isFrustumCulled")})),
-        node("class", "and", 1, json!({"leftDefault":true,"rightDefault":true}),
-            json!({"left":input("bits","bit0"),"right":input("visible","value")})),
+        node("class", "and", 2, json!({}),
+            json!({"inputs":[input("bits","bit0")[0].clone(),input("visible","value")[0].clone()]})),
         node("pipeline", "pipeline", 4,
             json!({"pipeline":"gltf_standard","depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"predicate":input("class","value"),"colorTarget":input("color","texture"),"depthTarget":input("depth","texture")})),
@@ -82,7 +82,7 @@ fn catalog_exposes_final_mesh_pipeline_and_generic_expression_contracts() {
         .iter()
         .find(|i| i.name == "predicate")
         .unwrap();
-    assert_eq!(predicate.cardinality, InputCardinality::OptionalOne);
+    assert_eq!(predicate.cardinality, InputCardinality { min: 0, max: 1 });
     for key in [
         "and",
         "xnor",
@@ -96,6 +96,23 @@ fn catalog_exposes_final_mesh_pipeline_and_generic_expression_contracts() {
     ] {
         assert!(contract(key).is_some(), "missing {key}");
     }
+}
+
+#[test]
+fn variadic_boolean_inputs_reject_empty_and_over_capacity_bindings() {
+    let mut empty = full_cull_graph();
+    empty["nodes"][7]["inputs"]["inputs"] = json!([]);
+    let error = compile_value(empty).unwrap_err();
+    assert_eq!(error.code, "GRAPH_SOCKET_CARDINALITY");
+    assert_eq!(error.details["path"], "nodes[7].inputs.inputs");
+
+    let mut over_capacity = full_cull_graph();
+    over_capacity["nodes"][7]["inputs"]["inputs"] = json!((0..9)
+        .map(|_| json!({ "node": "bits", "socket": "bit0" }))
+        .collect::<Vec<_>>());
+    let error = compile_value(over_capacity).unwrap_err();
+    assert_eq!(error.code, "GRAPH_SOCKET_CARDINALITY");
+    assert_eq!(error.details["path"], "nodes[7].inputs.inputs");
 }
 
 #[test]
@@ -356,7 +373,7 @@ fn expression_provenance_rejects_cross_mesh_values() {
 }
 
 fn implicit_pipeline_graph() -> Value {
-    json!({ "schemaVersion": 2, "graphId": "implicit", "revision": 1, "nodes": [
+    json!({ "schemaVersion": 3, "graphId": "implicit", "revision": 1, "nodes": [
         node("mesh", "mesh", 2, json!({}), json!({})),
         node("first", "pipeline", 4,
             json!({"pipeline":"ground_plane","depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
@@ -392,15 +409,19 @@ fn contract_v4_declares_strict_default_policies() {
         .flat_map(|c| c.inputs)
         .all(|input| matches!(
             (input.cardinality, input.default_policy),
-            (InputCardinality::RequiredOne, InputDefaultPolicy::None)
-                | (
-                    InputCardinality::OptionalOne,
-                    InputDefaultPolicy::ParameterLiteral
-                )
-                | (
-                    InputCardinality::OptionalOne,
-                    InputDefaultPolicy::CompilerTexture
-                )
+            (
+                InputCardinality { min: 1, max: 1 },
+                InputDefaultPolicy::None
+            ) | (
+                InputCardinality { min: 0, max: 1 },
+                InputDefaultPolicy::ParameterLiteral
+            ) | (
+                InputCardinality { min: 0, max: 1 },
+                InputDefaultPolicy::CompilerTexture
+            ) | (
+                InputCardinality { min: 0, max: 8 },
+                InputDefaultPolicy::None
+            )
         )));
 }
 

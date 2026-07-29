@@ -446,10 +446,10 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       linkSources.set(link.id, linkSource);
       if (!link.muted) {
         incoming.set(link.toSocketId, (incoming.get(link.toSocketId) ?? 0) + 1);
-        nodes.get(to.node).value.inputs[to.key] = {
+        (nodes.get(to.node).value.inputs[to.key] ??= []).push({
           node: from.node,
           socket: from.key,
-        };
+        });
       }
     }
     const ordered = [...nodes.values()].sort((a, b) =>
@@ -548,13 +548,13 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       for (const key of Object.keys(
         descriptors[item.value.executor.key].inputs,
       )) {
-        const link = raw.links.find(
+        const links = raw.links.filter(
           (x) =>
             !x.muted &&
             x.toNodeId === item.value.id &&
             sockets.get(x.toSocketId)?.key === key,
         );
-        const source = linkSources.get(link?.id) ?? {
+        const source = linkSources.get(links[0]?.id) ?? {
           kind: "input",
           nodeId: item.value.id,
           input: key,
@@ -562,9 +562,11 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
           unconnected: true,
         };
         paths[`${base}.inputs.${key}`] = source;
-        if (link) {
-          paths[`${base}.inputs.${key}.node`] = source;
-          paths[`${base}.inputs.${key}.socket`] = {
+        for (const [index, link] of links.entries()) {
+          const linkSource = linkSources.get(link.id);
+          paths[`${base}.inputs.${key}[${index}]`] = linkSource;
+          paths[`${base}.inputs.${key}[${index}].node`] = linkSource;
+          paths[`${base}.inputs.${key}[${index}].socket`] = {
             kind: "socket",
             nodeId: link.fromNodeId,
             socketId: link.fromSocketId,
@@ -576,7 +578,7 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       paths[`${base}.inputs`] = nodeSource;
     }
     const ir = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       graphId: GRAPH_ID,
       revision,
       nodes: ordered.map((item) => item.value),
