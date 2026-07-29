@@ -4,7 +4,7 @@ import * as presets from "../static/render-graph/presets.js";
 import { descriptors } from "../static/render-graph/catalog.js";
 
 test("all presets use current schemas, versions, and one frame output", () => {
-  assert.equal(Object.keys(presets.renderGraphPresets).length, 12);
+  assert.equal(Object.keys(presets.renderGraphPresets).length, 13);
   for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
     assert.deepEqual([graph.schemaVersion, graph.revision], [2, 1], name);
     assert.equal(new Set(graph.nodes.map((node) => node.id)).size, graph.nodes.length, name);
@@ -12,6 +12,12 @@ test("all presets use current schemas, versions, and one frame output", () => {
     for (const node of graph.nodes)
       assert.equal(node.executor.version, descriptors[node.executor.key].version, `${name}:${node.id}`);
   }
+  const authoredX4 = Object.entries(presets.renderGraphPresets).flatMap(([name, graph]) =>
+    graph.nodes.filter((node) => node.parameters?.texture?.sampleCount === 4)
+      .map((node) => `${name}:${node.id}`));
+  assert.deepEqual(authoredX4, ["msaa:msaa_hdr"]);
+  assert.equal(typeof presets.msaa.nodes.find((node) => node.id === "msaa_hdr")
+    .parameters.texture.sampleCount, "number");
 });
 
 test("presets classify visibility and material through type.words[0] predicates", () => {
@@ -25,7 +31,7 @@ test("presets classify visibility and material through type.words[0] predicates"
     assert.deepEqual(byId.pbr_double.inputs.predicate, { node: name === "culling" ? "pbr_double_final" : "double_class", socket: "value" }, name);
     for (const pipeline of [byId.ground, byId.pbr, byId.pbr_double]) {
       assert.deepEqual(pipeline.inputs.mesh, { node: "mesh", socket: "mesh" });
-      assert.equal(pipeline.executor.version, 3);
+      assert.equal(pipeline.executor.version, 4);
     }
   }
 });

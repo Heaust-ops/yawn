@@ -12,7 +12,7 @@ fn input(node: &str, socket: &str) -> Value {
 
 fn texture(id: &str, format: &str) -> Value {
     json!({
-        "id": id, "state": "enabled", "executor": { "key": "texture", "version": 1 },
+        "id": id, "state": "enabled", "executor": { "key": "texture", "version": 2 },
         "parameters": { "residency": "transient", "texture": {
             "dimension": "d2", "format": format,
             "extent": { "kind": "surface_relative", "width": { "numerator": 1, "denominator": 1 },
@@ -26,6 +26,10 @@ fn set_extent_ratio(texture: &mut Value, numerator: u32, denominator: u32) {
         json!({"numerator":numerator,"denominator":denominator});
     texture["parameters"]["texture"]["extent"]["height"] =
         json!({"numerator":numerator,"denominator":denominator});
+}
+
+fn set_sample_count(texture: &mut Value, sample_count: u32) {
+    texture["parameters"]["texture"]["sampleCount"] = json!(sample_count);
 }
 
 fn node(id: &str, key: &str, version: u32, parameters: Value, inputs: Value) -> Value {
@@ -45,7 +49,7 @@ pub(crate) fn full_cull_graph() -> Value {
         node("visible", "not", 1, json!({"operandDefault":false}), json!({"operand":input("cull","isFrustumCulled")})),
         node("class", "and", 1, json!({"leftDefault":true,"rightDefault":true}),
             json!({"left":input("bits","bit0"),"right":input("visible","value")})),
-        node("pipeline", "pipeline", 3,
+        node("pipeline", "pipeline", 4,
             json!({"pipeline":"gltf_standard","depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"predicate":input("class","value"),"colorTarget":input("color","texture"),"depthTarget":input("depth","texture")})),
         node("frame", "frame_out", 3,
@@ -58,7 +62,7 @@ pub(crate) fn full_cull_graph() -> Value {
 #[test]
 fn catalog_exposes_final_mesh_pipeline_and_generic_expression_contracts() {
     assert_eq!(contract("mesh").unwrap().version, 2);
-    assert_eq!(contract("pipeline").unwrap().version, 3);
+    assert_eq!(contract("pipeline").unwrap().version, 4);
     assert_eq!(
         contract("mesh")
             .unwrap()
@@ -115,6 +119,204 @@ fn typed_graph_builds_one_dense_deterministic_traversal() {
 }
 
 #[test]
+fn msaa_pipeline_to_frame_out_materializes_distinct_canonical_resolve() {
+    let mut value = full_cull_graph();
+    set_sample_count(&mut value["nodes"][0], 4);
+    set_sample_count(&mut value["nodes"][1], 4);
+    let graph = compile_value(value).unwrap();
+    let family = graph
+        .texture_families
+        .iter()
+        .find(|family| {
+            matches!(
+                family.source,
+                TextureFamilySource::CompilerColorResolve { .. }
+            )
+        })
+        .unwrap();
+    let TextureFamilySource::CompilerColorResolve {
+        resource: root,
+        source_resource,
+        ..
+    } = family.source
+    else {
+        unreachable!()
+    };
+    assert_ne!(root, family.versions[0].resource);
+    assert_ne!(source_resource, family.versions[0].resource);
+    assert_eq!(family.versions[0].target, root);
+    assert!(matches!(
+        graph.resources[root as usize].plan,
+        ResourcePlan::TextureSource { .. }
+    ));
+    assert!(
+        validate_activatable(&graph).is_ok(),
+        "{:?}",
+        validate_activatable(&graph)
+    );
+}
+
+#[test]
+fn msaa_resolve_can_feed_fullscreen_and_default_depth_inherits_four_samples() {
+    let mut value = full_cull_graph();
+    set_sample_count(&mut value["nodes"][0], 4);
+    value["nodes"][8]["inputs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("depthTarget");
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .insert(9, texture("post_target", "rgba16_float"));
+    value["nodes"].as_array_mut().unwrap().insert(
+        10,
+        node(
+            "post",
+            "saturation",
+            1,
+            json!({"saturation":1,"factor":1}),
+            json!({
+                "source":input("pipeline","color"),
+                "colorTarget":input("post_target","texture")
+            }),
+        ),
+    );
+    value["nodes"][11]["inputs"]["color"] = input("post", "color");
+
+    let graph = compile_value(value).unwrap();
+    assert!(validate_activatable(&graph).is_ok());
+    let default_depth = graph
+        .texture_families
+        .iter()
+        .find(|family| {
+            matches!(
+                family.source,
+                TextureFamilySource::CompilerDefaultInput {
+                    role: CompilerTextureRole::DepthTarget,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        super::compiler::family_descriptor(default_depth).sample_count,
+        4
+    );
+    let resolve_output = graph
+        .texture_families
+        .iter()
+        .find_map(|family| match family.source {
+            TextureFamilySource::CompilerColorResolve { .. } => Some(family.versions[0].resource),
+            _ => None,
+        })
+        .unwrap();
+    let post = graph
+        .executions
+        .iter()
+        .find(|execution| execution.id == "post")
+        .unwrap();
+    assert_eq!(post.inputs[0].resource, resolve_output);
+}
+
+#[test]
+fn msaa_resolve_accepts_default_color_inferred_from_authored_depth() {
+    let mut value = full_cull_graph();
+    set_sample_count(&mut value["nodes"][1], 4);
+    value["nodes"][8]["inputs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("colorTarget");
+
+    let graph = compile_value(value).unwrap();
+    let (resolve_descriptor, source_resource) = graph
+        .texture_families
+        .iter()
+        .find_map(|family| match &family.source {
+            TextureFamilySource::CompilerColorResolve {
+                descriptor,
+                source_resource,
+                ..
+            } => Some((descriptor, *source_resource)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(resolve_descriptor.sample_count, 1);
+    let source_family = match graph.resources[source_resource as usize].plan {
+        ResourcePlan::Texture { family, .. } => family,
+        _ => panic!("expected resolve source texture version"),
+    };
+    assert!(matches!(
+        &graph.texture_families[source_family as usize].source,
+        TextureFamilySource::CompilerDefaultInput {
+            role: CompilerTextureRole::ColorTarget,
+            descriptor,
+            ..
+        } if descriptor.sample_count == 4
+    ));
+    assert!(
+        validate_activatable(&graph).is_ok(),
+        "{:?}",
+        validate_activatable(&graph)
+    );
+}
+
+#[test]
+fn runtime_rejects_resolve_origin_and_store_tampering() {
+    let mut value = full_cull_graph();
+    set_sample_count(&mut value["nodes"][0], 4);
+    set_sample_count(&mut value["nodes"][1], 4);
+    let graph = compile_value(value).unwrap();
+    assert!(validate_activatable(&graph).is_ok());
+    let family = graph
+        .texture_families
+        .iter()
+        .find(|family| {
+            matches!(
+                family.source,
+                TextureFamilySource::CompilerColorResolve { .. }
+            )
+        })
+        .unwrap();
+    let root = match family.source {
+        TextureFamilySource::CompilerColorResolve { resource, .. } => resource,
+        _ => unreachable!(),
+    };
+    let source = match family.source {
+        TextureFamilySource::CompilerColorResolve {
+            source_resource, ..
+        } => source_resource,
+        _ => unreachable!(),
+    };
+
+    let mut bad_origin = graph.clone();
+    bad_origin.resources[root as usize].origin = ResourceOrigin::CompilerColorResolve {
+        producer_node_index: u32::MAX,
+        output_ordinal: 0,
+        source_resource: source,
+    };
+    assert_runtime_plan_invalid(&bad_origin);
+
+    let mut bad_store = graph.clone();
+    let ResourcePlan::Texture { stored, .. } = &mut bad_store.resources[source as usize].plan
+    else {
+        panic!("expected source texture version")
+    };
+    *stored = !*stored;
+    assert_runtime_plan_invalid(&bad_store);
+}
+
+#[test]
+fn multisampled_depth_sample_is_rejected_at_exact_socket() {
+    let mut value = full_cull_graph();
+    set_sample_count(&mut value["nodes"][0], 4);
+    set_sample_count(&mut value["nodes"][1], 4);
+    value["nodes"][9]["inputs"]["color"] = input("pipeline", "depth");
+    let error = compile_value(value).unwrap_err();
+    assert_eq!(error.code, "GRAPH_ILLEGAL_ACCESS");
+    assert_eq!(error.details["path"], "nodes[9].inputs.color");
+}
+
+#[test]
 fn pipeline_predicate_defaults_true_and_expression_edges_are_validated() {
     let mut graph = full_cull_graph();
     graph["nodes"][8]["inputs"]
@@ -156,10 +358,10 @@ fn expression_provenance_rejects_cross_mesh_values() {
 fn implicit_pipeline_graph() -> Value {
     json!({ "schemaVersion": 2, "graphId": "implicit", "revision": 1, "nodes": [
         node("mesh", "mesh", 2, json!({}), json!({})),
-        node("first", "pipeline", 3,
+        node("first", "pipeline", 4,
             json!({"pipeline":"ground_plane","depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh")})),
-        node("second", "pipeline", 3,
+        node("second", "pipeline", 4,
             json!({"pipeline":"gltf_standard","depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"colorTarget":input("first","color"),"depthTarget":input("first","depth")})),
         node("frame", "frame_out", 3,
@@ -169,9 +371,9 @@ fn implicit_pipeline_graph() -> Value {
 }
 
 #[test]
-fn contract_v3_declares_strict_default_policies() {
+fn contract_v4_declares_strict_default_policies() {
     let pipeline = contract("pipeline").unwrap();
-    assert_eq!(pipeline.version, 3);
+    assert_eq!(pipeline.version, 4);
     assert_eq!(pipeline.inputs[0].default_policy, InputDefaultPolicy::None);
     assert_eq!(
         pipeline.inputs[1].default_policy,

@@ -96,11 +96,17 @@ fn target_variant_spec(
     depth_format: Option<wgpu::TextureFormat>,
     depth_compare: wgpu::CompareFunction,
     depth_write: bool,
+    sample_count: u32,
 ) -> RenderPipelineSpec {
+    let write_mask = spec
+        .targets
+        .first()
+        .and_then(Option::as_ref)
+        .map_or(wgpu::ColorWrites::ALL, |target| target.write_mask);
     spec.targets = vec![Some(wgpu::ColorTargetState {
         format: color_format,
         blend: None,
-        write_mask: wgpu::ColorWrites::ALL,
+        write_mask,
     })];
     spec.depth_stencil = depth_format.map(|format| wgpu::DepthStencilState {
         format,
@@ -109,6 +115,7 @@ fn target_variant_spec(
         stencil: Default::default(),
         bias: Default::default(),
     });
+    spec.multisample.count = sample_count;
     spec
 }
 
@@ -379,14 +386,21 @@ impl PipelineLibrary {
         depth_format: Option<wgpu::TextureFormat>,
         depth_compare: wgpu::CompareFunction,
         depth_write: bool,
+        sample_count: u32,
     ) -> Result<wgpu::RenderPipeline, String> {
         let spec = self
             .specs
             .get(base.get() as usize)
             .cloned()
             .ok_or_else(|| "unknown base pipeline".to_owned())?;
-        let spec =
-            target_variant_spec(spec, color_format, depth_format, depth_compare, depth_write);
+        let spec = target_variant_spec(
+            spec,
+            color_format,
+            depth_format,
+            depth_compare,
+            depth_write,
+            sample_count,
+        );
         let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(" target variant"),
             source: wgpu::ShaderSource::Wgsl(spec.vertex.shader_source.as_str().into()),
@@ -482,38 +496,46 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_disables_blending_without_mutating_base() {
-        let mut base = spec();
-        base.primitive.cull_mode = Some(wgpu::Face::Front);
-        base.multisample.count = 4;
-        base.targets[0].as_mut().unwrap().write_mask = wgpu::ColorWrites::RED;
-        let preserved_vertex = StageKey::from_stage(&base.vertex);
-        let preserved_fragment = base.fragment.as_ref().map(StageKey::from_stage);
-        assert!(base.targets[0].as_ref().unwrap().blend.is_some());
-        let variant = target_variant_spec(
-            base.clone(),
-            wgpu::TextureFormat::Rgba16Float,
-            None,
-            wgpu::CompareFunction::Always,
-            false,
-        );
-        assert_eq!(variant.targets[0].as_ref().unwrap().blend, None);
-        assert_eq!(
-            variant.targets[0].as_ref().unwrap().format,
-            wgpu::TextureFormat::Rgba16Float
-        );
-        assert!(base.targets[0].as_ref().unwrap().blend.is_some());
-        assert_eq!(variant.primitive, base.primitive);
-        assert_eq!(variant.multisample, base.multisample);
-        assert_eq!(StageKey::from_stage(&variant.vertex), preserved_vertex);
-        assert_eq!(
-            variant.fragment.as_ref().map(StageKey::from_stage),
-            preserved_fragment
-        );
-        assert_eq!(
-            variant.targets[0].as_ref().unwrap().write_mask,
-            wgpu::ColorWrites::ALL
-        );
+    fn target_spec_preserves_base_state_for_both_sample_count_transitions() {
+        for (from, to) in [(1, 4), (4, 1)] {
+            let mut base = spec();
+            base.primitive.cull_mode = Some(wgpu::Face::Front);
+            base.multisample.count = from;
+            base.multisample.alpha_to_coverage_enabled = true;
+            base.targets[0].as_mut().unwrap().write_mask = wgpu::ColorWrites::RED;
+            let base_key = base.key();
+            let preserved_vertex = StageKey::from_stage(&base.vertex);
+            let preserved_fragment = base.fragment.as_ref().map(StageKey::from_stage);
+            assert!(base.targets[0].as_ref().unwrap().blend.is_some());
+            let variant = target_variant_spec(
+                base.clone(),
+                wgpu::TextureFormat::Rgba16Float,
+                None,
+                wgpu::CompareFunction::Always,
+                false,
+                to,
+            );
+            assert_eq!(variant.targets[0].as_ref().unwrap().blend, None);
+            assert_eq!(
+                variant.targets[0].as_ref().unwrap().format,
+                wgpu::TextureFormat::Rgba16Float
+            );
+            assert!(base.targets[0].as_ref().unwrap().blend.is_some());
+            assert_eq!(variant.primitive, base.primitive);
+            let mut expected_multisample = base.multisample;
+            expected_multisample.count = to;
+            assert_eq!(variant.multisample, expected_multisample);
+            assert_eq!(StageKey::from_stage(&variant.vertex), preserved_vertex);
+            assert_eq!(
+                variant.fragment.as_ref().map(StageKey::from_stage),
+                preserved_fragment
+            );
+            assert_eq!(
+                variant.targets[0].as_ref().unwrap().write_mask,
+                wgpu::ColorWrites::RED
+            );
+            assert_ne!(variant.key(), base_key);
+        }
     }
 
     #[test]

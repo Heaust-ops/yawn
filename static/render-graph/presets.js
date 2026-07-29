@@ -4,11 +4,11 @@ const input = (node, socket) => ({ node, socket });
 const node = (id, key, parameters = {}, inputs = {}) => ({
   id, state: "enabled", executor: { key, version: descriptors[key].version }, parameters, inputs,
 });
-const texture = (format, scale = 1, heightScale = scale) => ({
+const texture = (format, scale = 1, heightScale = scale, sampleCount = 1) => ({
   texture: {
     dimension: "d2", format,
     extent: { kind: "surface_relative", width: { numerator: 1, denominator: scale }, height: { numerator: 1, denominator: heightScale }, depthOrArrayLayers: 1 },
-    mipLevelCount: 1, sampleCount: 1, viewFormats: [],
+    mipLevelCount: 1, sampleCount, viewFormats: [],
   },
   residency: "transient",
 });
@@ -55,6 +55,11 @@ export const midnight = direct("preset_midnight", [0.015, 0.06, 0.18, 1]);
 export const ember = direct("preset_ember", [0.18, 0.035, 0.012, 1]);
 export const hdr = graph("preset_hdr_fullscreen", [
   ...scene(),
+  node("frame_out", "frame_out", frameOut(true), { color: input("pbr_double", "color") }),
+]);
+export const msaa = graph("preset_msaa", [
+  node("msaa_hdr", "texture", texture("rgba16_float", 1, 1, 4)),
+  ...scene("msaa_hdr"),
   node("frame_out", "frame_out", frameOut(true), { color: input("pbr_double", "color") }),
 ]);
 export const culling = graph("preset_gpu_culling", (() => {
@@ -108,4 +113,4 @@ export const grading = graph("preset_grading", [
   node("mixer", "channel_mixer", { redOutput: [1,0,0], greenOutput: [0,1,0], blueOutput: [0,0,1], factor: 1 }, { source: input("saturation", "color"), colorTarget: input("mixer_hdr", "texture") }),
   node("frame_out", "frame_out", frameOut(true), { color: input("mixer", "color") }),
 ]);
-export const renderGraphPresets = Object.freeze({ midnight, ember, hdr, culling, tone, contain, reinhard, linear, grading, edges, bloom, combined });
+export const renderGraphPresets = Object.freeze({ midnight, ember, hdr, msaa, culling, tone, contain, reinhard, linear, grading, edges, bloom, combined });

@@ -197,9 +197,9 @@ macro_rules! ex {
 
 pub static CONTRACTS: &[Contract] = &[
     c!("mesh", 2, Source, NONE_I, MESH_O, false, None),
-    c!("texture", 1, Source, NONE_I, TEXTURE_O, false, None),
+    c!("texture", 2, Source, NONE_I, TEXTURE_O, false, None),
     c!("frustum_cull", 2, Expression, CULL_I, CULL_O, false, None),
-    c!("pipeline", 3, Render, PIPE_I, PIPE_O, false, None),
+    c!("pipeline", 4, Render, PIPE_I, PIPE_O, false, None),
     ex!("and", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
     ex!("or", ins!("left":Bool,"right":Bool), outs!("value":Bool)),
     ex!("not", ins!("operand":Bool), outs!("value":Bool)),

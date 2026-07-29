@@ -45,6 +45,11 @@ pub enum ResourceOrigin {
         socket: String,
         role: CompilerTextureRole,
     },
+    CompilerColorResolve {
+        producer_node_index: u32,
+        output_ordinal: u16,
+        source_resource: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -116,6 +121,7 @@ pub enum ExecutionKind {
 #[serde(rename_all = "camelCase")]
 pub struct ColorAttachmentPlan {
     pub resource: u32,
+    pub resolve_target: Option<u32>,
     pub location: u32,
     pub load: NormalizedColorLoad,
     pub store: StoreOp,
@@ -169,6 +175,10 @@ pub enum AccessMode {
     },
     IndirectRead,
     SampledTexture,
+    ColorResolve {
+        source: u32,
+        location: u32,
+    },
     ColorAttachment {
         location: u32,
         load: NormalizedColorLoad,
@@ -374,6 +384,13 @@ pub enum TextureFamilySource {
         input_ordinal: u16,
         role: CompilerTextureRole,
         descriptor: NormalizedTextureDescriptor,
+    },
+    CompilerColorResolve {
+        resource: u32,
+        descriptor: NormalizedTextureDescriptor,
+        producer_node_index: u32,
+        output_ordinal: u16,
+        source_resource: u32,
     },
 }
 

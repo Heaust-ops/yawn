@@ -45,6 +45,16 @@ fn device_feature_plan(profile: bool, supported: wgpu::Features) -> DeviceFeatur
     }
 }
 
+fn supports_planned_x4_attachment(
+    is_depth: bool,
+    resolve_required: bool,
+    render_attachment: bool,
+    multisample_x4: bool,
+    multisample_resolve: bool,
+) -> bool {
+    render_attachment && multisample_x4 && (is_depth || !resolve_required || multisample_resolve)
+}
+
 #[cfg(test)]
 mod device_feature_tests {
     use super::*;
@@ -62,6 +72,22 @@ mod device_feature_tests {
         assert!(profiled.initial.contains(profiled.hard));
         assert!(profiled.initial.contains(wgpu::Features::TIMESTAMP_QUERY));
         assert!(profiled.profiling_enabled);
+    }
+
+    #[test]
+    fn adapter_x4_policy_distinguishes_depth_and_color_resolve() {
+        assert!(supports_planned_x4_attachment(
+            true, false, true, true, false
+        ));
+        assert!(!supports_planned_x4_attachment(
+            true, false, true, false, true
+        ));
+        assert!(!supports_planned_x4_attachment(
+            false, true, true, true, false
+        ));
+        assert!(supports_planned_x4_attachment(
+            false, true, true, true, true
+        ));
     }
 }
 
@@ -1692,6 +1718,72 @@ impl<T: Scene + 'static> Renderer<T> {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let resolve_formats: std::collections::BTreeSet<_> = graph
+            .texture_families
+            .iter()
+            .filter_map(|family| match &family.source {
+                TextureFamilySource::CompilerColorResolve {
+                    source_resource, ..
+                } => {
+                    let source = graph.resources.get(*source_resource as usize)?;
+                    let source_family = match source.plan {
+                        ResourcePlan::Texture { family, .. } => family,
+                        _ => return None,
+                    };
+                    graph
+                        .texture_families
+                        .get(source_family as usize)
+                        .map(|family| match &family.source {
+                            TextureFamilySource::AuthoredTexture { descriptor, .. }
+                            | TextureFamilySource::CompilerDefaultInput { descriptor, .. }
+                            | TextureFamilySource::CompilerColorResolve { descriptor, .. } => {
+                                descriptor.format
+                            }
+                        })
+                }
+                _ => None,
+            })
+            .collect();
+        for (family_index, family) in graph.texture_families.iter().enumerate() {
+            let descriptor = match &family.source {
+                TextureFamilySource::AuthoredTexture { descriptor, .. }
+                | TextureFamilySource::CompilerDefaultInput { descriptor, .. }
+                | TextureFamilySource::CompilerColorResolve { descriptor, .. } => descriptor,
+            };
+            if descriptor.sample_count != 4 {
+                continue;
+            }
+            let features = self
+                .context
+                .adapter
+                .get_texture_format_features(texture_format(descriptor.format));
+            let resolve_required = resolve_formats.contains(&descriptor.format)
+                && descriptor.format != TextureFormat::Depth32Float;
+            if !supports_planned_x4_attachment(
+                descriptor.format == TextureFormat::Depth32Float,
+                resolve_required,
+                features
+                    .allowed_usages
+                    .contains(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                features
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4),
+                features
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE),
+            ) {
+                let source_path = match &family.source {
+                    TextureFamilySource::AuthoredTexture { .. } => "authored",
+                    TextureFamilySource::CompilerDefaultInput { .. } => "default",
+                    TextureFamilySource::CompilerColorResolve { .. } => "resolve",
+                };
+                return Err(GraphError::at(
+                    "GRAPH_UNSUPPORTED_FEATURE",
+                    "adapter does not support planned 4x MSAA attachment",
+                    format!("textureFamilies[{family_index}].source.{source_path}"),
+                ));
+            }
+        }
         let mut textures = Vec::with_capacity(runtime.allocations.classes.len());
         for class in &runtime.allocations.classes {
             let mut gpu_class = Vec::with_capacity(class.slots.len());
@@ -2055,6 +2147,17 @@ impl<T: Scene + 'static> Renderer<T> {
                             depth_format,
                             compare,
                             *depth_write_enabled,
+                            runtime.allocations.resource_allocations[color.resource as usize]
+                                .and_then(|a| {
+                                    runtime
+                                        .allocations
+                                        .classes
+                                        .get(a.class as usize)?
+                                        .slots
+                                        .get(a.slot as usize)
+                                })
+                                .map(|slot| slot.descriptor.sample_count)
+                                .ok_or_else(|| fail("color allocation invalid"))?,
                         )
                         .map_err(|e| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", e))?;
                     executions.push(PreparedExecution::Pipeline {

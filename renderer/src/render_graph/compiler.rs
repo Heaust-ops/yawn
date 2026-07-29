@@ -723,9 +723,6 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
             if p.texture.mip_level_count != 1 {
                 return Err(unsupported("mipLevelCount"));
             }
-            if p.texture.sample_count != 1 {
-                return Err(unsupported("sampleCount"));
-            }
             let depth_or_array_layers = match &p.texture.extent {
                 TextureExtent::Absolute {
                     depth_or_array_layers,
@@ -1357,49 +1354,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         });
     }
 
-    // Every texture reader must execute before a successor overwrites the
-    // physical allocation backing the older symbolic version.
-    let mut reachability = HashMap::new();
-    for (i, contract) in contracts.iter().enumerate() {
-        if !live.contains(&i) {
-            continue;
-        }
-        for input in contract
-            .inputs
-            .iter()
-            .filter(|input| matches!(input.role, InputRole::SampledTexture))
-        {
-            let key = bound[i][input.name].producer;
-            if !version_of.contains_key(&key) {
-                continue;
-            }
-            let Some(next_indices) = transitions_by_target.get(&TransitionTargetKey::Authored(key))
-            else {
-                continue;
-            };
-            let [next_index] = next_indices.as_slice() else {
-                continue;
-            };
-            let next = transitions[*next_index];
-            if i != next.writer_node
-                && !reaches(
-                    i,
-                    next.writer_node,
-                    &outgoing_edges,
-                    &edges,
-                    &live,
-                    &mut reachability,
-                )
-            {
-                return Err(error(
-                    "GRAPH_RESOURCE_VERSION_INVALID",
-                    "older texture version may be read after its successor",
-                    format!("nodes[{i}].inputs.{}", input.name),
-                ));
-            }
-        }
-    }
-
     // Same-pass hazards are global and precede every duplicate-writer diagnostic.
     for i in 0..graph.nodes.len() {
         if !live.contains(&i) {
@@ -1462,6 +1416,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             let Some(&(opposite_family, _, _)) = version_of.get(&opposite_output) else {
                 continue;
             };
+            let opposite_descriptor =
+                known_family_descriptor(opposite_family, &families, &default_roots);
             let extent = if opposite_family as usize >= authored_family_count
                 && default_roots
                     .get(opposite_family as usize - authored_family_count)
@@ -1469,8 +1425,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             {
                 Some(full_extent.clone())
             } else {
-                known_family_descriptor(opposite_family, &families, &default_roots)
-                    .map(|descriptor| descriptor.extent.clone())
+                opposite_descriptor.map(|descriptor| descriptor.extent.clone())
             };
             if let Some(extent) = extent {
                 default_roots[index].descriptor =
@@ -1479,7 +1434,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                         format: default_roots[index].format,
                         extent,
                         mip_level_count: 1,
-                        sample_count: 1,
+                        sample_count: opposite_descriptor
+                            .map_or(1, |descriptor| descriptor.sample_count),
                         view_formats: vec![],
                     });
                 changed = true;
@@ -1487,6 +1443,100 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
         if !changed {
             break;
+        }
+    }
+
+    // Classify sampled edges before descriptor and stale-version validation. A
+    // demanded resolve is keyed by the exact symbolic output, not its family.
+    let mut resolve_demands = BTreeSet::<OutputKey>::new();
+    for edge in &edges {
+        if !live.contains(&edge.to_node)
+            || contracts[edge.to_node].inputs[edge.consumer_input_ordinal as usize].role
+                != InputRole::SampledTexture
+        {
+            continue;
+        }
+        let key = OutputKey(edge.from_node, edge.producer_output_ordinal);
+        let Some(&(family, _, _)) = version_of.get(&key) else {
+            if matches!(resolved.get(&key), Some(ResolvedTransition::Cyclic)) {
+                continue;
+            }
+            if source_family
+                .get(&TransitionTargetKey::Authored(key))
+                .and_then(|&family| known_family_descriptor(family, &families, &default_roots))
+                .is_some_and(|descriptor| descriptor.sample_count == 4)
+            {
+                return Err(error(
+                    "GRAPH_ILLEGAL_ACCESS",
+                    "unproduced multisampled texture cannot be sampled",
+                    format!("nodes[{}].inputs.{}", edge.to_node, edge.to_socket),
+                ));
+            }
+            continue;
+        };
+        let Some(descriptor) = known_family_descriptor(family, &families, &default_roots) else {
+            continue;
+        };
+        if descriptor.sample_count == 1 {
+            continue;
+        }
+        if descriptor.format == TextureFormat::Depth32Float {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "multisampled depth texture cannot be sampled",
+                format!("nodes[{}].inputs.{}", edge.to_node, edge.to_socket),
+            ));
+        }
+        if contracts[edge.from_node].key != "pipeline" || edge.producer_output_ordinal != 0 {
+            return Err(error(
+                "GRAPH_ILLEGAL_ACCESS",
+                "multisampled color texture is not a produced pipeline color",
+                format!("nodes[{}].inputs.{}", edge.to_node, edge.to_socket),
+            ));
+        }
+        resolve_demands.insert(key);
+    }
+
+    // Every ordinary texture reader must execute before a successor overwrites
+    // its allocation. Resolve demands read the attachment during its producer.
+    let mut reachability = HashMap::new();
+    for (i, contract) in contracts.iter().enumerate() {
+        if !live.contains(&i) {
+            continue;
+        }
+        for input in contract
+            .inputs
+            .iter()
+            .filter(|input| input.role == InputRole::SampledTexture)
+        {
+            let key = bound[i][input.name].producer;
+            if resolve_demands.contains(&key) || !version_of.contains_key(&key) {
+                continue;
+            }
+            let Some(next_indices) = transitions_by_target.get(&TransitionTargetKey::Authored(key))
+            else {
+                continue;
+            };
+            let [next_index] = next_indices.as_slice() else {
+                continue;
+            };
+            let next = transitions[*next_index];
+            if i != next.writer_node
+                && !reaches(
+                    i,
+                    next.writer_node,
+                    &outgoing_edges,
+                    &edges,
+                    &live,
+                    &mut reachability,
+                )
+            {
+                return Err(error(
+                    "GRAPH_RESOURCE_VERSION_INVALID",
+                    "older texture version may be read after its successor",
+                    format!("nodes[{i}].inputs.{}", input.name),
+                ));
+            }
         }
     }
 
@@ -1504,7 +1554,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let ok_depth = dd.is_none_or(|dd| {
             dd.dimension == TextureDimension::D2
                 && dd.format == TextureFormat::Depth32Float
-                && dd.sample_count == 1
+                && matches!(dd.sample_count, 1 | 4)
                 && dd.mip_level_count == 1
                 && dd.view_formats.is_empty()
                 && extent_layers(&dd.extent) == 1
@@ -1512,7 +1562,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let ok_color = cd.is_none_or(|cd| {
             cd.dimension == TextureDimension::D2
                 && cd.format != TextureFormat::Depth32Float
-                && cd.sample_count == 1
+                && matches!(cd.sample_count, 1 | 4)
                 && cd.mip_level_count == 1
                 && cd.view_formats.is_empty()
                 && extent_layers(&cd.extent) == 1
@@ -1588,7 +1638,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             _ => None,
         };
         let source_ok = source_descriptor.is_none_or(|descriptor| {
-            descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
+            descriptor.format == TextureFormat::Rgba16Float
+                && (is_single_view_d2(descriptor)
+                    || resolve_demands.contains(&bound[i]["source"].producer))
         });
         let target_ok = target_descriptor.is_none_or(|descriptor| {
             is_single_view_d2(descriptor)
@@ -1605,7 +1657,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 }
         });
         let bloom_ok = bloom_descriptor.is_none_or(|descriptor| {
-            descriptor.format == TextureFormat::Rgba16Float && is_single_view_d2(descriptor)
+            descriptor.format == TextureFormat::Rgba16Float
+                && (is_single_view_d2(descriptor)
+                    || resolve_demands.contains(&bound[i]["bloom"].producer))
         });
         let extent_ok = match contracts[i].fullscreen_policy {
             Some(FullscreenPolicy::Copy)
@@ -1661,7 +1715,11 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         let NormalizedParameters::FrameOut { dynamic_range, .. } = &params[i] else {
             unreachable!()
         };
-        if !frame_out_source_compatible(descriptor, dynamic_range) {
+        let mut effective = descriptor.clone();
+        if resolve_demands.contains(&key) {
+            effective.sample_count = 1;
+        }
+        if !frame_out_source_compatible(&effective, dynamic_range) {
             let message = match dynamic_range {
                 FrameDynamicRange::Hdr { .. } => "HDR frame output requires rgba16_float",
                 FrameDynamicRange::Sdr => {
@@ -1940,6 +1998,87 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             },
         });
     }
+    // A multisampled pipeline color remains the authored attachment version. Sampling
+    // that exact version instead addresses one compiler-owned fixed-function resolve.
+    let mut resolve_resources = BTreeMap::new();
+    for producer in resolve_demands {
+        let (family, _, _) = version_of[&producer];
+        let descriptor = family_descriptor(&families[family as usize]);
+        let source_resource = output_ids[&producer];
+        let root = resources.len() as u32;
+        let resource = root + 1;
+        let family_id = families.len() as u32;
+        let mut resolved_descriptor = descriptor.clone();
+        resolved_descriptor.sample_count = 1;
+        resolve_resources.insert(producer, resource);
+        resources.push(CompiledResource {
+            original_node_index: producer.0 as u32,
+            origin: ResourceOrigin::CompilerColorResolve {
+                producer_node_index: producer.0 as u32,
+                output_ordinal: producer.1,
+                source_resource,
+            },
+            semantic_type: SemanticType::Texture,
+            producer_execution: None,
+            lifetime: None,
+            plan: ResourcePlan::TextureSource {
+                family: family_id,
+                residency: TextureResidency::Transient,
+                descriptor: resolved_descriptor.clone(),
+            },
+        });
+        resources.push(CompiledResource {
+            original_node_index: producer.0 as u32,
+            origin: ResourceOrigin::CompilerColorResolve {
+                producer_node_index: producer.0 as u32,
+                output_ordinal: producer.1,
+                source_resource,
+            },
+            semantic_type: SemanticType::Texture,
+            producer_execution: None,
+            lifetime: None,
+            plan: ResourcePlan::Texture {
+                family: family_id,
+                version: 0,
+                target: root,
+                initialized: true,
+                stored: true,
+                allocation: None,
+            },
+        });
+        families.push(TextureFamily {
+            id: family_id,
+            key: TextureFamilyKey {
+                source_node: producer.0 as u32,
+                source_socket: producer.1,
+            },
+            source: TextureFamilySource::CompilerColorResolve {
+                resource: root,
+                descriptor: resolved_descriptor,
+                producer_node_index: producer.0 as u32,
+                output_ordinal: producer.1,
+                source_resource,
+            },
+            lifetime: Lifetime {
+                first_use: 0,
+                last_use: 0,
+            },
+            versions: vec![TextureVersion {
+                version: 0,
+                resource,
+                target: root,
+                initialized: true,
+                stored: true,
+                lifetime: Lifetime {
+                    first_use: 0,
+                    last_use: 0,
+                },
+            }],
+            usage: vec![],
+            allocation: None,
+            aliasable: false,
+        });
+    }
     let mut executions = Vec::new();
     for &i in &order {
         if matches!(
@@ -1948,12 +2087,32 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         ) {
             continue;
         }
-        let input_resource = |s: &str| output_ids[&bound[i][s].producer];
+        let input_resource = |s: &str| {
+            let key = bound[i][s].producer;
+            let resource = output_ids[&key];
+            if contracts[i]
+                .inputs
+                .iter()
+                .any(|input| input.name == s && input.role == InputRole::SampledTexture)
+            {
+                resolve_resources.get(&key).copied().unwrap_or(resource)
+            } else {
+                resource
+            }
+        };
         let mut inputs = Vec::new();
         for (input_ordinal, s) in contracts[i].inputs.iter().enumerate() {
             if s.role != InputRole::Expression {
                 let resource = if let Some(b) = bound[i].get(s.name) {
-                    output_ids[&b.producer]
+                    let resource = output_ids[&b.producer];
+                    if s.role == InputRole::SampledTexture {
+                        resolve_resources
+                            .get(&b.producer)
+                            .copied()
+                            .unwrap_or(resource)
+                    } else {
+                        resource
+                    }
                 } else if s.default_policy == InputDefaultPolicy::CompilerTexture {
                     let key = TransitionTargetKey::CompilerDefaultInput {
                         owner_node: i,
@@ -1998,6 +2157,38 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 };
                 let first_color = version_of[&OutputKey(i, 0)].1 == 0;
                 let first_depth = version_of[&OutputKey(i, 1)].1 == 0;
+                let resolve_target = resolve_resources.get(&OutputKey(i, 0)).copied();
+                let source_store = if resolve_target.is_some()
+                    && !edges.iter().any(|edge| {
+                        edge.from_node == i
+                            && edge.producer_output_ordinal == 0
+                            && matches!(
+                                contracts[edge.to_node].inputs
+                                    [edge.consumer_input_ordinal as usize]
+                                    .role,
+                                InputRole::ColorTarget { .. }
+                            )
+                    }) {
+                    StoreOp::Discard
+                } else {
+                    StoreOp::Store
+                };
+                let stored = source_store == StoreOp::Store;
+                if let ResourcePlan::Texture {
+                    family,
+                    version,
+                    stored: resource_stored,
+                    ..
+                } = &mut resources[color as usize].plan
+                {
+                    *resource_stored = stored;
+                    if let Some(texture_version) = families
+                        .get_mut(*family as usize)
+                        .and_then(|family| family.versions.get_mut(*version as usize))
+                    {
+                        texture_version.stored = stored;
+                    }
+                }
                 let cl = if first_color {
                     NormalizedColorLoad::Clear { value: clear }
                 } else {
@@ -2021,7 +2212,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     mode: AccessMode::ColorAttachment {
                         location: 0,
                         load: cl,
-                        store: StoreOp::Store,
+                        store: source_store,
                         full_overwrite: first_color,
                     },
                 });
@@ -2034,12 +2225,23 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                         full_overwrite: first_depth,
                     },
                 });
+                if let Some(resource) = resolve_target {
+                    accesses.push(CompiledAccess {
+                        socket: "colorResolve".into(),
+                        resource,
+                        mode: AccessMode::ColorResolve {
+                            source: color,
+                            location: 0,
+                        },
+                    });
+                }
                 ExecutionKind::Render {
                     color_attachments: vec![ColorAttachmentPlan {
                         resource: color,
+                        resolve_target,
                         location: 0,
                         load: cl,
-                        store: StoreOp::Store,
+                        store: source_store,
                     }],
                     depth_stencil: Some(DepthStencilAttachmentPlan {
                         resource: depth,
@@ -2077,6 +2279,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                 ExecutionKind::Render {
                     color_attachments: vec![ColorAttachmentPlan {
                         resource: color,
+                        resolve_target: None,
                         location: 0,
                         load,
                         store: StoreOp::Store,
@@ -2374,6 +2577,11 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         for o in &e.outputs {
             resources[o.resource as usize].producer_execution = Some(ordinal as u32);
         }
+        for access in &e.accesses {
+            if matches!(access.mode, AccessMode::ColorResolve { .. }) {
+                resources[access.resource as usize].producer_execution = Some(ordinal as u32);
+            }
+        }
     }
     // Dense lifetimes touch bindings, outputs, and accesses.
     for (ordinal, e) in executions.iter().enumerate() {
@@ -2414,7 +2622,8 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             TextureFamilySource::AuthoredTexture { residency, .. } => {
                 residency == TextureResidency::Transient
             }
-            TextureFamilySource::CompilerDefaultInput { .. } => true,
+            TextureFamilySource::CompilerDefaultInput { .. }
+            | TextureFamilySource::CompilerColorResolve { .. } => true,
         };
         f.aliasable = transient && f.versions.iter().all(|v| v.initialized);
     }
@@ -2457,7 +2666,8 @@ fn extent_layers(e: &NormalizedTextureExtent) -> u32 {
 pub(super) fn family_descriptor(family: &TextureFamily) -> &NormalizedTextureDescriptor {
     match &family.source {
         TextureFamilySource::AuthoredTexture { descriptor, .. }
-        | TextureFamilySource::CompilerDefaultInput { descriptor, .. } => descriptor,
+        | TextureFamilySource::CompilerDefaultInput { descriptor, .. }
+        | TextureFamilySource::CompilerColorResolve { descriptor, .. } => descriptor,
     }
 }
 pub(super) fn is_single_view_d2(descriptor: &NormalizedTextureDescriptor) -> bool {
@@ -2503,6 +2713,9 @@ pub(super) fn texture_usage(
                 }
                 AccessMode::DepthAttachment { .. } => {
                     u.insert(TextureUsage::DepthAttachment);
+                }
+                AccessMode::ColorResolve { .. } => {
+                    u.insert(TextureUsage::ColorAttachment);
                 }
                 _ => {}
             }

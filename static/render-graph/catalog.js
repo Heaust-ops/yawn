@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 9;
+export const CATALOG_VERSION = 10;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, required = true, authoringType, defaultPolicy = required ? "none" : "parameter_literal") => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -76,7 +76,7 @@ export const semanticCatalog = Object.freeze({
     parameters: {},
   },
   texture: {
-    version: 1,
+    version: 2,
     execution: "source",
     inputs: {},
     outputs: { texture: o("texture") },
@@ -108,7 +108,7 @@ export const semanticCatalog = Object.freeze({
     parameters: { cameraSelection: "active" },
   },
   pipeline: {
-    version: 3,
+    version: 4,
     execution: "render",
     inputs: {
       mesh: i("mesh_data"),

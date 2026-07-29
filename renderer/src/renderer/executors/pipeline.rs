@@ -174,7 +174,7 @@ pub(crate) fn encode_compiled<T: Scene>(
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: view(color.resource)?,
                         depth_slice: None,
-                        resolve_target: None,
+                        resolve_target: color.resolve_target.map(view).transpose()?,
                         ops: wgpu::Operations {
                             load: match color.load {
                                 NormalizedColorLoad::Load => wgpu::LoadOp::Load,

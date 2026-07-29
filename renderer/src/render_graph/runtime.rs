@@ -396,7 +396,8 @@ fn texture_descriptor<'a>(
     };
     match &graph.texture_families.get(family as usize)?.source {
         TextureFamilySource::AuthoredTexture { descriptor, .. }
-        | TextureFamilySource::CompilerDefaultInput { descriptor, .. } => Some(descriptor),
+        | TextureFamilySource::CompilerDefaultInput { descriptor, .. }
+        | TextureFamilySource::CompilerColorResolve { descriptor, .. } => Some(descriptor),
     }
 }
 
@@ -419,6 +420,7 @@ fn single_view_d2(d: &NormalizedTextureDescriptor) -> bool {
 
 fn validate_fullscreen_execution(
     graph: &CompiledGraph,
+    producers: &[Option<u32>],
     i: usize,
     execution: &CompiledExecution,
     contract: &Contract,
@@ -624,13 +626,8 @@ fn validate_fullscreen_execution(
                 path("inputs"),
             ));
         }
-        let producer = graph.executions[..i].iter().position(|candidate| {
-            candidate
-                .outputs
-                .iter()
-                .any(|value| value.resource == input.resource)
-        });
-        if producer.is_none() {
+        let producer = producers.get(input.resource as usize).copied().flatten();
+        if !producer.is_some_and(|producer| producer < i as u32) {
             return Err(invalid(
                 "fullscreen sampled producer must precede execution",
                 path("inputs"),
@@ -682,6 +679,115 @@ fn validate_fullscreen_execution(
     Ok(())
 }
 
+fn validate_pipeline_resolve(
+    graph: &CompiledGraph,
+    producers: &[Option<u32>],
+    family_index: usize,
+    family: &TextureFamily,
+) -> Result<(), GraphError> {
+    let TextureFamilySource::CompilerColorResolve {
+        resource: root,
+        descriptor,
+        producer_node_index,
+        output_ordinal,
+        source_resource,
+    } = &family.source
+    else {
+        return Ok(());
+    };
+    let path = || format!("textureFamilies[{family_index}].source");
+    let source = graph
+        .resources
+        .get(*source_resource as usize)
+        .ok_or_else(|| invalid("resolve source is out of bounds", path()))?;
+    let producer_index = producers
+        .get(*source_resource as usize)
+        .copied()
+        .flatten()
+        .ok_or_else(|| invalid("resolve source producer is missing", path()))?
+        as usize;
+    let producer = graph
+        .executions
+        .get(producer_index)
+        .ok_or_else(|| invalid("resolve producer is out of bounds", path()))?;
+    let source_family_id = match source.plan {
+        ResourcePlan::Texture { family, .. } => family,
+        _ => return Err(invalid("resolve source is not a texture version", path())),
+    };
+    let source_family = graph
+        .texture_families
+        .get(source_family_id as usize)
+        .ok_or_else(|| invalid("resolve source family is out of bounds", path()))?;
+    let source_descriptor = super::compiler::family_descriptor(source_family);
+    let expected_descriptor = NormalizedTextureDescriptor {
+        sample_count: 1,
+        ..source_descriptor.clone()
+    };
+    let origin_matches = |origin: &ResourceOrigin| {
+        matches!(origin,
+        ResourceOrigin::CompilerColorResolve {
+            producer_node_index: node,
+            output_ordinal: output,
+            source_resource: source,
+        } if node == producer_node_index && output == output_ordinal && source == source_resource)
+    };
+    let [version] = family.versions.as_slice() else {
+        return Err(invalid("resolve family must have one version", path()));
+    };
+    let output = graph
+        .resources
+        .get(version.resource as usize)
+        .ok_or_else(|| invalid("resolve output is out of bounds", path()))?;
+    let exact_output = producer
+        .outputs
+        .get(*output_ordinal as usize)
+        .is_some_and(|value| value.socket == "color" && value.resource == *source_resource)
+        && *output_ordinal == 0
+        && producer
+            .outputs
+            .iter()
+            .filter(|value| value.resource == *source_resource)
+            .count()
+            == 1;
+    let exact_access = producer
+        .accesses
+        .iter()
+        .filter(|access| {
+            matches!(access.mode,
+        AccessMode::ColorResolve { source, location: 0 } if source == *source_resource)
+                && access.resource == version.resource
+                && access.socket == "colorResolve"
+        })
+        .count()
+        == 1
+        && producer
+            .accesses
+            .iter()
+            .filter(|access| matches!(access.mode, AccessMode::ColorResolve { .. }))
+            .count()
+            == 1;
+    if producer.executor.key != "pipeline"
+        || producer.original_node_index != *producer_node_index
+        || !exact_output
+        || !matches!(&source.origin,
+            ResourceOrigin::AuthoredOutput { node, socket, output_ordinal: 0 }
+                if node == &producer.id && socket == "color")
+        || source.original_node_index != *producer_node_index
+        || !matches!(graph.resources.get(*root as usize), Some(CompiledResource { plan: ResourcePlan::TextureSource { .. }, origin, .. }) if origin_matches(origin))
+        || !origin_matches(&output.origin)
+        || version.version != 0
+        || version.target != *root
+        || output.producer_execution != Some(producer_index as u32)
+        || !exact_access
+        || family.id == source_family_id
+        || family.allocation == source_family.allocation
+        || descriptor != &expected_descriptor
+    {
+        return Err(invalid("pipeline color resolve is not canonical", path()));
+    }
+    Ok(())
+}
+
 fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
     fn texture_family_for_resource<'a>(
         graph: &'a CompiledGraph,
@@ -722,6 +828,20 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
 
     let mut producers = vec![None; graph.resources.len()];
     let mut uses = vec![BTreeSet::new(); graph.resources.len()];
+    fn claim_producer(
+        producers: &mut [Option<u32>],
+        resource: u32,
+        execution: u32,
+        path: String,
+    ) -> Result<(), GraphError> {
+        let producer = producers
+            .get_mut(resource as usize)
+            .ok_or_else(|| invalid("execution producer is out of bounds", path.clone()))?;
+        if producer.replace(execution).is_some() {
+            return Err(invalid("resource has duplicate producers", path));
+        }
+        Ok(())
+    }
     for (i, execution) in graph.executions.iter().enumerate() {
         let contract = contract(&execution.executor.key).expect("supported executor has contract");
         if execution.executor.version != contract.version {
@@ -731,18 +851,12 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
             ));
         }
         for output in &execution.outputs {
-            let producer = producers.get_mut(output.resource as usize).ok_or_else(|| {
-                invalid(
-                    "execution output is out of bounds",
-                    format!("executions[{i}].outputs"),
-                )
-            })?;
-            if producer.replace(i as u32).is_some() {
-                return Err(invalid(
-                    "resource has duplicate producers",
-                    format!("executions[{i}].outputs"),
-                ));
-            }
+            claim_producer(
+                &mut producers,
+                output.resource,
+                i as u32,
+                format!("executions[{i}].outputs"),
+            )?;
         }
         let mut referenced = HashSet::new();
         for input in &execution.inputs {
@@ -763,8 +877,16 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                 ));
             }
             referenced.insert(access.resource);
+            if matches!(access.mode, AccessMode::ColorResolve { .. }) {
+                claim_producer(
+                    &mut producers,
+                    access.resource,
+                    i as u32,
+                    format!("executions[{i}].accesses"),
+                )?;
+            }
         }
-        validate_fullscreen_execution(graph, i, execution, contract)?;
+        validate_fullscreen_execution(graph, &producers, i, execution, contract)?;
         for resource in referenced {
             uses.get_mut(resource as usize)
                 .ok_or_else(|| {
@@ -812,6 +934,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
     let mut family_keys = HashSet::new();
     let mut source_claims = vec![0u8; graph.resources.len()];
     for (fi, family) in graph.texture_families.iter().enumerate() {
+        validate_pipeline_resolve(graph, &producers, fi, family)?;
         if family.id as usize != fi || !family_keys.insert(family.key.clone()) {
             return Err(invalid(
                 "texture family id/key is not unique and canonical",
@@ -825,6 +948,11 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                 descriptor,
             } => (*resource, *residency, descriptor),
             TextureFamilySource::CompilerDefaultInput {
+                resource,
+                descriptor,
+                ..
+            } => (*resource, TextureResidency::Transient, descriptor),
+            TextureFamilySource::CompilerColorResolve {
                 resource,
                 descriptor,
                 ..
@@ -894,7 +1022,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                             == 1
                     })
                     && owner_executions[0].executor.key == "pipeline"
-                    && owner_executions[0].executor.version == 3
+                    && owner_executions[0].executor.version == 4
                     && graph
                         .executions
                         .iter()
@@ -926,6 +1054,26 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                             "depthTarget"
                         }
             }
+            (
+                TextureFamilySource::CompilerColorResolve {
+                    producer_node_index,
+                    output_ordinal,
+                    source_resource: resolve_source,
+                    ..
+                },
+                ResourceOrigin::CompilerColorResolve {
+                    producer_node_index: origin_node,
+                    output_ordinal: origin_output,
+                    source_resource: origin_source,
+                },
+            ) => {
+                *producer_node_index == *origin_node
+                    && *output_ordinal == *origin_output
+                    && *resolve_source == *origin_source
+                    && source_resource.semantic_type == SemanticType::Texture
+                    && family.key.source_node == *producer_node_index
+                    && family.key.source_socket == *output_ordinal
+            }
             _ => false,
         };
         if !origin_ok {
@@ -950,7 +1098,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                         TextureFormat::Depth32Float
                     }
                 && descriptor.mip_level_count == 1
-                && descriptor.sample_count == 1
+                && matches!(descriptor.sample_count, 1 | 4)
                 && descriptor.view_formats.is_empty()
                 && matches!(
                     descriptor.extent,
@@ -975,7 +1123,12 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                 .executions
                 .iter()
                 .find(|execution| execution.original_node_index == *owner_node_index)
-                .expect("origin validation found owner");
+                .ok_or_else(|| {
+                    invalid(
+                        "compiler default owner is missing",
+                        format!("textureFamilies[{fi}].source"),
+                    )
+                })?;
             let opposite_socket = if *role == CompilerTextureRole::ColorTarget {
                 "depthTarget"
             } else {
@@ -1000,27 +1153,31 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                     )
                 })?;
             let both_defaults = matches!(&opposite_family.source, TextureFamilySource::CompilerDefaultInput { owner_node_index: opposite_owner, .. } if opposite_owner == owner_node_index);
-            let expected_extent = if both_defaults {
-                NormalizedTextureExtent::SurfaceRelative {
-                    width: Ratio {
-                        numerator: 1,
-                        denominator: 1,
+            let (expected_extent, expected_sample_count) = if both_defaults {
+                (
+                    NormalizedTextureExtent::SurfaceRelative {
+                        width: Ratio {
+                            numerator: 1,
+                            denominator: 1,
+                        },
+                        height: Ratio {
+                            numerator: 1,
+                            denominator: 1,
+                        },
+                        depth_or_array_layers: 1,
                     },
-                    height: Ratio {
-                        numerator: 1,
-                        denominator: 1,
-                    },
-                    depth_or_array_layers: 1,
-                }
+                    1,
+                )
             } else {
-                super::compiler::family_descriptor(opposite_family)
-                    .extent
-                    .clone()
+                let opposite = super::compiler::family_descriptor(opposite_family);
+                (opposite.extent.clone(), opposite.sample_count)
             };
-            if descriptor.extent != expected_extent {
+            if descriptor.extent != expected_extent
+                || descriptor.sample_count != expected_sample_count
+            {
                 return Err(invalid(
-                    "compiler default extent is not canonical",
-                    format!("textureFamilies[{fi}].source.descriptor.extent"),
+                    "compiler default descriptor inheritance is not canonical",
+                    format!("textureFamilies[{fi}].source.descriptor"),
                 ));
             }
         }
@@ -1519,12 +1676,17 @@ pub fn prepare_runtime_plan(
                 format!("executions[{i}].outputs"),
             ));
         }
-        let color_version = match graph
+        let (color_version, color_stored, color_target) = match graph
             .resources
             .get(color_output.resource as usize)
             .map(|r| &r.plan)
         {
-            Some(ResourcePlan::Texture { version, .. }) => *version,
+            Some(ResourcePlan::Texture {
+                version,
+                stored,
+                target,
+                ..
+            }) => (*version, *stored, *target),
             _ => {
                 return Err(invalid(
                     "pipeline color output kind is invalid",
@@ -1532,12 +1694,17 @@ pub fn prepare_runtime_plan(
                 ))
             }
         };
-        let depth_version = match graph
+        let (depth_version, depth_stored, depth_target) = match graph
             .resources
             .get(depth_output.resource as usize)
             .map(|r| &r.plan)
         {
-            Some(ResourcePlan::Texture { version, .. }) => *version,
+            Some(ResourcePlan::Texture {
+                version,
+                stored,
+                target,
+                ..
+            }) => (*version, *stored, *target),
             _ => {
                 return Err(invalid(
                     "pipeline depth output kind is invalid",
@@ -1571,12 +1738,45 @@ pub fn prepare_runtime_plan(
                 format!("executions[{i}].kind"),
             ));
         }
-        let [mesh_access, color_access, depth_access] = execution.accesses.as_slice() else {
-            return Err(invalid(
-                "pipeline access shape mismatch",
-                format!("executions[{i}].accesses"),
-            ));
+        let stored_op = |stored| {
+            if stored {
+                StoreOp::Store
+            } else {
+                StoreOp::Discard
+            }
         };
+        if color_attachment.store != stored_op(color_stored)
+            || depth_attachment.store != stored_op(depth_stored)
+            || (color_version > 0
+                && !matches!(
+                    graph.resources.get(color_target as usize).map(|r| &r.plan),
+                    Some(ResourcePlan::Texture { stored: true, .. })
+                ))
+            || (depth_version > 0
+                && !matches!(
+                    graph.resources.get(depth_target as usize).map(|r| &r.plan),
+                    Some(ResourcePlan::Texture { stored: true, .. })
+                ))
+        {
+            return Err(invalid(
+                "pipeline store metadata is not canonical",
+                format!("executions[{i}].kind"),
+            ));
+        }
+        let (base_accesses, resolve_access) = match execution.accesses.as_slice() {
+            [mesh, color, depth] => (&[mesh, color, depth][..], None),
+            [mesh, color, depth, resolve] => (&[mesh, color, depth][..], Some(resolve)),
+            _ => {
+                return Err(invalid(
+                    "pipeline access shape mismatch",
+                    format!("executions[{i}].accesses"),
+                ));
+            }
+        };
+        let [mesh_access, color_access, depth_access] = base_accesses else {
+            unreachable!()
+        };
+        let expected_store = stored_op(color_stored);
         if mesh_access.socket != "mesh"
             || mesh_access.resource != mesh_input.resource
             || !matches!(mesh_access.mode, AccessMode::SemanticRead)
@@ -1592,24 +1792,36 @@ pub fn prepare_runtime_plan(
             || color_access.resource != color_output.resource
             || !matches!(
                 color_access.mode,
-                AccessMode::ColorAttachment { location: 0, load, store: StoreOp::Store, full_overwrite }
-                    if load == color_attachment.load && full_overwrite == color_clear
+                AccessMode::ColorAttachment { location: 0, load, store, full_overwrite }
+                    if load == color_attachment.load && store == expected_store && full_overwrite == color_clear
             )
             || color_attachment.location != 0
-            || color_attachment.store != StoreOp::Store
             || depth_access.socket != "depth"
             || depth_access.resource != depth_output.resource
             || !matches!(
                 depth_access.mode,
-                AccessMode::DepthAttachment { load, store: StoreOp::Store, full_overwrite }
-                    if load == depth_attachment.load && full_overwrite == depth_clear
+                AccessMode::DepthAttachment { load, store, full_overwrite }
+                    if load == depth_attachment.load && store == stored_op(depth_stored) && full_overwrite == depth_clear
             )
-            || depth_attachment.store != StoreOp::Store
         {
             return Err(invalid(
                 "pipeline attachment accesses mismatch",
                 format!("executions[{i}].accesses"),
             ));
+        }
+        match (color_attachment.resolve_target, resolve_access) {
+            (None, None) => {}
+            (Some(target), Some(access))
+                if access.socket == "colorResolve"
+                    && access.resource == target
+                    && matches!(access.mode, AccessMode::ColorResolve { source, location: 0 } if source == color_attachment.resource) =>
+                {}
+            _ => {
+                return Err(invalid(
+                    "pipeline color resolve mismatch",
+                    format!("executions[{i}].accesses"),
+                ))
+            }
         }
         let mesh_resource = graph
             .resources
@@ -1661,7 +1873,10 @@ pub fn prepare_runtime_plan(
                 )
             })?;
         if color_descriptor.format == TextureFormat::Depth32Float
-            || !super::compiler::is_single_view_d2(color_descriptor)
+            || color_descriptor.dimension != TextureDimension::D2
+            || !matches!(color_descriptor.sample_count, 1 | 4)
+            || color_descriptor.mip_level_count != 1
+            || !color_descriptor.view_formats.is_empty()
         {
             return Err(invalid(
                 "pipeline color attachment descriptor is invalid",
@@ -1676,14 +1891,20 @@ pub fn prepare_runtime_plan(
                 )
             })?;
         if depth_descriptor.format != TextureFormat::Depth32Float
-            || !super::compiler::is_single_view_d2(depth_descriptor)
+            || depth_descriptor.dimension != TextureDimension::D2
+            || !matches!(depth_descriptor.sample_count, 1 | 4)
+            || depth_descriptor.mip_level_count != 1
+            || !depth_descriptor.view_formats.is_empty()
         {
             return Err(invalid(
                 "pipeline depth attachment descriptor is invalid",
                 format!("executions[{i}].inputs"),
             ));
         }
-        if color_descriptor.extent != depth_descriptor.extent {
+        if color_descriptor.extent != depth_descriptor.extent
+            || color_descriptor.sample_count != depth_descriptor.sample_count
+            || (color_descriptor.sample_count == 1 && color_attachment.resolve_target.is_some())
+        {
             return Err(invalid(
                 "pipeline attachment extents mismatch",
                 format!("executions[{i}].inputs"),
@@ -1839,7 +2060,7 @@ pub fn prepare_runtime_plan(
                     TextureResidency::Transient | TextureResidency::Persistent
                 ) || descriptor.dimension != TextureDimension::D2
                     || descriptor.mip_level_count != 1
-                    || descriptor.sample_count != 1
+                    || !matches!(descriptor.sample_count, 1 | 4)
                     || !matches!(
                         descriptor.extent,
                         NormalizedTextureExtent::Absolute {
@@ -1865,9 +2086,21 @@ pub fn prepare_runtime_plan(
                 }
             }
             TextureFamilySource::CompilerDefaultInput { descriptor, .. } => {
-                if !super::compiler::is_single_view_d2(descriptor) || family.allocation.is_none() {
+                if descriptor.dimension != TextureDimension::D2
+                    || !matches!(descriptor.sample_count, 1 | 4)
+                    || descriptor.mip_level_count != 1
+                    || family.allocation.is_none()
+                {
                     return Err(invalid(
                         "compiler default family is not canonical",
+                        format!("textureFamilies[{fi}]"),
+                    ));
+                }
+            }
+            TextureFamilySource::CompilerColorResolve { descriptor, .. } => {
+                if !super::compiler::is_single_view_d2(descriptor) || family.allocation.is_none() {
+                    return Err(invalid(
+                        "compiler resolve family is not canonical",
                         format!("textureFamilies[{fi}]"),
                     ));
                 }
@@ -1986,6 +2219,9 @@ pub fn prepare_runtime_plan(
                         ..
                     } => (descriptor, *residency),
                     TextureFamilySource::CompilerDefaultInput { descriptor, .. } => {
+                        (descriptor, TextureResidency::Transient)
+                    }
+                    TextureFamilySource::CompilerColorResolve { descriptor, .. } => {
                         (descriptor, TextureResidency::Transient)
                     }
                 };
