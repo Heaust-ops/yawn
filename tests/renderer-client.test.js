@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as rendererModule from "../static/renderer-client.js";
 const { RendererClient, RendererError } = rendererModule;
+const TYPE = [0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,0x80000000,0xffffffff];
 
 class WorkerMock extends EventTarget {
   messages=[]; transfers=[]; terminated=false;
@@ -22,26 +23,30 @@ async function imported(f) {
   const loading=f.client.replaceSceneGlb(new ArrayBuffer(8));
   f.worker.reply({type:"payload-ready",id:1});
   await Promise.resolve();
-  f.worker.reply({type:"reply",request:1,ok:true,result:{meshes:[{handle:[7,3],defaultType:[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}});
+  f.worker.reply({type:"reply",request:1,ok:true,result:{meshes:[{handle:[7,3],defaultInstance:[8,5],defaultType:[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}});
   return (await loading)[0];
 }
 test("replaceSceneGlb is opcode 1", async()=>{const f=fixture(),pending=f.client.replaceSceneGlb(new ArrayBuffer(8));f.worker.reply({type:"payload-ready",id:1});await Promise.resolve();assert.equal(new Int32Array(f.memory.buffer,64,40)[1],1);f.worker.reply({type:"reply",request:1,ok:true,result:{meshes:[]}});assert.deepEqual(await pending,[]);});
 test("scene replacement carries the framing mode in opcode 1",async()=>{const f=fixture(),pending=f.client.replaceSceneGlb(new ArrayBuffer(8),{framing:"interior"});f.worker.reply({type:"payload-ready",id:1});await Promise.resolve();assert.deepEqual([...new Int32Array(f.memory.buffer,64,40).slice(1,5)],[1,1,1,1]);f.worker.reply({type:"reply",request:1,ok:true,result:{meshes:[]}});await pending;await assert.rejects(f.client.replaceSceneGlb(new ArrayBuffer(8),{framing:"bad"}),TypeError)});
 test("writes tagged fixed-slot protocol and resolves reply", async () => {
   const f=fixture(); const mesh=await imported(f);
-  const pending=mesh.setVisible(true);
+  assert.equal(mesh.setVisible,undefined);
+  assert.equal(mesh.setType,undefined);
+  assert.equal(typeof mesh.defaultInstance.setType,"function");
+  const pending=mesh.defaultInstance.setType(TYPE);
   const {memory,header,worker}=f;
   assert.equal(Atomics.load(header,5),2);
   const slot=new Int32Array(memory.buffer,64+160,40);
-  assert.deepEqual([...slot.slice(0,6)],[2,2,2,7,3,1]);
+  assert.deepEqual([...slot.slice(0,21)].map(x=>x>>>0),[2,10,2,8,5,...TYPE]);
   worker.reply({type:"reply",request:2,ok:true,code:"OK"}); await pending;
 });
 test("maps stable errors and gates destroyed instances", async () => {
   const f=fixture(), mesh=await imported(f); const {worker}=f;
-  const creating=mesh.createInstance(new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]),{visible:false});
+  const creating=mesh.createInstance(new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]),{type:TYPE});
   worker.reply({type:"reply",request:2,ok:true,result:[4,2]}); const instance=await creating;
+  assert.equal(instance.setVisible,undefined);
   const destroying=instance.destroy(); worker.reply({type:"reply",request:3,ok:true}); await destroying;
-  assert.throws(()=>instance.setVisible(true), error=>error instanceof RendererError&&error.code==="STALE_HANDLE");
+  assert.throws(()=>instance.setType(TYPE), error=>error instanceof RendererError&&error.code==="STALE_HANDLE");
 });
 test("rejects protocol mismatch", () => {
   const {memory,worker}=fixture(); new Int32Array(memory.buffer)[1]=1;
@@ -49,7 +54,7 @@ test("rejects protocol mismatch", () => {
 });
 test("pending reply exists before ring publication", async () => {
   const f=fixture(), mesh=await imported(f); const {worker}=f;
-  const pending=mesh.setVisible(true);
+  const pending=mesh.defaultInstance.setType(TYPE);
   worker.reply({type:"reply",request:2,ok:true});
   await pending;
 });
@@ -61,7 +66,7 @@ test("profile snapshots have a dedicated getter", () => {
 });
 test("worker failures and dispose reject every pending operation", async () => {
   const f=fixture(), mesh=await imported(f); const {worker,client,bridge}=f;
-  const a=mesh.setVisible(true), b=mesh.setVisible(false);
+  const a=mesh.defaultInstance.setType(TYPE), b=mesh.defaultInstance.setType([...TYPE].reverse());
   worker.dispatchEvent(new Event("error"));
   await assert.rejects(a,/WORKER_ERROR/); await assert.rejects(b,/WORKER_ERROR/);
   client.dispose(); assert.equal(worker.terminated,true); assert.equal(bridge.freed,true);
@@ -75,6 +80,7 @@ test("import always releases staged payload when ring is full", async () => {
 });
 test("does not export handle constructors or internal mutation methods", () => {
   const {client}=fixture();
+  assert.equal(rendererModule.VISIBLE,undefined);
   assert.equal(rendererModule.Mesh,undefined);
   assert.equal(rendererModule.Instance,undefined);
   assert.equal(client._meshFlags,undefined);

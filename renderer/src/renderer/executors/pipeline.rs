@@ -30,9 +30,6 @@ fn encode_scene<'a, T: Scene>(
         pass.set_vertex_buffer(4, t.slice(..));
         pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
         for draw in &gpu.draws {
-            if !draw.instance_type.is_visible() {
-                continue;
-            }
             pass.set_pipeline(pipelines.get_pipeline(draw.pipeline));
             if pipelines.requires_material(draw.pipeline) {
                 pass.set_bind_group(2, materials.group(draw.material), &[]);

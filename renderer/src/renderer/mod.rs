@@ -1511,41 +1511,37 @@ impl<T: Scene + 'static> Renderer<T> {
                     let meshes = js_sys::Array::new();
                     for h in installed.meshes {
                         let item = js_sys::Object::new();
+                        let view = self.render_data.mesh(h).unwrap();
                         js_sys::Reflect::set(
                             &item,
                             &"handle".into(),
                             &js_sys::Array::of2(&h.slot().into(), &h.generation().into()),
                         )
                         .unwrap();
-                        let ty = self
-                            .render_data
-                            .mesh(h)
-                            .unwrap()
-                            .default_instance_type
-                            .words;
+                        js_sys::Reflect::set(
+                            &item,
+                            &"defaultInstance".into(),
+                            &js_sys::Array::of2(
+                                &view.default_instance.slot().into(),
+                                &view.default_instance.generation().into(),
+                            ),
+                        )
+                        .unwrap();
                         js_sys::Reflect::set(
                             &item,
                             &"defaultType".into(),
-                            &js_sys::Array::from_iter(ty.into_iter().map(JsValue::from)),
+                            &js_sys::Array::from_iter(
+                                view.default_instance_type
+                                    .words
+                                    .into_iter()
+                                    .map(JsValue::from),
+                            ),
                         )
                         .unwrap();
                         meshes.push(&item);
                     }
                     js_sys::Reflect::set(&result, &"meshes".into(), &meshes).unwrap();
                     Ok(result.into())
-                }
-                2 => {
-                    self.render_data
-                        .set_mesh_visible(
-                            MeshHandle::from_parts(words[2], words[3]),
-                            match words[4] {
-                                0 => false,
-                                1 => true,
-                                _ => return Err("INVALID_VISIBILITY"),
-                            },
-                        )
-                        .map_err(|e| render_data_error_code(&e))?;
-                    Ok(JsValue::UNDEFINED)
                 }
                 3 => {
                     let mesh = MeshHandle::from_parts(words[2], words[3]);
@@ -1564,19 +1560,6 @@ impl<T: Scene + 'static> Renderer<T> {
                         )
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(js_sys::Array::of2(&h.slot().into(), &h.generation().into()).into())
-                }
-                4 => {
-                    self.render_data
-                        .set_instance_visible(
-                            InstanceHandle::from_parts(words[2], words[3]),
-                            match words[4] {
-                                0 => false,
-                                1 => true,
-                                _ => return Err("INVALID_VISIBILITY"),
-                            },
-                        )
-                        .map_err(|e| render_data_error_code(&e))?;
-                    Ok(JsValue::UNDEFINED)
                 }
                 5 => {
                     let h = InstanceHandle::from_parts(words[2], words[3]);

@@ -79,26 +79,26 @@ test("snapshot reader refreshes memory after pinning", () => {
   }
 });
 
-function bvhSnapshot({ pickable = [1, 1], shifted = false } = {}) {
+function bvhSnapshot({ metadata = [0, 0x80000000], shifted = false } = {}) {
   const count = 2;
   return { instanceCount: count, streams: {
     instanceSlot: Uint32Array.from([5, 6]), instanceGeneration: Uint32Array.from([1, 1]),
     instanceMeshSlot: Uint32Array.from([2, 2]), instanceMeshGeneration: Uint32Array.from([4, 4]),
-    instanceType: Uint32Array.from(pickable.flatMap(x => [x, ...Array(15).fill(0)])),
+    instanceType: Uint32Array.from(metadata.flatMap(x => [x, ...Array(15).fill(0)])),
     instanceWorldMin: Float32Array.from(shifted ? [10, -1, -1, 4, -1, -1] : [2, -1, -1, 4, -1, -1]),
     instanceWorldMax: Float32Array.from(shifted ? [12, 1, 1, 6, 1, 1] : [3, 1, 1, 6, 1, 1]),
   }};
 }
 
-test("BVH preserves topology for visibility/refit and reports world distances", () => {
+test("BVH ignores opaque instance metadata during refit and picking", () => {
   const bvh = new DerivedBvh();
   bvh.update(bvhSnapshot());
   assert.equal(bvh.rebuilds, 1);
   assert.equal(bvh.pick([0, 0, 0], [2, 0, 0], Infinity, 2)[0].distance, 2);
-  bvh.update(bvhSnapshot({ pickable: [0, 1], shifted: true }));
+  bvh.update(bvhSnapshot({ metadata: [0xffffffff, 0], shifted: true }));
   assert.equal(bvh.rebuilds, 1);
   assert.equal(bvh.refits, 1);
-  assert.deepEqual(bvh.pick([0, 0, 0], [1, 0, 0], Infinity, 2).map(hit => hit.slot), [6]);
+  assert.deepEqual(bvh.pick([0, 0, 0], [1, 0, 0], Infinity, 2).map(hit => hit.slot), [6, 5]);
 });
 
 class WorkerMock extends EventTarget {
@@ -108,7 +108,7 @@ class WorkerMock extends EventTarget {
   reply(data) { this.dispatchEvent(new MessageEvent("message", { data })); }
 }
 
-test("renderer pick returns gated instances and exact epoch", async () => {
+test("renderer pick returns instance metadata handles and exact epoch", async () => {
   const scene = snapshotFixture();
   const ring = 8192;
   const ringHeader = new Int32Array(scene.memory.buffer, ring, 16);
@@ -124,7 +124,8 @@ test("renderer pick returns gated instances and exact epoch", async () => {
   const result = await picking;
   assert.equal(result.epoch, 1);
   assert.equal(result.hits[0].distance, 2);
-  assert.equal(typeof result.hits[0].instance.setVisible, "function");
+  assert.equal(typeof result.hits[0].instance.setType, "function");
+  assert.equal(result.hits[0].instance.setVisible, undefined);
   client.dispose();
   assert.equal(bvhWorker.terminated, true);
 });

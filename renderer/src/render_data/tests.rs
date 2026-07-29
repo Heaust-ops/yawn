@@ -104,7 +104,28 @@ fn default_instance_is_protected_and_preserves_its_type() {
         data.destroy_instance(created.default_instance),
         Err(RenderDataError::CannotDestroyDefaultInstance)
     );
-    data.set_mesh_visible(created.mesh, false).unwrap();
+    let replacement = InstanceType {
+        words: [
+            0,
+            1,
+            2,
+            4,
+            8,
+            0x8000_0000,
+            u32::MAX,
+            17,
+            31,
+            63,
+            127,
+            255,
+            511,
+            1023,
+            2047,
+            4095,
+        ],
+    };
+    data.set_instance_type(created.default_instance, replacement)
+        .unwrap();
     assert_eq!(
         data.mesh(created.mesh).unwrap().default_instance_type,
         info().default_instance_type
@@ -113,12 +134,14 @@ fn default_instance_is_protected_and_preserves_its_type() {
         data.instance(created.default_instance)
             .unwrap()
             .instance_type,
-        {
-            let mut expected = info().default_instance_type;
-            expected.set_visible(false);
-            expected
-        }
+        replacement
     );
+}
+
+#[test]
+fn instance_type_default_is_exactly_zero() {
+    assert_eq!(InstanceType::default(), InstanceType::ZERO);
+    assert_eq!(InstanceType::default().words, [0; 16]);
 }
 
 #[test]

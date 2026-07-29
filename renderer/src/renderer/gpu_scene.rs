@@ -3,7 +3,7 @@ use std::mem::size_of;
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    render_data::{InstanceType, MaterialKey, MeshHandle, PipelineKey},
+    render_data::{MaterialKey, MeshHandle, PipelineKey},
     renderer::scene_frame::SceneFramePlan,
 };
 
@@ -24,7 +24,6 @@ pub struct DrawItem {
     pub indices: std::ops::Range<u32>,
     pub base_vertex: i32,
     pub instances: std::ops::Range<u32>,
-    pub instance_type: InstanceType,
 }
 
 #[repr(C)]
@@ -169,7 +168,6 @@ impl GpuScenePlan {
                             .ok_or("draw range overflow")?,
                     base_vertex,
                     instances: instance_index..instance_index + 1,
-                    instance_type: occurrence.instance_type,
                 });
             }
         }

@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use crate::render_data::{MeshCreateInfo, RenderDataConfig, IDENTITY_MODEL_TRANSFORM};
 
-    fn mesh(data: &mut RenderData, visible: bool) -> crate::render_data::CreatedMesh {
+    fn mesh(data: &mut RenderData, instance_type: InstanceType) -> crate::render_data::CreatedMesh {
         data.create_mesh(MeshCreateInfo {
             positions: &[[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]],
             normals: &[[0., 0., 1.]; 3],
@@ -170,11 +170,7 @@ mod tests {
             indices: &[0, 1, 2],
             pipeline: PipelineKey::new(0),
             material: crate::render_data::MaterialKey::DEFAULT,
-            default_instance_type: if visible {
-                InstanceType::VISIBLE
-            } else {
-                InstanceType::ZERO
-            },
+            default_instance_type: instance_type,
             default_transform: IDENTITY_MODEL_TRANSFORM,
         })
         .unwrap()
@@ -186,10 +182,11 @@ mod tests {
         let mut cache = SceneFrameCache::default();
         let first = cache.get_or_build(&data).unwrap() as *const _;
         assert_eq!(first, cache.get_or_build(&data).unwrap() as *const _);
-        let created = mesh(&mut data, true);
+        let created = mesh(&mut data, InstanceType::ZERO);
         let second = cache.get_or_build(&data).unwrap() as *const _;
         assert_ne!(first, second);
-        data.set_mesh_visible(created.mesh, false).unwrap();
+        data.set_instance_type(created.default_instance, InstanceType { words: [5; 16] })
+            .unwrap();
         let third = cache.get_or_build(&data).unwrap() as *const _;
         assert_ne!(second, third);
         let mut moved = IDENTITY_MODEL_TRANSFORM;
@@ -200,10 +197,15 @@ mod tests {
     }
 
     #[test]
-    fn retains_hidden_entries_builds_adjacency_and_world_bounds() {
+    fn retains_all_entries_and_preserves_opaque_types() {
         let mut data = RenderData::new(RenderDataConfig::default()).unwrap();
-        let hidden = mesh(&mut data, false);
-        let shown = mesh(&mut data, true);
+        let zero = mesh(&mut data, InstanceType::ZERO);
+        let marked = mesh(
+            &mut data,
+            InstanceType {
+                words: [0, u32::MAX, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9],
+            },
+        );
         let mut translated = IDENTITY_MODEL_TRANSFORM;
         translated[0][0] = 2.;
         translated[1][1] = 3.;
@@ -211,14 +213,14 @@ mod tests {
         translated[3][0] = 5.;
         translated[3][1] = -2.;
         let extra = data
-            .create_instance(hidden.mesh, translated, InstanceType::ZERO)
+            .create_instance(zero.mesh, translated, InstanceType::ZERO)
             .unwrap();
         let plan = SceneFramePlan::build(&data).unwrap();
         assert_eq!((plan.meshes.len(), plan.occurrences.len()), (2, 3));
         assert!(plan
             .occurrences
             .iter()
-            .any(|o| o.handle == hidden.default_instance && o.is_default));
+            .any(|o| o.handle == zero.default_instance && o.is_default));
         let occurrence = plan.occurrences.iter().find(|o| o.handle == extra).unwrap();
         assert_eq!(occurrence.world_aabb.min, [5., -2., 0.]);
         assert_eq!(occurrence.world_aabb.max, [9., 4., 0.]);
@@ -228,10 +230,10 @@ mod tests {
                 .all(|&i| plan.occurrences[i].mesh_index == mesh_index));
         }
         assert_eq!(
-            shown.default_instance.slot(),
+            marked.default_instance.slot(),
             plan.occurrences
                 .iter()
-                .find(|o| o.mesh == shown.mesh)
+                .find(|o| o.mesh == marked.mesh)
                 .unwrap()
                 .handle
                 .slot()
@@ -241,26 +243,26 @@ mod tests {
     #[test]
     fn slot_reuse_preserves_dense_order_adjacency_and_ownership() {
         let mut data = RenderData::new(RenderDataConfig::default()).unwrap();
-        let a = mesh(&mut data, true);
-        let doomed = mesh(&mut data, true);
-        let c = mesh(&mut data, true);
+        let a = mesh(&mut data, InstanceType::ZERO);
+        let doomed = mesh(&mut data, InstanceType::ZERO);
+        let c = mesh(&mut data, InstanceType::ZERO);
         let a_extra = data
-            .create_instance(a.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::VISIBLE)
+            .create_instance(a.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
             .unwrap();
         let doomed_extra = data
-            .create_instance(doomed.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::VISIBLE)
+            .create_instance(doomed.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
             .unwrap();
         let c_extra = data
-            .create_instance(c.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::VISIBLE)
+            .create_instance(c.mesh, IDENTITY_MODEL_TRANSFORM, InstanceType::ZERO)
             .unwrap();
         data.destroy_instance(a_extra).unwrap();
         data.destroy_mesh(doomed.mesh).unwrap();
-        let replacement = mesh(&mut data, true);
+        let replacement = mesh(&mut data, InstanceType::ZERO);
         let replacement_extra = data
             .create_instance(
                 replacement.mesh,
                 IDENTITY_MODEL_TRANSFORM,
-                InstanceType::VISIBLE,
+                InstanceType::ZERO,
             )
             .unwrap();
         assert_eq!(replacement.mesh.slot(), doomed.mesh.slot());

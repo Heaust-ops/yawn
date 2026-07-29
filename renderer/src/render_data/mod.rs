@@ -59,30 +59,13 @@ impl MaterialKey {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceType {
     pub words: [u32; 16],
 }
 
 impl InstanceType {
-    pub const VISIBLE_MASK: u32 = 1;
     pub const ZERO: Self = Self { words: [0; 16] };
-    pub const VISIBLE: Self = Self {
-        words: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
-
-    pub const fn is_visible(self) -> bool {
-        self.words[0] & Self::VISIBLE_MASK != 0
-    }
-    pub fn set_visible(&mut self, visible: bool) {
-        self.words[0] = (self.words[0] & !Self::VISIBLE_MASK) | visible as u32;
-    }
-}
-
-impl Default for InstanceType {
-    fn default() -> Self {
-        Self::VISIBLE
-    }
 }
 
 const _: [(); 64] = [(); std::mem::size_of::<InstanceType>()];
@@ -685,32 +668,6 @@ impl RenderData {
         Ok(())
     }
 
-    pub fn set_mesh_visible(
-        &mut self,
-        handle: MeshHandle,
-        visible: bool,
-    ) -> Result<(), RenderDataError> {
-        if !self
-            .meshes
-            .slots
-            .contains(handle.slot(), handle.generation())
-        {
-            return Err(RenderDataError::InvalidMeshHandle);
-        }
-        let owned: Vec<u32> = self
-            .instances
-            .slots
-            .occupied()
-            .filter_map(|(slot, _)| (self.instances.mesh_handle(slot) == handle).then_some(slot))
-            .collect();
-        let next_revision = self.next_revision()?;
-        for slot in owned {
-            self.instances.instance_types[slot as usize].set_visible(visible);
-        }
-        self.revision = next_revision;
-        Ok(())
-    }
-
     pub fn set_instance_type(
         &mut self,
         handle: InstanceHandle,
@@ -725,24 +682,6 @@ impl RenderData {
         }
         let next_revision = self.next_revision()?;
         self.instances.instance_types[handle.slot() as usize] = instance_type;
-        self.revision = next_revision;
-        Ok(())
-    }
-
-    pub fn set_instance_visible(
-        &mut self,
-        handle: InstanceHandle,
-        visible: bool,
-    ) -> Result<(), RenderDataError> {
-        if !self
-            .instances
-            .slots
-            .contains(handle.slot(), handle.generation())
-        {
-            return Err(RenderDataError::InvalidInstanceHandle);
-        }
-        let next_revision = self.next_revision()?;
-        self.instances.instance_types[handle.slot() as usize].set_visible(visible);
         self.revision = next_revision;
         Ok(())
     }

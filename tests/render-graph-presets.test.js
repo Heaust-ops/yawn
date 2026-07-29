@@ -20,7 +20,7 @@ test("all presets use current schemas, versions, and one frame output", () => {
     .parameters.texture.sampleCount, "number");
 });
 
-test("presets classify visibility and material through type.words[0] predicates", () => {
+test("presets classify demo-owned enable and material bits through type.words[0] predicates", () => {
   for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
     const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
     assert.deepEqual(byId.type_words.inputs.value, { node: "mesh", socket: "type" }, name);
