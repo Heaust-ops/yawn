@@ -401,23 +401,6 @@ fn texture_descriptor<'a>(
     }
 }
 
-fn single_view_d2(d: &NormalizedTextureDescriptor) -> bool {
-    d.dimension == TextureDimension::D2
-        && d.mip_level_count == 1
-        && d.sample_count == 1
-        && d.view_formats.is_empty()
-        && matches!(
-            d.extent,
-            NormalizedTextureExtent::Absolute {
-                depth_or_array_layers: 1,
-                ..
-            } | NormalizedTextureExtent::SurfaceRelative {
-                depth_or_array_layers: 1,
-                ..
-            }
-        )
-}
-
 fn validate_fullscreen_execution(
     graph: &CompiledGraph,
     producers: &[Option<u32>],
@@ -653,12 +636,12 @@ fn validate_fullscreen_execution(
     let target_d = texture_descriptor(graph, output.resource)
         .ok_or_else(|| invalid("fullscreen target descriptor missing", path("inputs")))?;
     let hdr = |d: &NormalizedTextureDescriptor| {
-        single_view_d2(d) && d.format == TextureFormat::Rgba16Float
+        super::compiler::is_single_view_d2(d) && d.format == TextureFormat::Rgba16Float
     };
     let descriptors_valid = hdr(source)
         && match policy {
             FullscreenPolicy::Copy => {
-                single_view_d2(target_d)
+                super::compiler::is_single_view_d2(target_d)
                     && target_d.format != TextureFormat::Depth32Float
                     && target_d.extent == source.extent
             }
