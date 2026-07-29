@@ -5,8 +5,11 @@ use std::{
 use wasm_bindgen::JsValue;
 
 pub const MAX_PROFILE_PASSES: usize = crate::render_graph::MAX_EXECUTIONS;
+#[cfg(any(target_arch = "wasm32", test))]
 const SLOT_COUNT: usize = 4;
+#[cfg(any(target_arch = "wasm32", test))]
 const QUERY_COUNT: u32 = (MAX_PROFILE_PASSES * 2) as u32;
+#[cfg(any(target_arch = "wasm32", test))]
 const RESOLVE_SIZE: u64 = QUERY_COUNT as u64 * 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +81,7 @@ pub(crate) struct Profiler {
 }
 
 impl Profiler {
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn requested_features(requested: bool, supported: wgpu::Features) -> wgpu::Features {
         if requested && supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
             wgpu::Features::TIMESTAMP_QUERY
@@ -85,6 +89,7 @@ impl Profiler {
             wgpu::Features::empty()
         }
     }
+    #[cfg(target_arch = "wasm32")]
     pub async fn new(requested: bool, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let available = requested && device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let mut slots = Vec::new();

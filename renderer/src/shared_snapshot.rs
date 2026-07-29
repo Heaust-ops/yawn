@@ -24,7 +24,6 @@ const CONTROL_BYTES: u32 = 256;
 const SLOT_BYTES: u32 = 64;
 const SNAPSHOT_HEADER_BYTES: usize = 64;
 const DATA_OFFSET: usize = 448;
-const DESCRIPTOR_BYTES: usize = 32;
 const STREAMS: usize = 12;
 const SCHEMA_FLAGS: u32 = 3; // dense arrays | affine transforms
 

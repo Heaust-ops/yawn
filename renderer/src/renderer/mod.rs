@@ -5,11 +5,13 @@ use wasm_bindgen::{prelude::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::DedicatedWorkerGlobalScope;
 
+#[cfg(target_arch = "wasm32")]
+use crate::render_data::RenderDataConfig;
 use crate::{
     command_ring::CommandRing,
     gltf::{install_imported, ModelBounds},
     message::{camera_drag, CameraDrag, DrainEventError, MouseMessage, ResizeMessage, WindowEvent},
-    render_data::{InstanceHandle, InstanceType, MeshHandle, RenderData, RenderDataConfig},
+    render_data::{InstanceHandle, InstanceType, MeshHandle, RenderData},
     renderer::scene::Scene,
 };
 
@@ -26,6 +28,7 @@ pub use pipeline_library::PipelineLibrary;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DeviceFeaturePlan {
     hard: wgpu::Features,
@@ -33,6 +36,7 @@ struct DeviceFeaturePlan {
     profiling_enabled: bool,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 fn device_feature_plan(profile: bool, supported: wgpu::Features) -> DeviceFeaturePlan {
     let hard = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let profiling = profiler::Profiler::requested_features(profile, supported);
@@ -1290,7 +1294,6 @@ pub struct RendererContext {
 }
 
 pub struct Renderer<T: scene::Scene> {
-    canvas: web_sys::OffscreenCanvas,
     events_chan: Receiver<WindowEvent>,
     context: RendererContext,
     resources: PipelineLibrary,
@@ -2416,7 +2419,6 @@ impl<T: Scene + 'static> Renderer<T> {
         Self::ensure_gltf_pipelines(&mut resources, &context);
 
         Self {
-            canvas,
             events_chan,
             context,
             scene,

@@ -1,3 +1,5 @@
+#![cfg(target_arch = "wasm32")]
+
 use std::sync::mpsc::{self, Sender};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
@@ -5,16 +7,11 @@ use wasm_bindgen::JsCast;
 
 use crate::command_ring::CommandRing;
 use crate::message::WindowEvent;
-#[cfg(target_arch = "wasm32")]
 use crate::platform::web;
-#[cfg(target_arch = "wasm32")]
 use crate::platform::web::worker::MainWorker;
-#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
-#[cfg(target_arch = "wasm32")]
 use web_sys::AddEventListenerOptions;
 
-#[cfg(target_arch = "wasm32")]
 pub struct EventListeners {
     _resize_listener: Closure<dyn FnMut()>,
     _pointer_listener: Closure<dyn FnMut(web_sys::PointerEvent)>,
@@ -24,7 +21,6 @@ pub struct EventListeners {
 }
 
 /// Setup default window event listeners that forward events to the worker thread
-#[cfg(target_arch = "wasm32")]
 pub fn setup_event_listeners(
     worker_chan: &Sender<WindowEvent>,
     canvas: &web_sys::HtmlCanvasElement,
@@ -147,14 +143,12 @@ pub fn setup_event_listeners(
 }
 
 /// Runtime resources required to keep a WASM application running.
-#[cfg(target_arch = "wasm32")]
 pub struct WebAppRuntime {
     worker: MainWorker,
     _event_listeners: EventListeners,
     ring: Box<CommandRing>,
 }
 
-#[cfg(target_arch = "wasm32")]
 impl WebAppRuntime {
     /// Initialize the web worker, canvas ownership, and event listeners.
     pub fn new<T: crate::renderer::scene::Scene + 'static>(

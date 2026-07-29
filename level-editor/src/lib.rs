@@ -1,7 +1,8 @@
+#![cfg(target_arch = "wasm32")]
+
 use ultraviolet::Mat4;
 use wasm_bindgen::prelude::*;
 
-#[cfg(target_arch = "wasm32")]
 use renderer::app_setup::WebAppRuntime;
 use renderer::camera::Camera;
 use renderer::render_data::{InstanceType, MeshCreateInfo, RenderData};
@@ -19,7 +20,6 @@ struct Vertex {
 struct EditorScene {
     uniform_buffers: [wgpu::Buffer; 2],
     bind_groups: [wgpu::BindGroup; 2],
-    bind_group_layouts: [wgpu::BindGroupLayout; 2],
     frame_metadata: FrameMetadata,
     cam: Camera,
 }
@@ -53,7 +53,6 @@ impl renderer::renderer::scene::Scene for EditorScene {
         let mut scene = EditorScene {
             uniform_buffers: [uniform_resource.buffer, camera_resource.buffer],
             bind_groups: [uniform_resource.bind_group, camera_resource.bind_group],
-            bind_group_layouts,
             frame_metadata,
             cam: camera,
         };
