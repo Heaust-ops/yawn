@@ -135,34 +135,17 @@ export async function createRenderGraphEditor(canvas) {
     menu = createAddNodeMenu(canvas.ownerDocument);
     host.attach(root, view);
     await view.whenRendered();
-    return createEditorFacade(root, view, { requestAddNode, destroy });
+    const editorRoot = root,
+      editorView = view;
+    return {
+      getState: () => editorRoot.getState(),
+      onSnapshots: (fn) =>
+        editorRoot.onSnapshots((event) => fn(event.snapshot, event.version)),
+      whenRendered: () => editorView.whenRendered(),
+      destroy,
+    };
   } catch (e) {
     await destroy().catch(() => {});
     throw e;
   }
-}
-
-/** Creates the small application-facing wrapper around an fxnode root and view. */
-export function createEditorFacade(
-  root,
-  view,
-  { requestAddNode = () => null, destroy = async () => {} } = {},
-) {
-  return {
-    getState: () => root.getState(),
-    getSaveData: () => root.getSaveData(),
-    load: async (data) => {
-      await root.load(data);
-      await view.whenRendered();
-    },
-    loadComposition: async (data) => {
-      await root.loadComposition(data);
-      await view.whenRendered();
-    },
-    onSnapshots: (fn) =>
-      root.onSnapshots((event) => fn(event.snapshot, event.version)),
-    requestAddNode,
-    whenRendered: () => view.whenRendered(),
-    destroy,
-  };
 }

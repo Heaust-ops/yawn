@@ -6,7 +6,7 @@ import {
   socketTypes,
 } from "./catalog.js";
 
-export class AuthoringGraphError extends Error {
+class AuthoringGraphError extends Error {
   constructor(code, details = {}) {
     super(code);
     this.name = "AuthoringGraphError";
@@ -53,7 +53,6 @@ const deepFreeze = (value) => {
   return value;
 };
 const sourceMaps = new WeakMap();
-export const getSourceMap = (ir) => sourceMaps.get(ir);
 export const mapAuthoringDiagnostic = (ir, diagnostic) => {
   const details = diagnostic?.details;
   const path = [
@@ -62,7 +61,7 @@ export const mapAuthoringDiagnostic = (ir, diagnostic) => {
     details?.field,
     diagnostic?.field,
   ].find((value) => typeof value === "string");
-  const map = getSourceMap(ir);
+  const map = sourceMaps.get(ir);
   let match;
   if (path && map)
     for (const key of Object.keys(map))
