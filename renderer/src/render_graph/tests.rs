@@ -49,9 +49,9 @@ pub(crate) fn full_cull_graph() -> Value {
         node("visible", "not", 1, json!({"operandDefault":false}), json!({"operand":input("cull","isFrustumCulled")})),
         node("class", "and", 2, json!({}),
             json!({"inputs":[input("bits","bit0")[0].clone(),input("visible","value")[0].clone()]})),
-        node("pipeline", "gltf_standard", 1,
-            json!({"drawOrder":0,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
-            json!({"mesh":input("mesh","mesh"),"predicate":input("class","value"),"colorTarget":input("color","texture"),"depthTarget":input("depth","texture")})),
+        node("pipeline", "gltf_standard", 2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
+            json!({"mesh":input("mesh","mesh"),"predicate":input("class","value"),"color":input("color","texture"),"depth":input("depth","texture")})),
         node("frame", "frame_out", 3,
             json!({"surfaceFormat":"preferred","hdrEnabled":true,"toneMapper":"aces","exposureStops":0,
                 "outputTransfer":"srgb","scaleMode":"stretch","filter":"linear","backgroundColor":[0,0,0,1]}),
@@ -69,7 +69,7 @@ fn catalog_exposes_final_mesh_pipeline_and_generic_expression_contracts() {
         "gltf_standard_double_sided",
     ] {
         let contract = contract(key).unwrap();
-        assert_eq!(contract.version, 1);
+        assert_eq!(contract.version, 2);
         assert!(contract.is_raster_draw());
     }
     assert_eq!(
@@ -189,7 +189,7 @@ fn msaa_resolve_can_feed_fullscreen_and_default_depth_inherits_four_samples() {
     value["nodes"][8]["inputs"]
         .as_object_mut()
         .unwrap()
-        .remove("depthTarget");
+        .remove("depth");
     value["nodes"]
         .as_array_mut()
         .unwrap()
@@ -251,7 +251,7 @@ fn msaa_resolve_accepts_default_color_inferred_from_authored_depth() {
     value["nodes"][8]["inputs"]
         .as_object_mut()
         .unwrap()
-        .remove("colorTarget");
+        .remove("color");
 
     let graph = compile_value(value).unwrap();
     let (resolve_descriptor, source_resource) = graph
@@ -369,37 +369,39 @@ fn pipeline_predicate_defaults_true_and_expression_edges_are_validated() {
 }
 
 #[test]
-fn raster_executors_preserve_identity_and_signed_draw_order() {
-    for (key, draw_order) in [
-        ("ground_plane", i32::MIN),
-        ("gltf_standard", 0),
-        ("gltf_standard_double_sided", i32::MAX),
-    ] {
-        let mut graph = full_cull_graph();
-        graph["nodes"][8]["executor"] = json!({"key":key,"version":1});
-        graph["nodes"][8]["parameters"]["drawOrder"] = json!(draw_order);
-        let compiled = compile_value(graph).unwrap();
-        let execution = compiled
-            .executions
-            .iter()
-            .find(|e| e.id == "pipeline")
-            .unwrap();
-        assert_eq!(execution.executor.key, key);
-        assert_eq!(execution.executor.version, 1);
-        assert!(matches!(
-            execution.parameters,
-            NormalizedParameters::Raster { draw_order: value, .. } if value == draw_order
-        ));
-    }
-}
-
-#[test]
 fn raster_executors_reject_removed_pipeline_parameter() {
     let mut graph = full_cull_graph();
     graph["nodes"][8]["parameters"]["pipeline"] = json!("gltf_standard");
     let error = compile_value(graph).unwrap_err();
     assert_eq!(error.code, "GRAPH_PARAMETERS_INVALID");
     assert_eq!(error.details["path"], "nodes[8].parameters");
+}
+
+#[test]
+fn raster_contract_rejects_legacy_versions_parameters_and_sockets() {
+    let mut old_version = full_cull_graph();
+    old_version["nodes"][8]["executor"]["version"] = json!(1);
+    let error = compile_value(old_version).unwrap_err();
+    assert_eq!(error.code, "GRAPH_EXECUTOR_VERSION_UNSUPPORTED");
+    assert_eq!(error.details["path"], "nodes[8].executor.version");
+
+    let removed_parameter = ["draw", "Order"].concat();
+    let mut old_parameter = full_cull_graph();
+    old_parameter["nodes"][8]["parameters"][&removed_parameter] = json!(0);
+    let error = compile_value(old_parameter).unwrap_err();
+    assert_eq!(error.code, "GRAPH_PARAMETERS_INVALID");
+    assert_eq!(error.details["path"], "nodes[8].parameters");
+
+    for removed_socket in [["color", "Target"], ["depth", "Target"]].map(|parts| parts.concat()) {
+        let mut old_socket = full_cull_graph();
+        old_socket["nodes"][8]["inputs"][&removed_socket] = input("color", "texture");
+        let error = compile_value(old_socket).unwrap_err();
+        assert_eq!(error.code, "GRAPH_UNKNOWN_SOCKET");
+        assert_eq!(
+            error.details["path"],
+            format!("nodes[8].inputs.{removed_socket}")
+        );
+    }
 }
 
 #[test]
@@ -420,9 +422,9 @@ fn sibling_raster_writers_form_one_ordered_physical_pass() {
         node(
             "sibling",
             "ground_plane",
-            1,
-            json!({"drawOrder":1,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
-            json!({"mesh":input("mesh","mesh"),"colorTarget":input("color","texture"),"depthTarget":input("depth","texture")}),
+            2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
+            json!({"mesh":input("mesh","mesh"),"color":input("color","texture"),"depth":input("depth","texture")}),
         ),
     );
     nodes.insert(10, texture("composite", "rgba16_float"));
@@ -471,12 +473,12 @@ fn expression_provenance_rejects_cross_mesh_values() {
 fn implicit_pipeline_graph() -> Value {
     json!({ "schemaVersion": 3, "graphId": "implicit", "revision": 1, "nodes": [
         node("mesh", "mesh", 2, json!({}), json!({})),
-        node("first", "ground_plane", 1,
-            json!({"drawOrder":0,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
+        node("first", "ground_plane", 2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh")})),
-        node("second", "gltf_standard", 1,
-            json!({"drawOrder":1,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
-            json!({"mesh":input("mesh","mesh"),"colorTarget":input("first","color"),"depthTarget":input("first","depth")})),
+        node("second", "gltf_standard", 2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
+            json!({"mesh":input("mesh","mesh"),"color":input("first","color"),"depth":input("first","depth")})),
         node("frame", "frame_out", 3,
             json!({"surfaceFormat":"preferred","hdrEnabled":true,"toneMapper":"aces","exposureStops":0,"outputTransfer":"srgb","scaleMode":"stretch","filter":"linear","backgroundColor":[0,0,0,1]}),
             json!({"color":input("second","color")}))
@@ -486,16 +488,15 @@ fn implicit_pipeline_graph() -> Value {
 fn three_raster_graph() -> Value {
     let mut graph = full_cull_graph();
     let nodes = graph["nodes"].as_array_mut().unwrap();
-    nodes[8]["executor"] = json!({"key":"ground_plane","version":1});
-    nodes[8]["parameters"]["drawOrder"] = json!(20);
+    nodes[8]["executor"] = json!({"key":"ground_plane","version":2});
     nodes.insert(
         9,
         node(
             "standard",
             "gltf_standard",
-            1,
-            json!({"drawOrder":10,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[1,0,0,1],"predicateDefault":true}),
-            json!({"mesh":input("mesh","mesh"),"colorTarget":input("pipeline","color"),"depthTarget":input("pipeline","depth")}),
+            2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[1,0,0,1],"predicateDefault":true}),
+            json!({"mesh":input("mesh","mesh"),"color":input("pipeline","color"),"depth":input("pipeline","depth")}),
         ),
     );
     nodes.insert(
@@ -503,9 +504,9 @@ fn three_raster_graph() -> Value {
         node(
             "double",
             "gltf_standard_double_sided",
-            1,
-            json!({"drawOrder":0,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":0.5,"clearColor":[0,1,0,1],"predicateDefault":true}),
-            json!({"mesh":input("mesh","mesh"),"colorTarget":input("standard","color"),"depthTarget":input("standard","depth")}),
+            2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":0.5,"clearColor":[0,1,0,1],"predicateDefault":true}),
+            json!({"mesh":input("mesh","mesh"),"color":input("standard","color"),"depth":input("standard","depth")}),
         ),
     );
     nodes[11]["inputs"]["color"] = input("double", "color");
@@ -515,8 +516,8 @@ fn three_raster_graph() -> Value {
 fn direct_raster_graph(frame_source: &str) -> Value {
     let mut graph = three_raster_graph();
     for node in [8, 9, 10] {
-        graph["nodes"][node]["inputs"]["colorTarget"] = input("color", "texture");
-        graph["nodes"][node]["inputs"]["depthTarget"] = input("depth", "texture");
+        graph["nodes"][node]["inputs"]["color"] = input("color", "texture");
+        graph["nodes"][node]["inputs"]["depth"] = input("depth", "texture");
     }
     graph["nodes"][11]["inputs"]["color"] = input(frame_source, "color");
     graph
@@ -533,7 +534,7 @@ fn direct_raster_outputs_all_observe_the_terminal_cohort() {
                 .iter()
                 .map(|execution| execution.id.as_str())
                 .collect::<Vec<_>>(),
-            ["double", "standard", "pipeline", "frame"]
+            ["pipeline", "standard", "double", "frame"]
         );
         assert_eq!(graph.render_passes[0].executions, [0, 1, 2]);
         let frame_color = match graph.executions[3].kind {
@@ -557,11 +558,8 @@ fn direct_raster_outputs_all_observe_the_terminal_cohort() {
 }
 
 #[test]
-fn equal_draw_order_uses_authored_node_order() {
-    let mut value = direct_raster_graph("pipeline");
-    for node in [8, 9, 10] {
-        value["nodes"][node]["parameters"]["drawOrder"] = json!(7);
-    }
+fn shared_raster_cohort_uses_authored_node_order() {
+    let value = direct_raster_graph("pipeline");
     let graph = compile_value(value).unwrap();
     assert_eq!(
         graph.executions[..3]
@@ -571,6 +569,83 @@ fn equal_draw_order_uses_authored_node_order() {
         ["pipeline", "standard", "double"]
     );
     assert_eq!(graph.render_passes[0].executions, [0, 1, 2]);
+}
+
+#[test]
+fn observed_raster_output_splits_physical_pass() {
+    let mut value = direct_raster_graph("double");
+    let nodes = value["nodes"].as_array_mut().unwrap();
+    nodes.insert(2, texture("reader_target", "rgba16_float"));
+    nodes.insert(3, texture("composite_target", "rgba16_float"));
+
+    let standard = nodes
+        .iter()
+        .position(|node| node["id"] == "standard")
+        .unwrap();
+    nodes.insert(
+        standard,
+        node(
+            "reader",
+            "fullscreen_copy",
+            1,
+            json!({}),
+            json!({
+                "source": input("pipeline", "color"),
+                "colorTarget": input("reader_target", "texture")
+            }),
+        ),
+    );
+    let frame = nodes.iter().position(|node| node["id"] == "frame").unwrap();
+    nodes.insert(
+        frame,
+        node(
+            "composite",
+            "bloom_composite",
+            1,
+            json!({"intensity":1.0}),
+            json!({
+                "source": input("double", "color"),
+                "bloom": input("reader", "color"),
+                "colorTarget": input("composite_target", "texture")
+            }),
+        ),
+    );
+    let frame = nodes.iter_mut().find(|node| node["id"] == "frame").unwrap();
+    frame["inputs"]["color"] = input("composite", "color");
+
+    let graph = compile_value(value).unwrap();
+    assert_eq!(
+        graph
+            .executions
+            .iter()
+            .map(|execution| execution.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "pipeline",
+            "reader",
+            "standard",
+            "double",
+            "composite",
+            "frame"
+        ]
+    );
+    assert_eq!(graph.render_passes[0].executions, [0]);
+    assert_eq!(graph.render_passes[1].executions, [1]);
+    assert_eq!(graph.render_passes[2].executions, [2, 3]);
+    let pipeline_color = graph.executions[0]
+        .outputs
+        .iter()
+        .find(|output| output.socket == "color")
+        .unwrap()
+        .resource;
+    let reader_source = graph.executions[1]
+        .inputs
+        .iter()
+        .find(|input| input.socket == "source")
+        .unwrap()
+        .resource;
+    assert_eq!(reader_source, pipeline_color);
+    assert!(validate_activatable(&graph).is_ok());
 }
 
 #[test]
@@ -758,6 +833,14 @@ fn runtime_rejects_noncanonical_physical_passes() {
     color_attachments[0].resource = first_color;
     assert_runtime_plan_invalid(&wrong_resource);
 
+    let mut wrong_authored_order = graph.clone();
+    let last_raster = wrong_authored_order.render_passes[0].executions.len() - 1;
+    let last_node_index = wrong_authored_order.executions[last_raster].original_node_index;
+    wrong_authored_order.executions[last_raster].original_node_index =
+        wrong_authored_order.executions[0].original_node_index;
+    wrong_authored_order.executions[0].original_node_index = last_node_index;
+    assert_runtime_plan_invalid(&wrong_authored_order);
+
     let mut wrong_lifetime = graph;
     let intermediate = wrong_lifetime.executions[1].outputs[0].resource;
     wrong_lifetime.resources[intermediate as usize].lifetime = Some(Lifetime {
@@ -770,7 +853,7 @@ fn runtime_rejects_noncanonical_physical_passes() {
 #[test]
 fn contract_v4_declares_strict_default_policies() {
     let pipeline = contract("gltf_standard").unwrap();
-    assert_eq!(pipeline.version, 1);
+    assert_eq!(pipeline.version, 2);
     assert_eq!(pipeline.inputs[0].default_policy, InputDefaultPolicy::None);
     assert_eq!(
         pipeline.inputs[1].default_policy,
@@ -853,7 +936,7 @@ fn implicit_chain_is_deterministic_and_loads_successors() {
 
 #[test]
 fn one_missing_attachment_copies_authored_opposite_extent() {
-    for missing in ["colorTarget", "depthTarget"] {
+    for missing in ["color", "depth"] {
         let mut graph = full_cull_graph();
         graph["nodes"][8]["inputs"]
             .as_object_mut()
@@ -887,7 +970,7 @@ fn default_extent_follows_half_surface_and_prior_default_families() {
     half["nodes"][8]["inputs"]
         .as_object_mut()
         .unwrap()
-        .remove("depthTarget");
+        .remove("depth");
     let compiled = compile_value(half).unwrap();
     let default = compiled
         .texture_families
@@ -937,12 +1020,12 @@ fn explicit_attachment_diagnostics_are_socket_specific_then_mutual() {
     let mut color = full_cull_graph();
     color["nodes"][0]["parameters"]["texture"]["format"] = json!("depth32_float");
     let error = compile_value(color).unwrap_err();
-    assert_eq!(error.details["path"], "nodes[8].inputs.colorTarget");
+    assert_eq!(error.details["path"], "nodes[8].inputs.color");
 
     let mut depth = full_cull_graph();
     depth["nodes"][1]["parameters"]["texture"]["format"] = json!("rgba16_float");
     let error = compile_value(depth).unwrap_err();
-    assert_eq!(error.details["path"], "nodes[8].inputs.depthTarget");
+    assert_eq!(error.details["path"], "nodes[8].inputs.depth");
 
     let mut mismatch = full_cull_graph();
     set_extent_ratio(&mut mismatch["nodes"][1], 1, 2);
@@ -953,20 +1036,19 @@ fn explicit_attachment_diagnostics_are_socket_specific_then_mutual() {
 #[test]
 fn descriptor_dependency_cycle_keeps_graph_cycle_priority() {
     let mut graph = implicit_pipeline_graph();
-    graph["nodes"][1]["inputs"]["depthTarget"] = input("second", "depth");
+    graph["nodes"][1]["inputs"]["depth"] = input("second", "depth");
     graph["nodes"][2]["inputs"]
         .as_object_mut()
         .unwrap()
-        .remove("depthTarget");
-    // The backwards authored attachment is normalized by draw order.
-    assert!(compile_value(graph).is_ok());
+        .remove("depth");
+    assert_eq!(compile_value(graph).unwrap_err().code, "GRAPH_CYCLE");
 }
 
 #[test]
 fn known_attachment_error_precedes_cycle() {
     let mut graph = full_cull_graph();
     graph["nodes"][0]["parameters"]["texture"]["format"] = json!("depth32_float");
-    graph["nodes"][8]["inputs"]["depthTarget"] = input("pipeline", "depth");
+    graph["nodes"][8]["inputs"]["depth"] = input("pipeline", "depth");
     let error = compile_value(graph).unwrap_err();
     assert_eq!(error.code, "GRAPH_ATTACHMENT_LINEAGE_INVALID");
     assert_eq!(error.details["path"], "nodes[8].inputs");
@@ -1029,12 +1111,12 @@ fn fullscreen_output_is_a_valid_raster_attachment_root() {
         node(
             "later",
             "ground_plane",
-            1,
-            json!({"drawOrder":1,"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
+            2,
+            json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({
                 "mesh": input("mesh", "mesh"),
-                "colorTarget": input("copy", "color"),
-                "depthTarget": input("pipeline", "depth")
+                "color": input("copy", "color"),
+                "depth": input("pipeline", "depth")
             }),
         ),
     );
@@ -1060,11 +1142,11 @@ fn fullscreen_output_is_a_valid_raster_attachment_root() {
 #[test]
 fn known_invalid_fullscreen_target_precedes_source_cycle() {
     let mut graph = implicit_pipeline_graph();
-    graph["nodes"][1]["inputs"]["depthTarget"] = input("second", "depth");
+    graph["nodes"][1]["inputs"]["depth"] = input("second", "depth");
     graph["nodes"][2]["inputs"]
         .as_object_mut()
         .unwrap()
-        .remove("depthTarget");
+        .remove("depth");
     graph["nodes"]
         .as_array_mut()
         .unwrap()
@@ -1327,7 +1409,7 @@ fn runtime_rejects_out_of_range_opposite_default_family_without_panicking() {
         .unwrap()
         .inputs
         .iter()
-        .find(|input| input.socket == "depthTarget")
+        .find(|input| input.socket == "depth")
         .unwrap()
         .resource;
     let out_of_range = graph.texture_families.len() as u32;

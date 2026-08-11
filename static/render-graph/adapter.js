@@ -334,6 +334,7 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
         sockets.set(s.id, {
           node: n.id,
           key: s.key,
+          semanticName: (input ?? descriptor.outputs[s.key]).semanticName ?? s.key,
           direction,
           semanticType: input
             ? input.accepted.types[0]
@@ -350,7 +351,7 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       for (const key of Object.keys(descriptor.inputs)) {
         const authoredDefault = sockets.get(`${n.id}:${key}`).defaultValue;
         if (authoredDefault)
-          parameters[`${key}Default`] = parameterValue(
+          parameters[`${descriptor.inputs[key].semanticName ?? key}Default`] = parameterValue(
             authoredDefault,
             definition.sockets[key].value,
             n.id,
@@ -446,9 +447,9 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       linkSources.set(link.id, linkSource);
       if (!link.muted) {
         incoming.set(link.toSocketId, (incoming.get(link.toSocketId) ?? 0) + 1);
-        (nodes.get(to.node).value.inputs[to.key] ??= []).push({
+        (nodes.get(to.node).value.inputs[to.semanticName] ??= []).push({
           node: from.node,
-          socket: from.key,
+          socket: from.semanticName,
         });
       }
     }
@@ -463,8 +464,9 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
       const item = ordered[wireOrdinal];
       item.value.inputs = Object.fromEntries(
         Object.keys(descriptors[item.value.executor.key].inputs)
-          .filter((key) => Object.hasOwn(item.value.inputs, key))
-          .map((key) => [key, item.value.inputs[key]]),
+          .map((key) => descriptors[item.value.executor.key].inputs[key].semanticName ?? key)
+          .filter((semanticName) => Object.hasOwn(item.value.inputs, semanticName))
+          .map((semanticName) => [semanticName, item.value.inputs[semanticName]]),
       );
       const base = `nodes[${wireOrdinal}]`;
       const nodeSource = { kind: "node", nodeId: item.value.id };
@@ -561,12 +563,13 @@ export function adaptFxNodeSnapshot(raw, revision = 1) {
           socketId: `${item.value.id}:${key}`,
           unconnected: true,
         };
-        paths[`${base}.inputs.${key}`] = source;
+        const semanticName = descriptors[item.value.executor.key].inputs[key].semanticName ?? key;
+        paths[`${base}.inputs.${semanticName}`] = source;
         for (const [index, link] of links.entries()) {
           const linkSource = linkSources.get(link.id);
-          paths[`${base}.inputs.${key}[${index}]`] = linkSource;
-          paths[`${base}.inputs.${key}[${index}].node`] = linkSource;
-          paths[`${base}.inputs.${key}[${index}].socket`] = {
+          paths[`${base}.inputs.${semanticName}[${index}]`] = linkSource;
+          paths[`${base}.inputs.${semanticName}[${index}].node`] = linkSource;
+          paths[`${base}.inputs.${semanticName}[${index}].socket`] = {
             kind: "socket",
             nodeId: link.fromNodeId,
             socketId: link.fromSocketId,

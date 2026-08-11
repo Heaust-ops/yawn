@@ -39,12 +39,12 @@ const scene = (colorTarget, clearColor = [0.015, 0.02, 0.03, 1], heightScale = 1
   node("scene_depth", "texture", texture("depth32_float", 1, heightScale, sampleCount)),
   node("mesh", "mesh"),
   ...classification.nodes,
-  node("ground", "ground_plane", { drawOrder: 0, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.ground, "value"), colorTarget: input(target, "texture"), depthTarget: input("scene_depth", "texture") }),
-  node("pbr", "gltf_standard", { drawOrder: 1, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr, "value"), colorTarget: input(target, "texture"), depthTarget: input("scene_depth", "texture") }),
-  node("pbr_double", "gltf_standard_double_sided", { drawOrder: 2, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr_double, "value"), colorTarget: input(target, "texture"), depthTarget: input("scene_depth", "texture") }),
+  node("ground", "ground_plane", { depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.ground, "value"), color: input(target, "texture"), depth: input("scene_depth", "texture") }),
+  node("pbr", "gltf_standard", { depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr, "value"), color: input(target, "texture"), depth: input("scene_depth", "texture") }),
+  node("pbr_double", "gltf_standard_double_sided", { depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor, predicateDefault: true }, { mesh: input("mesh", "mesh"), predicate: input(classification.classes.pbr_double, "value"), color: input(target, "texture"), depth: input("scene_depth", "texture") }),
 ];
 };
-const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 3, graphId, revision: 3, nodes });
+const graph = (graphId, nodes) => Object.freeze({ schemaVersion: 3, graphId, revision: 4, nodes });
 const direct = (graphId, clearColor) => graph(graphId, [
   node("ldr", "texture", texture("rgba8_unorm")),
   ...scene("ldr", clearColor),

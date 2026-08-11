@@ -861,6 +861,17 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                 format!("renderPasses[{pass_index}]"),
             ));
         }
+        if matches!(pass.kind, PhysicalRenderPassKind::Texture { .. })
+            && pass.executions.windows(2).any(|members| {
+                graph.executions[members[0] as usize].original_node_index
+                    >= graph.executions[members[1] as usize].original_node_index
+            })
+        {
+            return Err(invalid(
+                "raster pass members are not in authored node order",
+                format!("renderPasses[{pass_index}].executions"),
+            ));
+        }
     }
     if expected_execution != graph.executions.len() {
         return Err(invalid(
@@ -890,27 +901,6 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
             "physical render pass plan is not canonical",
             "renderPasses",
         ));
-    }
-    for (pass_index, pass) in graph.render_passes.iter().enumerate() {
-        if !matches!(pass.kind, PhysicalRenderPassKind::Texture { .. }) {
-            continue;
-        }
-        let mut previous = None;
-        for &member in &pass.executions {
-            let execution = &graph.executions[member as usize];
-            let NormalizedParameters::Raster { draw_order, .. } = &execution.parameters else {
-                previous = None;
-                continue;
-            };
-            let key = (*draw_order, execution.original_node_index);
-            if previous.is_some_and(|value| value > key) {
-                return Err(invalid(
-                    "raster pass members are not in canonical draw order",
-                    format!("renderPasses[{pass_index}].executions"),
-                ));
-            }
-            previous = Some(key);
-        }
     }
     let execution_pass: Vec<u32> = graph
         .render_passes
@@ -1020,51 +1010,26 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                         format!("executions[{i}].inputs"),
                     ));
                 }
-                let consumer_contract =
-                    contract(&execution.executor.key).expect("supported executor has contract");
-                let is_attachment = consumer_contract
+                let producer_execution = &graph.executions[producer as usize];
+                let input_contract = contract(&execution.executor.key)
+                    .expect("supported executor has contract")
                     .inputs
                     .iter()
-                    .find(|candidate| candidate.name == input.socket)
-                    .is_some_and(|candidate| {
+                    .find(|candidate| candidate.name == input.socket);
+                if matches!(execution.kind, ExecutionKind::RasterDraw)
+                    && matches!(producer_execution.kind, ExecutionKind::RasterDraw)
+                    && input_contract.is_some_and(|candidate| {
                         matches!(
                             candidate.role,
                             InputRole::ColorTarget { .. } | InputRole::DepthTarget
                         )
-                    });
-                let predecessor = &graph.executions[producer as usize];
-                if is_attachment
-                    && matches!(execution.kind, ExecutionKind::RasterDraw)
-                    && matches!(predecessor.kind, ExecutionKind::RasterDraw)
+                    })
+                    && producer_execution.original_node_index >= execution.original_node_index
                 {
-                    let NormalizedParameters::Raster {
-                        draw_order: predecessor_order,
-                        ..
-                    } = predecessor.parameters
-                    else {
-                        return Err(invalid(
-                            "raster predecessor parameters mismatch",
-                            format!("executions[{producer}].parameters"),
-                        ));
-                    };
-                    let NormalizedParameters::Raster {
-                        draw_order: consumer_order,
-                        ..
-                    } = execution.parameters
-                    else {
-                        return Err(invalid(
-                            "raster execution parameters mismatch",
-                            format!("executions[{i}].parameters"),
-                        ));
-                    };
-                    if (predecessor_order, predecessor.original_node_index)
-                        > (consumer_order, execution.original_node_index)
-                    {
-                        return Err(invalid(
-                            "raster attachment predecessors must have canonical draw order",
-                            format!("executions[{i}].parameters.drawOrder"),
-                        ));
-                    }
+                    return Err(invalid(
+                        "raster attachment predecessors must be in authored node order",
+                        format!("executions[{i}].inputs"),
+                    ));
                 }
             }
         }
@@ -1162,7 +1127,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                     })
                     && contract(&owner_executions[0].executor.key)
                         .is_some_and(Contract::is_raster_draw)
-                    && owner_executions[0].executor.version == 1
+                    && owner_executions[0].executor.version == 2
                     && graph
                         .executions
                         .iter()
@@ -1189,9 +1154,9 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                     && owner_input_ok
                     && socket
                         == if *role == CompilerTextureRole::ColorTarget {
-                            "colorTarget"
+                            "color"
                         } else {
-                            "depthTarget"
+                            "depth"
                         }
             }
             (
@@ -1270,9 +1235,9 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                     )
                 })?;
             let opposite_socket = if *role == CompilerTextureRole::ColorTarget {
-                "depthTarget"
+                "depth"
             } else {
-                "colorTarget"
+                "color"
             };
             let opposite_resource = owner
                 .inputs
@@ -1752,7 +1717,6 @@ pub fn prepare_runtime_plan(
             continue;
         }
         let NormalizedParameters::Raster {
-            draw_order: _,
             clear_depth,
             clear_color,
             ..
@@ -1801,7 +1765,7 @@ pub fn prepare_runtime_plan(
             mesh_input.socket.as_str(),
             color_input.socket.as_str(),
             depth_input.socket.as_str(),
-        ] != ["mesh", "colorTarget", "depthTarget"]
+        ] != ["mesh", "color", "depth"]
         {
             return Err(invalid(
                 "pipeline input sockets mismatch",

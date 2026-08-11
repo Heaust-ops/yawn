@@ -221,7 +221,6 @@ pub enum NormalizedParameters {
         defaults: Vec<TypedLiteral>,
     },
     Raster {
-        draw_order: i32,
         depth_compare: CompareFunction,
         depth_write_enabled: bool,
         clear_depth: f32,

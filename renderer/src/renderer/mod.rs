@@ -2091,7 +2091,6 @@ impl<T: Scene + 'static> Renderer<T> {
                         })
                         .transpose()?;
                     let NormalizedParameters::Raster {
-                        draw_order: _,
                         depth_compare,
                         depth_write_enabled,
                         ..

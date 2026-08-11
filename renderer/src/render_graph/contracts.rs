@@ -146,13 +146,8 @@ const TEXTURE_O: &[OutputSocketContract] = &[o("texture", Texture)];
 const RASTER_I: &[InputSocketContract] = &[
     i("mesh", MeshData, R, InputRole::SemanticRead),
     i("predicate", Bool, O, InputRole::Expression),
-    i(
-        "colorTarget",
-        Texture,
-        O,
-        InputRole::ColorTarget { location: 0 },
-    ),
-    i("depthTarget", Texture, O, InputRole::DepthTarget),
+    i("color", Texture, O, InputRole::ColorTarget { location: 0 }),
+    i("depth", Texture, O, InputRole::DepthTarget),
 ];
 const RASTER_O: &[OutputSocketContract] = &[o("color", Texture), o("depth", Texture)];
 const CULL_I: &[InputSocketContract] = &[
@@ -207,11 +202,11 @@ pub static CONTRACTS: &[Contract] = &[
     c!("mesh", 2, Source, NONE_I, MESH_O, false, None),
     c!("texture", 2, Source, NONE_I, TEXTURE_O, false, None),
     c!("frustum_cull", 2, Expression, CULL_I, CULL_O, false, None),
-    c!("ground_plane", 1, Render, RASTER_I, RASTER_O, false, None),
-    c!("gltf_standard", 1, Render, RASTER_I, RASTER_O, false, None),
+    c!("ground_plane", 2, Render, RASTER_I, RASTER_O, false, None),
+    c!("gltf_standard", 2, Render, RASTER_I, RASTER_O, false, None),
     c!(
         "gltf_standard_double_sided",
-        1,
+        2,
         Render,
         RASTER_I,
         RASTER_O,

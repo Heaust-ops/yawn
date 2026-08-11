@@ -22,7 +22,6 @@ struct CullParameters {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RasterParameters {
-    draw_order: i32,
     depth_compare: CompareFunction,
     depth_write_enabled: bool,
     clear_depth: f32,
@@ -770,7 +769,6 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 ));
             }
             NormalizedParameters::Raster {
-                draw_order: p.draw_order,
                 depth_compare: p.depth_compare,
                 depth_write_enabled: p.depth_write_enabled,
                 clear_depth: p.clear_depth,
@@ -1138,33 +1136,43 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
     }
 
-    // Preserve authored, non-normalized dataflow before attachment normalization. It
-    // is used both to diagnose impossible draw-order normalization and to find
-    // readers which must finish before an attachment version is overwritten.
-    let ordinary_edges: Vec<_> = edges
-        .iter()
-        .filter(|edge| !is_normalizable_target(edge))
-        .cloned()
-        .collect();
-    let mut target_consumers = HashMap::<OutputKey, Vec<usize>>::new();
+    // Preserve authored readers that must finish before an attachment version is overwritten.
     let mut ordinary_consumers = HashMap::<OutputKey, Vec<usize>>::new();
     for edge in &edges {
         let key = OutputKey(edge.from_node, edge.producer_output_ordinal);
-        if is_normalizable_target(edge) {
-            target_consumers.entry(key).or_default().push(edge.to_node);
-        } else if is_exact_reader(edge) && provisional_live.contains(&edge.to_node) {
+        if !is_normalizable_target(edge)
+            && is_exact_reader(edge)
+            && provisional_live.contains(&edge.to_node)
+        {
             ordinary_consumers
                 .entry(key)
                 .or_default()
                 .push(edge.to_node);
         }
     }
-    let observation_cuts: HashSet<_> = target_consumers
-        .keys()
-        .filter(|key| ordinary_consumers.contains_key(key))
-        .copied()
+    let authored_depends_on = |consumer: usize, dependency: usize| {
+        let mut seen = vec![false; graph.nodes.len()];
+        let mut pending = vec![consumer];
+        while let Some(node) = pending.pop() {
+            if node == dependency {
+                return true;
+            }
+            if !seen[node] {
+                seen[node] = true;
+                pending.extend(authored_deps[node].iter().copied());
+            }
+        }
+        false
+    };
+    // Attachment normalization may replace an authored raster-to-raster edge,
+    // but it must not erase the ordering constraint expressed by that edge.
+    // A constraint opposite to authored cohort order is therefore reported by
+    // the ordinary cycle detector below.
+    let mut ordering_edges: Vec<_> = edges
+        .iter()
+        .filter(|edge| is_normalizable_target(edge))
+        .map(|edge| (edge.from_node, edge.to_node))
         .collect();
-    let mut ordering_edges = Vec::new();
 
     // Normalize raster attachment versions before liveness. Authored graphs may
     // express a render-pass cohort either as a chain or as direct siblings of
@@ -1188,11 +1196,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             ));
         }
         colors.insert((node, ordinal), 1);
-        let socket = if ordinal == 0 {
-            "colorTarget"
-        } else {
-            "depthTarget"
-        };
+        let socket = if ordinal == 0 { "color" } else { "depth" };
         let root = match bound[node].get(socket).map(|binding| binding.producer) {
             None => AttachmentRoot::CompilerDefault { node, ordinal },
             Some(output)
@@ -1233,18 +1237,21 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             cohorts.entry(root).or_default().push(node);
         }
         for (root, mut members) in cohorts {
-            members.sort_by_key(|&node| {
-                let NormalizedParameters::Raster { draw_order, .. } = params[node] else {
-                    unreachable!()
-                };
-                (draw_order, node)
-            });
+            members.sort_unstable();
             // An observed version ends its aliasing segment. Writers after the
             // cut continue the same physical lineage, but may not replace the
             // version seen by the reader.
             let mut segment_start = 0;
             for position in 0..members.len() {
-                let at_cut = observation_cuts.contains(&OutputKey(members[position], ordinal));
+                let output = OutputKey(members[position], ordinal);
+                let at_cut = members.get(position + 1).is_some_and(|&next_writer| {
+                    ordinary_consumers.get(&output).is_some_and(|readers| {
+                        readers.iter().any(|&reader| {
+                            contracts[reader].fullscreen_policy.is_some()
+                                && !authored_depends_on(reader, next_writer)
+                        })
+                    })
+                });
                 if at_cut || position + 1 == members.len() {
                     let terminal = OutputKey(members[position], ordinal);
                     for &member in &members[segment_start..=position] {
@@ -1263,11 +1270,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
                     segment_start = position + 1;
                 }
             }
-            let socket = if ordinal == 0 {
-                "colorTarget"
-            } else {
-                "depthTarget"
-            };
+            let socket = if ordinal == 0 { "color" } else { "depth" };
             for (position, &member) in members.iter().enumerate() {
                 let target = if position == 0 {
                     match root {
@@ -1290,10 +1293,10 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     // and redirect observations of any cohort member to its terminal version.
     edges.retain(|edge| {
         !(contracts[edge.to_node].is_raster_draw()
-            && (edge.to_socket == "colorTarget" || edge.to_socket == "depthTarget"))
+            && (edge.to_socket == "color" || edge.to_socket == "depth"))
     });
     for &node in &raster_nodes {
-        for (socket, ordinal) in [("colorTarget", 0u16), ("depthTarget", 1u16)] {
+        for (socket, ordinal) in [("color", 0u16), ("depth", 1u16)] {
             let Some(binding) = bound[node].get(socket) else {
                 continue;
             };
@@ -1386,42 +1389,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             stack.extend(deps[i].iter().copied());
         }
     }
-    // A canonical attachment writer edge may not reverse authored ordinary
-    // dataflow. Keep this distinct from generic cycle reporting so authors get
-    // the draw-order parameter which made normalization impossible.
-    let mut ordinary_outgoing = vec![Vec::new(); graph.nodes.len()];
-    for edge in &ordinary_edges {
-        ordinary_outgoing[edge.from_node].push(edge.to_node);
-    }
-    let ordinary_reaches = |from: usize, to: usize| {
-        let mut seen = vec![false; graph.nodes.len()];
-        let mut pending = vec![from];
-        while let Some(node) = pending.pop() {
-            if node == to {
-                return true;
-            }
-            if !seen[node] {
-                seen[node] = true;
-                pending.extend(ordinary_outgoing[node].iter().copied());
-            }
-        }
-        false
-    };
-    let mut draw_order_conflicts: Vec<_> = edges
-        .iter()
-        .filter(|edge| {
-            contracts[edge.from_node].is_raster_draw()
-                && contracts[edge.to_node].is_raster_draw()
-                && matches!(
-                    contracts[edge.to_node].inputs[edge.consumer_input_ordinal as usize].role,
-                    InputRole::ColorTarget { .. } | InputRole::DepthTarget
-                )
-                && ordinary_reaches(edge.to_node, edge.from_node)
-        })
-        .map(|edge| edge.to_node)
-        .collect();
-    draw_order_conflicts.sort_unstable();
-    draw_order_conflicts.dedup();
     // IDs are independent of scheduling: original node order, then contract output order.
     // Source nodes expose only outputs that survived active-edge/liveness analysis;
     // executable nodes retain their complete output shape for runtime lowering.
@@ -1520,16 +1487,16 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         }
         for (socket, role, format, opposite) in [
             (
-                "colorTarget",
+                "color",
                 CompilerTextureRole::ColorTarget,
                 TextureFormat::Rgba16Float,
-                "depthTarget",
+                "depth",
             ),
             (
-                "depthTarget",
+                "depth",
                 CompilerTextureRole::DepthTarget,
                 TextureFormat::Depth32Float,
-                "colorTarget",
+                "color",
             ),
         ]
         .into_iter()
@@ -1572,7 +1539,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             continue;
         }
         let transition_sockets: &[(&str, u16)] = match contracts[i] {
-            ref contract if contract.is_raster_draw() => &[("colorTarget", 0), ("depthTarget", 1)],
+            ref contract if contract.is_raster_draw() => &[("color", 0), ("depth", 1)],
             _ if contracts[i].fullscreen_policy.is_some() => &[("colorTarget", 0)],
             _ => continue,
         };
@@ -1715,9 +1682,9 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             continue;
         }
         if contracts[i].is_raster_draw() {
-            if bound[i].get("colorTarget").map(|b| b.producer)
-                == bound[i].get("depthTarget").map(|b| b.producer)
-                && bound[i].contains_key("colorTarget")
+            if bound[i].get("color").map(|b| b.producer)
+                == bound[i].get("depth").map(|b| b.producer)
+                && bound[i].contains_key("color")
                 || matches!((version_of.get(&OutputKey(i, 0)), version_of.get(&OutputKey(i, 1))), (Some((cf, _, _)), Some((df, _, _))) if cf == df)
             {
                 return Err(error(
@@ -1927,14 +1894,14 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
                 "color attachment is invalid",
-                format!("nodes[{i}].inputs.colorTarget"),
+                format!("nodes[{i}].inputs.color"),
             ));
         }
         if !ok_depth {
             return Err(error(
                 "GRAPH_ILLEGAL_ACCESS",
                 "depth attachment is invalid",
-                format!("nodes[{i}].inputs.depthTarget"),
+                format!("nodes[{i}].inputs.depth"),
             ));
         }
         if let (Some(cd), Some(dd)) = (cd, dd) {
@@ -2091,13 +2058,6 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
     }
 
     // Stable Kahn scheduling is deliberately after resource and access validation.
-    if let Some(&node) = draw_order_conflicts.iter().find(|node| live.contains(node)) {
-        return Err(error(
-            "GRAPH_DRAW_ORDER_CONFLICT",
-            "draw order conflicts with authored dependencies",
-            format!("nodes[{node}].parameters.drawOrder"),
-        ));
-    }
     let mut indegree = vec![0; graph.nodes.len()];
     for &node in &live {
         indegree[node] = edges
@@ -3150,10 +3110,10 @@ pub(crate) fn build_render_passes(
                         .map(|input| input.resource)
                 };
                 let exact = previous.outputs.iter().any(|out| {
-                    out.socket == "color" && Some(out.resource) == target_input("colorTarget")
+                    out.socket == "color" && Some(out.resource) == target_input("color")
                 }) && depth.as_ref().is_none_or(|_| {
                     previous.outputs.iter().any(|out| {
-                        out.socket == "depth" && Some(out.resource) == target_input("depthTarget")
+                        out.socket == "depth" && Some(out.resource) == target_input("depth")
                     })
                 });
                 let compatible = previous_colors.len() == colors.len()

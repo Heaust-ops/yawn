@@ -1,5 +1,5 @@
 export const GRAPH_ID = "authored_gpu_culling";
-export const CATALOG_VERSION = 12;
+export const CATALOG_VERSION = 13;
 const exact = (type) => ({ kind: "exact", types: [type] });
 const i = (type, minimum = 1, authoringType, defaultPolicy = minimum ? "none" : "parameter_literal", maximum = 1) => ({
   accepted: typeof type === "string" ? exact(type) : type,
@@ -7,7 +7,7 @@ const i = (type, minimum = 1, authoringType, defaultPolicy = minimum ? "none" : 
   ...(authoringType ? { authoringType } : {}),
   defaultPolicy,
 });
-const o = (type) => ({ type });
+const o = (type, semanticName) => ({ type, ...(semanticName ? { semanticName } : {}) });
 const expression = (inputs, outputs) => ({
   version: 1,
   execution: "expression",
@@ -66,12 +66,12 @@ const texture = {
 const rasterInputs = () => ({
   mesh: i("mesh_data"),
   predicate: i("bool", 0),
-  colorTarget: i("texture", 0, undefined, "compiler_texture"),
-  depthTarget: i("texture", 0, undefined, "compiler_texture"),
+  "input.color": { ...i("texture", 0, undefined, "compiler_texture"), semanticName: "color" },
+  "input.depth": { ...i("texture", 0, undefined, "compiler_texture"), semanticName: "depth" },
 });
-const rasterOutputs = () => ({ color: o("texture"), depth: o("texture") });
-const rasterParameters = () => ({ drawOrder: 0, depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] });
-const raster = () => ({ version: 1, execution: "render", inputs: rasterInputs(), outputs: rasterOutputs(), parameters: rasterParameters() });
+const rasterOutputs = () => ({ "output.color": o("texture", "color"), "output.depth": o("texture", "depth") });
+const rasterParameters = () => ({ depthCompare: "less_equal", depthWriteEnabled: true, clearDepth: 1, clearColor: [0.015, 0.02, 0.03, 1] });
+const raster = () => ({ version: 2, execution: "render", inputs: rasterInputs(), outputs: rasterOutputs(), parameters: rasterParameters() });
 export const NODE_TITLE_OVERRIDES = Object.freeze({
   ground_plane: "Ground Plane",
   gltf_standard: "glTF Standard",
@@ -379,7 +379,6 @@ const parameterSchemas = {
   mesh: {},
   frustum_cull: { cameraSelection: enumeration("active", ["active"]) },
   ground_plane: {
-    drawOrder: { ...number(0, -2147483648, 2147483647), integer: true },
     depthCompare: enumeration("less_equal", [
       "never",
       "less",
@@ -431,7 +430,7 @@ export const nodeDefinitions = Object.fromEntries(
           Object.entries(c.inputs).map(([n, v]) => [
             n,
             socket(
-              n,
+              v.semanticName ?? n,
               "input",
               v.authoringType ?? v.accepted.types[0],
               v.defaultPolicy === "parameter_literal" ? socketDefault(v.accepted.types[0], defaultForInput(key, n, v.accepted.types[0])) : null,
@@ -442,7 +441,7 @@ export const nodeDefinitions = Object.fromEntries(
         ...Object.fromEntries(
           Object.entries(c.outputs).map(([n, v]) => [
             n,
-            socket(n, "output", v.authoringType ?? v.type),
+            socket(v.semanticName ?? n, "output", v.authoringType ?? v.type),
           ]),
         ),
       },
@@ -483,7 +482,6 @@ export const nodeDefinitions = Object.fromEntries(
 nodeDefinitions.mesh.sockets.localAabb.title = "Local AABB";
 for (const key of Object.keys(NODE_TITLE_OVERRIDES)) {
   for (const item of nodeDefinitions[key].ui) {
-    if (item.parameter === "drawOrder") item.title = "Draw Order";
     if (item.parameter === "clearColor") item.title = "Initial Color";
     if (item.parameter === "clearDepth") item.title = "Initial Depth";
   }

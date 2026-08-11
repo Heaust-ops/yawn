@@ -6,7 +6,7 @@ import { descriptors } from "../static/render-graph/catalog.js";
 test("all presets use current schemas, versions, and one frame output", () => {
   assert.equal(Object.keys(presets.renderGraphPresets).length, 13);
   for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
-    assert.deepEqual([graph.schemaVersion, graph.revision], [3, 3], name);
+    assert.deepEqual([graph.schemaVersion, graph.revision], [3, 4], name);
     assert.equal(new Set(graph.nodes.map((node) => node.id)).size, graph.nodes.length, name);
     assert.equal(graph.nodes.filter((node) => node.executor.key === "frame_out").length, 1, name);
     for (const node of graph.nodes)
@@ -30,7 +30,7 @@ test("presets classify demo-owned enable and material bits through type.words[0]
     assert.deepEqual(byId.pbr_double.inputs.predicate, [{ node: "double_class", socket: "value" }], name);
     for (const pipeline of [byId.ground, byId.pbr, byId.pbr_double]) {
       assert.deepEqual(pipeline.inputs.mesh, [{ node: "mesh", socket: "mesh" }]);
-      assert.equal(pipeline.executor.version, 1);
+      assert.equal(pipeline.executor.version, 2);
     }
   }
 });
@@ -48,11 +48,11 @@ test("culling adds a local-AABB expression to each material predicate", () => {
 test("scene pipelines directly share matching explicit color and depth targets", () => {
   for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
     const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
-    const color = byId.ground.inputs.colorTarget;
-    const depth = byId.ground.inputs.depthTarget;
+    const color = byId.ground.inputs.color;
+    const depth = byId.ground.inputs.depth;
     for (const id of ["ground", "pbr", "pbr_double"]) {
-      assert.deepEqual(byId[id].inputs.colorTarget, color, `${name}:${id}`);
-      assert.deepEqual(byId[id].inputs.depthTarget, depth, `${name}:${id}`);
+      assert.deepEqual(byId[id].inputs.color, color, `${name}:${id}`);
+      assert.deepEqual(byId[id].inputs.depth, depth, `${name}:${id}`);
       assert.equal(["ground", "pbr", "pbr_double"].includes(color[0].node), false, name);
     }
     const colorDescriptor = byId[color[0].node].parameters.texture;

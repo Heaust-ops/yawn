@@ -36,7 +36,7 @@ test("production render graph composition passes fxnode's public validator", asy
       result.ok ? undefined : JSON.stringify(result.issues, null, 2),
     );
     assert.equal(fxNodeComposition.schemaVersion, 2);
-    assert.equal(fxNodeComposition.version, 12);
+    assert.equal(fxNodeComposition.version, 13);
     assert.equal(Object.keys(fxNodeComposition.nodes).length, 44);
     assert.ok(
       Object.values(fxNodeComposition.nodes).every(

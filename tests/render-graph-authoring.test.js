@@ -30,8 +30,8 @@ const authoredLink = (id, from, to = "target", muted = false) => ({
   toNodeId: to, toSocketId: `${to}:inputs`, muted, extensions: {},
 });
 
-test("catalog v12 exposes raster and typed-expression contracts", () => {
-  assert.equal(CATALOG_VERSION, 12);
+test("catalog v13 exposes raster and typed-expression contracts", () => {
+  assert.equal(CATALOG_VERSION, 13);
   assert.deepEqual(semanticCatalog.mesh.outputs, {
     mesh: { type: "mesh_data" }, type: { type: "u32x16" }, localAabb: { type: "local_aabb" },
   });
@@ -39,7 +39,7 @@ test("catalog v12 exposes raster and typed-expression contracts", () => {
   assert.equal(nodeDefinitions.mesh.sockets.localAabb.title, "Local AABB");
   assert.equal(semanticCatalog.pipeline, undefined);
   for (const key of ["ground_plane", "gltf_standard", "gltf_standard_double_sided"]) {
-    assert.equal(semanticCatalog[key].version, 1);
+    assert.equal(semanticCatalog[key].version, 2);
     assert.deepEqual(semanticCatalog[key].inputs.predicate.cardinality, { minimum: 0, maximum: 1 });
   }
   assert.deepEqual(semanticCatalog.and.inputs.inputs.cardinality, { minimum: 0, maximum: 8 });
@@ -66,18 +66,34 @@ test("raster declarations own their defaults and sockets", () => {
   assert.notStrictEqual(nodeDefinitions.ground_plane.parameters.clearColor.default.value,
     nodeDefinitions.gltf_standard.parameters.clearColor.default.value);
   assert.equal("pipeline" in nodeDefinitions.gltf_standard.parameters, false);
+  assert.equal(["draw", "Order"].join("") in nodeDefinitions.gltf_standard.parameters, false);
+  assert.deepEqual(Object.keys(semanticCatalog.gltf_standard.inputs), [
+    "mesh", "predicate", "input.color", "input.depth",
+  ]);
+  assert.deepEqual(Object.keys(semanticCatalog.gltf_standard.outputs), [
+    "output.color", "output.depth",
+  ]);
+  for (const [identity, direction, semanticName] of [
+    ["input.color", "input", "color"],
+    ["output.color", "output", "color"],
+    ["input.depth", "input", "depth"],
+    ["output.depth", "output", "depth"],
+  ]) {
+    assert.equal(nodeDefinitions.gltf_standard.sockets[identity].direction, direction);
+    assert.equal(nodeDefinitions.gltf_standard.sockets[identity].title, semanticName);
+  }
 });
 
 test("current culling fixture uses type-bit predicates and final socket versions", () => {
   const byId = Object.fromEntries(culling.nodes.map((node) => [node.id, node]));
   assert.deepEqual(byId.cull.inputs.localAabb, [{ node: "mesh", socket: "localAabb" }]);
   assert.deepEqual(byId.type_words.inputs.value, [{ node: "mesh", socket: "type" }]);
-  assert.equal(byId.ground.executor.version, 1);
+  assert.equal(byId.ground.executor.version, 2);
   assert.equal(byId.ground.inputs.predicate[0].node, "ground_class");
 });
 
 test("compiler texture sockets expose policy metadata without literal widgets", () => {
-  for (const socket of ["colorTarget", "depthTarget"]) {
+  for (const socket of ["input.color", "input.depth"]) {
     assert.equal(semanticCatalog.gltf_standard.inputs[socket].defaultPolicy, "compiler_texture");
     assert.equal(nodeDefinitions.gltf_standard.sockets[socket].default, undefined);
   }
@@ -117,4 +133,57 @@ test("adapter preserves ordered multisocket links and indexed diagnostics", () =
     details: { path: `nodes[${targetIndex}].inputs.inputs[1].node` },
   });
   assert.equal(diagnostic.source.linkId, "link_b");
+});
+
+test("adapter lowers direction-qualified raster sockets and maps diagnostics", () => {
+  const link = (id, fromNodeId, fromKey, toNodeId, toKey) => ({
+    id,
+    fromNodeId,
+    fromSocketId: `${fromNodeId}:${fromKey}`,
+    toNodeId,
+    toSocketId: `${toNodeId}:${toKey}`,
+    muted: false,
+    extensions: {},
+  });
+  const raw = {
+    graphId: GRAPH_ID,
+    catalogVersion: CATALOG_VERSION,
+    nodes: [
+      authoredNode("texture", "texture"),
+      authoredNode("mesh", "mesh"),
+      authoredNode("raster", "gltf_standard"),
+      authoredNode("target", "frame_out"),
+    ],
+    links: [
+      link("mesh_link", "mesh", "mesh", "raster", "mesh"),
+      link("target_link", "texture", "texture", "raster", "input.color"),
+      link("frame_link", "raster", "output.color", "target", "color"),
+    ],
+    metadata: {},
+    version: 1,
+  };
+
+  const graph = adaptFxNodeSnapshot(raw, 2);
+  const rasterIndex = graph.nodes.findIndex((node) => node.id === "raster");
+  const targetIndex = graph.nodes.findIndex((node) => node.id === "target");
+  assert.deepEqual(graph.nodes[rasterIndex].inputs.color, [
+    { node: "texture", socket: "texture" },
+  ]);
+  assert.deepEqual(graph.nodes[targetIndex].inputs.color, [
+    { node: "raster", socket: "color" },
+  ]);
+  assert.equal(
+    mapAuthoringDiagnostic(graph, {
+      code: "GRAPH_INPUT_CARDINALITY",
+      details: { path: `nodes[${rasterIndex}].inputs.depth` },
+    }).source.socketId,
+    "raster:input.depth",
+  );
+  assert.equal(
+    mapAuthoringDiagnostic(graph, {
+      code: "GRAPH_UNKNOWN_SOCKET",
+      details: { path: `nodes[${targetIndex}].inputs.color[0].socket` },
+    }).source.socketId,
+    "raster:output.color",
+  );
 });
