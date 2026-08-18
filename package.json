@@ -3,6 +3,11 @@
   "author": "ecoricemon",
   "name": "basic",
   "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "addons/*"
+  ],
   "scripts": {
     "dev": "run-s rsw:build dev:watch",
     "dev:watch": "run-p rsw:watch dev:vite",

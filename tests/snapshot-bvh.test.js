@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SnapshotReader, SnapshotProtocolError } from "../static/render-data-snapshot.js";
-import { DerivedBvh } from "../static/bvh-core.js";
-import { RendererClient } from "../static/renderer-client.js";
+import { SnapshotReader, SnapshotProtocolError } from "../packages/yawn-core/src/snapshot.js";
+import { DerivedBvh } from "../addons/mesh-handles/src/bvh-core.js";
+import { YawnCore } from "../packages/yawn-core/src/index.js";
 
 const align16 = value => (value + 15) & ~15;
 const componentCounts = [1, 1, 3, 3, 1, 1, 1, 1, 16, 3, 3, 16];
@@ -108,14 +108,16 @@ class WorkerMock extends EventTarget {
   reply(data) { this.dispatchEvent(new MessageEvent("message", { data })); }
 }
 
-test("renderer pick returns instance metadata handles and exact epoch", async () => {
+test("core picking returns protocol handles and exact epoch", async () => {
   const scene = snapshotFixture();
   const ring = 8192;
   const ringHeader = new Int32Array(scene.memory.buffer, ring, 16);
   ringHeader.set([0x4e574159, 2, 1024, 40]);
   const rendererWorker = new WorkerMock(), bvhWorker = new WorkerMock();
-  const bridge = { memory: scene.memory, ringPtr: ring, worker: rendererWorker, workerFactory: () => bvhWorker, free() {} };
-  const client = new RendererClient(bridge);
+  const bridge = { memory: scene.memory, ringPtr: ring, worker: rendererWorker, pickingWorkerFactory: () => bvhWorker, free() {} };
+  const client = new YawnCore(bridge);
+  rendererWorker.reply({ type: "soa-init", arrays: [] });
+  await client.ready;
   rendererWorker.reply({ type: "snapshot-init", controlPtr: 0, controlVersion: 1, schemaVersion: 2 });
   rendererWorker.reply({ type: "snapshot-published", epoch: 1 });
   const picking = client.pickRay([0, 0, 0], [1, 0, 0]);
@@ -124,8 +126,7 @@ test("renderer pick returns instance metadata handles and exact epoch", async ()
   const result = await picking;
   assert.equal(result.epoch, 1);
   assert.equal(result.hits[0].distance, 2);
-  assert.equal(typeof result.hits[0].instance.setType, "function");
-  assert.equal(result.hits[0].instance.setVisible, undefined);
+  assert.deepEqual(result.hits[0].instance, [10, 3]);
   client.dispose();
   assert.equal(bvhWorker.terminated, true);
 });

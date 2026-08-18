@@ -3,7 +3,7 @@ use std::mem::size_of;
 use bytemuck::{Pod, Zeroable};
 
 use crate::{
-    render_data::{MaterialKey, MeshHandle, PipelineKey},
+    render_data::{MaterialKey, MeshHandle},
     renderer::scene_frame::SceneFramePlan,
 };
 
@@ -18,7 +18,6 @@ pub struct GpuInstance {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrawItem {
-    pub pipeline: PipelineKey,
     pub material: MaterialKey,
     pub mesh: MeshHandle,
     pub indices: std::ops::Range<u32>,
@@ -33,25 +32,6 @@ pub struct GpuLocalAabb {
     pub max: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq, Eq)]
-pub struct DrawSlotMetadata {
-    pub index_count: u32,
-    pub first_index: u32,
-    pub base_vertex: i32,
-    pub instance_index: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq, Eq)]
-pub struct DrawIndexedIndirect {
-    pub index_count: u32,
-    pub instance_count: u32,
-    pub first_index: u32,
-    pub base_vertex: i32,
-    pub first_instance: u32,
-}
-
 #[derive(Default)]
 pub struct GpuScenePlan {
     pub positions: Vec<[f32; 3]>,
@@ -63,21 +43,13 @@ pub struct GpuScenePlan {
     pub draws: Vec<DrawItem>,
     pub local_aabbs: Vec<GpuLocalAabb>,
     pub instance_types: Vec<[u32; 16]>,
-    pub draw_metadata: Vec<DrawSlotMetadata>,
 }
 
 impl GpuScenePlan {
     pub fn build(data: &SceneFramePlan) -> Result<Self, &'static str> {
         let mut p = Self::default();
         let mut meshes: Vec<_> = data.meshes.iter().collect();
-        meshes.sort_by_key(|m| {
-            (
-                m.pipeline.get(),
-                m.material.get(),
-                m.handle.slot(),
-                m.handle.generation(),
-            )
-        });
+        meshes.sort_by_key(|m| (m.material.get(), m.handle.slot(), m.handle.generation()));
         for mesh in meshes {
             let occurrences: Vec<_> = data.mesh_occurrence_indices[mesh.occurrence_range.clone()]
                 .iter()
@@ -152,14 +124,7 @@ impl GpuScenePlan {
                 p.instance_types.push(occurrence.instance_type.words);
                 let base_vertex =
                     i32::try_from(vertex_start).map_err(|_| "base vertex exceeds i32")?;
-                p.draw_metadata.push(DrawSlotMetadata {
-                    index_count: mesh.geometry.index_count,
-                    first_index,
-                    base_vertex,
-                    instance_index,
-                });
                 p.draws.push(DrawItem {
-                    pipeline: mesh.pipeline,
                     material: mesh.material,
                     mesh: mesh.handle,
                     indices: first_index
@@ -191,9 +156,9 @@ pub struct GpuSceneCache {
     pub tangents: BufferSlot,
     pub indices: BufferSlot,
     pub instances: BufferSlot,
-    pub local_aabbs: BufferSlot,
-    pub instance_types: BufferSlot,
-    pub draw_metadata: BufferSlot,
+    pub instance_records: Vec<GpuInstance>,
+    pub local_aabb_records: Vec<GpuLocalAabb>,
+    pub instance_type_records: Vec<[u32; 16]>,
     pub draws: Vec<DrawItem>,
 }
 
@@ -248,9 +213,6 @@ impl GpuSceneCache {
             bytes(&p.tangents)?,
             bytes(&p.indices)?,
             bytes(&p.instances)?.max(size_of::<GpuInstance>() as u64),
-            bytes(&p.local_aabbs)?.max(size_of::<GpuLocalAabb>() as u64),
-            bytes(&p.instance_types)?.max(size_of::<[u32; 16]>() as u64),
-            bytes(&p.draw_metadata)?.max(size_of::<DrawSlotMetadata>() as u64),
         ];
         let slots = [
             &mut self.positions,
@@ -259,9 +221,6 @@ impl GpuSceneCache {
             &mut self.tangents,
             &mut self.indices,
             &mut self.instances,
-            &mut self.local_aabbs,
-            &mut self.instance_types,
-            &mut self.draw_metadata,
         ];
         let usage = [
             wgpu::BufferUsages::VERTEX,
@@ -269,10 +228,7 @@ impl GpuSceneCache {
             wgpu::BufferUsages::VERTEX,
             wgpu::BufferUsages::VERTEX,
             wgpu::BufferUsages::INDEX,
-            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
-            wgpu::BufferUsages::STORAGE,
-            wgpu::BufferUsages::STORAGE,
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::VERTEX,
         ];
         let mut replaced = false;
         for ((slot, &need), use_) in slots.into_iter().zip(&required).zip(usage) {
@@ -289,19 +245,13 @@ impl GpuSceneCache {
             }
         }
         let zero_instance = GpuInstance::zeroed();
-        let zero_aabb = GpuLocalAabb::zeroed();
-        let zero_type = [0u32; 16];
-        let zero_metadata = DrawSlotMetadata::zeroed();
-        let contents: [&[u8]; 9] = [
+        let contents: [&[u8]; 6] = [
             bytemuck::cast_slice(&p.positions),
             bytemuck::cast_slice(&p.normals),
             bytemuck::cast_slice(&p.uvs),
             bytemuck::cast_slice(&p.tangents),
             bytemuck::cast_slice(&p.indices),
             logical_or_zero(&p.instances, &zero_instance),
-            logical_or_zero(&p.local_aabbs, &zero_aabb),
-            logical_or_zero(&p.instance_types, &zero_type),
-            logical_or_zero(&p.draw_metadata, &zero_metadata),
         ];
         let slots = [
             &self.positions,
@@ -310,9 +260,6 @@ impl GpuSceneCache {
             &self.tangents,
             &self.indices,
             &self.instances,
-            &self.local_aabbs,
-            &self.instance_types,
-            &self.draw_metadata,
         ];
         for (s, c) in slots.into_iter().zip(contents) {
             if !c.is_empty() {
@@ -322,6 +269,9 @@ impl GpuSceneCache {
         if replaced {
             self.buffer_epoch = self.buffer_epoch.wrapping_add(1).max(1)
         }
+        self.instance_records = p.instances;
+        self.local_aabb_records = p.local_aabbs;
+        self.instance_type_records = p.instance_types;
         self.draws = p.draws;
         self.revision = Some(data.revision);
         Ok(())
@@ -367,33 +317,14 @@ mod tests {
         assert_eq!(size_of::<GpuInstance>(), 112);
         assert_eq!(size_of::<GpuLocalAabb>(), 32);
         assert_eq!(size_of::<[u32; 16]>(), 64);
-        assert_eq!(size_of::<DrawSlotMetadata>(), 16);
-        assert_eq!(size_of::<DrawIndexedIndirect>(), 20)
-    }
-    #[test]
-    fn command_offset() {
-        let n = 7u64;
-        assert_eq!((3 * n + 2) * 20, 460)
     }
 
     #[test]
-    fn empty_traversal_records_have_exact_zero_floors() {
+    fn empty_instance_buffer_has_an_exact_zero_floor() {
         assert_eq!(
             logical_or_zero::<GpuInstance>(&[], &GpuInstance::zeroed()),
             [0; 112]
         );
-        assert_eq!(
-            logical_or_zero::<GpuLocalAabb>(&[], &GpuLocalAabb::zeroed()),
-            [0; 32]
-        );
-        assert_eq!(logical_or_zero::<[u32; 16]>(&[], &[0; 16]), [0; 64]);
-        assert_eq!(
-            logical_or_zero::<DrawSlotMetadata>(&[], &DrawSlotMetadata::zeroed()),
-            [0; 16]
-        );
         assert_eq!(required_buffer_capacity(0, 112, 1024), Ok(112));
-        assert_eq!(required_buffer_capacity(0, 32, 1024), Ok(32));
-        assert_eq!(required_buffer_capacity(0, 64, 1024), Ok(64));
-        assert_eq!(required_buffer_capacity(0, 16, 1024), Ok(16));
     }
 }

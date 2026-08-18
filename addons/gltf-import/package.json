@@ -1,0 +1,7 @@
+{
+  "name": "@yawn/gltf-import",
+  "version": "0.1.0",
+  "description": "glTF fetch worker that uploads directly into Yawn shared SOA memory",
+  "type": "module",
+  "exports": "./src/index.js"
+}

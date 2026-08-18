@@ -9,6 +9,7 @@ pub struct CompiledGraph {
     pub graph_id: String,
     pub revision: u32,
     pub node_count: u32,
+    pub pipelines: PipelineDeclarations,
     pub resources: Vec<CompiledResource>,
     pub executions: Vec<CompiledExecution>,
     pub render_passes: Vec<PhysicalRenderPass>,
@@ -485,6 +486,6 @@ pub enum TextureUsage {
 
 impl CompiledGraph {
     pub fn summary(&self, id: [u32; 2]) -> serde_json::Value {
-        serde_json::json!({"compiledId":id,"graphId":self.graph_id,"revision":self.revision,"schemaVersion":self.schema_version,"nodeCount":self.node_count,"executionCount":self.executions.len(),"physicalPassCount":self.render_passes.len(),"resourceCount":self.resources.len(),"culledNodeCount":self.culled_node_count,"culledResourceCount":self.culled_resource_count,"transientSlotCount":self.transient_slot_count})
+        serde_json::json!({"compiledId":id,"graphId":self.graph_id,"revision":self.revision,"schemaVersion":self.schema_version,"nodeCount":self.node_count,"executionCount":self.executions.len(),"computePassCount":self.pipelines.compute.len(),"physicalPassCount":self.render_passes.len(),"resourceCount":self.resources.len(),"culledNodeCount":self.culled_node_count,"culledResourceCount":self.culled_resource_count,"transientSlotCount":self.transient_slot_count})
     }
 }

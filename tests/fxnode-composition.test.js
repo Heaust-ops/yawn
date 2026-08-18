@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "vite";
-import { fxNodeComposition } from "../static/render-graph/catalog.js";
+import { fxNodeComposition } from "@yawn/render-graph-fxnode/catalog";
 
 test("production render graph composition passes fxnode's public validator", async () => {
   const directory = await mkdtemp(

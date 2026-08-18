@@ -17,13 +17,14 @@ use crate::{
 
 pub mod executors;
 pub mod gpu_scene;
-pub mod instance_traversal;
+pub mod instance_filter;
 pub mod material;
 pub mod pipeline_library;
 pub mod profiler;
 pub mod scene;
 pub mod scene_frame;
 
+use pipeline_library::PipelineKey;
 pub use pipeline_library::PipelineLibrary;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -273,22 +274,6 @@ fn pack_frame_out_uniforms(
     Some(FullscreenUniforms { values })
 }
 
-fn resolve_fullscreen_entry(key: &str) -> Option<&'static str> {
-    match key {
-        "fullscreen_copy" => Some("fs_copy"),
-        "frame_out" => Some("fs_frame_out"),
-        "color_balance" => Some("fs_color_balance"),
-        "exposure_contrast" => Some("fs_exposure_contrast"),
-        "saturation" => Some("fs_saturation"),
-        "channel_mixer" => Some("fs_channel_mixer"),
-        "bloom_extract" => Some("fs_bloom_extract"),
-        "bloom_blur" => Some("fs_bloom_blur"),
-        "bloom_composite" => Some("fs_bloom_composite"),
-        "luminance_edge" => Some("fs_luminance_edge"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod fullscreen_tests {
     use super::*;
@@ -320,46 +305,6 @@ mod fullscreen_tests {
         assert!(
             pack_fullscreen_uniforms("frame_out", &NormalizedParameters::FullscreenCopy).is_none()
         );
-    }
-
-    #[test]
-    fn fullscreen_entries_are_explicit() {
-        assert_eq!(resolve_fullscreen_entry("fullscreen_copy"), Some("fs_copy"));
-        assert_eq!(resolve_fullscreen_entry("frame_out"), Some("fs_frame_out"));
-        assert_eq!(resolve_fullscreen_entry("tone_map"), None);
-        assert_eq!(
-            resolve_fullscreen_entry("color_balance"),
-            Some("fs_color_balance")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("exposure_contrast"),
-            Some("fs_exposure_contrast")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("saturation"),
-            Some("fs_saturation")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("channel_mixer"),
-            Some("fs_channel_mixer")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("bloom_extract"),
-            Some("fs_bloom_extract")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("bloom_blur"),
-            Some("fs_bloom_blur")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("bloom_composite"),
-            Some("fs_bloom_composite")
-        );
-        assert_eq!(
-            resolve_fullscreen_entry("luminance_edge"),
-            Some("fs_luminance_edge")
-        );
-        assert_eq!(resolve_fullscreen_entry("unknown"), None);
     }
 
     fn surface(format: wgpu::TextureFormat) -> RuntimeSurfaceContract {
@@ -800,7 +745,7 @@ mod fullscreen_tests {
                 .iter()
                 .all(|v| v.is_finite()));
         }
-        // Both WGSL balance branches are neutral on nonnegative RGB with neutral controls.
+        // Both balance branches are neutral on nonnegative RGB with neutral controls.
         let lgg = c; // lift=0/color=1, gamma=1/color=1, gain=1/color=1
         let ops = c; // offset=0/color=1, power=1/color=1, slope=1/color=1
         assert_eq!(lgg, c);
@@ -815,8 +760,8 @@ struct GpuTextureSlot {
 
 enum PreparedExecution {
     Pipeline {
-        base: crate::render_data::PipelineKey,
-        predicate_ordinal: u32,
+        base: PipelineKey,
+        predicate: crate::render_graph::ExprId,
         variant: wgpu::RenderPipeline,
     },
     Fullscreen {
@@ -826,11 +771,18 @@ enum PreparedExecution {
     },
 }
 
+struct PreparedCompute {
+    name: String,
+    pipeline: wgpu::ComputePipeline,
+    dispatch: [u32; 3],
+}
+
 struct ActiveCompiledGraph {
     id: crate::render_graph::CompiledGraphId,
     graph: crate::render_graph::CompiledGraph,
     runtime: crate::render_graph::RuntimePlan,
     textures: Vec<Vec<GpuTextureSlot>>,
+    compute: Vec<PreparedCompute>,
     executions: Vec<PreparedExecution>,
     _fullscreen_layout: wgpu::BindGroupLayout,
 }
@@ -1033,7 +985,7 @@ mod switch_request_tests {
         let mut graph = crate::render_graph::tests::full_cull_graph();
         graph["graphId"] = serde_json::json!(graph_id);
         graph["revision"] = serde_json::json!(revision);
-        serde_json::to_vec(&graph).unwrap()
+        crate::render_graph::tests::ast_bytes(&graph)
     }
 
     use super::*;
@@ -1133,7 +1085,7 @@ mod switch_request_tests {
         let mut registry = crate::render_graph::Registry::default();
         let mut graph = crate::render_graph::tests::full_cull_graph();
         graph["graphId"] = serde_json::json!("switch");
-        let bytes = serde_json::to_vec(&graph).unwrap();
+        let bytes = crate::render_graph::tests::ast_bytes(&graph);
         let (id, _) = registry.compile(&bytes).unwrap();
         let active = "existing_graph";
         let pending: Option<&str> = None;
@@ -1151,11 +1103,10 @@ mod switch_request_tests {
         assert_eq!(active, "existing_graph");
         assert_eq!(pending, None);
 
-        let invalid_replacement =
-            br#"{"schemaVersion":3,"graphId":"switch","revision":2,"nodes":[],"unexpected":true}"#;
+        let invalid_replacement = b"(yawn-graph 1 (id \"switch\") (revision 2) (pipelines (object (field \"render\" (array)) (field \"compute\" (array)))) (nodes) (unexpected true))";
         assert_eq!(
             registry.compile(invalid_replacement).unwrap_err().code,
-            "GRAPH_JSON_INVALID"
+            "GRAPH_AST_INVALID"
         );
         let stored = registry.get(id).unwrap();
         assert_eq!(stored.revision, 1);
@@ -1296,11 +1247,12 @@ pub struct Renderer<T: scene::Scene> {
     resources: PipelineLibrary,
     scene: T,
     render_data: RenderData,
+    shared_soa: crate::shared_soa::SharedSoaRegistry,
+    shared_soa_init_sent: bool,
     snapshot: crate::shared_snapshot::SharedSnapshot,
     snapshot_init_sent: bool,
     scene_frame: scene_frame::SceneFrameCache,
     gpu_scene: gpu_scene::GpuSceneCache,
-    instance_traversal: Option<instance_traversal::TraversalGpu>,
     materials: material::MaterialResources,
     pub(crate) command_ring: Option<&'static CommandRing>,
     pending_replies: Vec<JsValue>,
@@ -1445,20 +1397,22 @@ impl<T: Scene + 'static> Renderer<T> {
             }
             let outcome: Result<JsValue, &'static str> = (|| match opcode {
                 1 => {
-                    if words[3] > 1 {
+                    if words[4] > 1 {
                         return Err("INVALID_FRAMING");
                     }
-                    let bytes = crate::take_payload(words[2]).ok_or("PAYLOAD_MISSING")?;
+                    let bytes = self
+                        .shared_soa
+                        .read_fixed_bytes(words[2], words[3])
+                        .map_err(|_| "SHARED_UPLOAD_INVALID")?;
                     let imported =
                         crate::gltf::decode_gltf_owned(bytes).map_err(|_| "GLB_INVALID")?;
-                    let pipelines = Self::ensure_gltf_pipelines(&mut self.resources, &self.context);
                     // Build a complete GPU candidate first. Neither the live scene nor
                     // its material epoch changes if image decode/resource creation fails.
                     let prepared_materials = self
                         .materials
                         .prepare(&self.context.device, &self.context.queue, &imported)
                         .map_err(|_| "MATERIAL_INVALID")?;
-                    let installed = install_imported(&mut self.render_data, &imported, pipelines)
+                    let installed = install_imported(&mut self.render_data, &imported)
                         .map_err(|_| "INSTALL_FAILED")?;
                     // RenderData replacement and material publication are adjacent in
                     // this synchronous command, preventing a frame with mixed assets.
@@ -1487,7 +1441,7 @@ impl<T: Scene + 'static> Renderer<T> {
                             (radius * 0.001).max(0.1),
                             (radius * 6.0).max(1.1),
                         );
-                        if words[3] == 1 {
+                        if words[4] == 1 {
                             self.scene.set_camera_look_at(
                                 center + ultraviolet::Vec3::new(0.0, radius * 0.05, 0.0),
                                 center + ultraviolet::Vec3::new(radius, 0.0, 0.0),
@@ -1558,33 +1512,21 @@ impl<T: Scene + 'static> Renderer<T> {
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(js_sys::Array::of2(&h.slot().into(), &h.generation().into()).into())
                 }
-                5 => {
-                    let h = InstanceHandle::from_parts(words[2], words[3]);
-                    let mut m = [[0.; 4]; 4];
-                    for i in 0..16 {
-                        m[i / 4][i % 4] = f32::from_bits(words[4 + i]);
-                    }
-                    self.render_data
-                        .set_instance_transform(h, m)
-                        .map_err(|e| render_data_error_code(&e))?;
-                    Ok(JsValue::UNDEFINED)
-                }
                 6 => {
                     self.render_data
                         .destroy_instance(InstanceHandle::from_parts(words[2], words[3]))
                         .map_err(|e| render_data_error_code(&e))?;
                     Ok(JsValue::UNDEFINED)
                 }
-                10 => {
-                    self.render_data
-                        .set_instance_type(
-                            InstanceHandle::from_parts(words[2], words[3]),
-                            InstanceType {
-                                words: std::array::from_fn(|i| words[4 + i]),
-                            },
-                        )
-                        .map_err(|e| render_data_error_code(&e))?;
-                    Ok(JsValue::UNDEFINED)
+                11 => {
+                    let bytes = crate::take_payload(words[2]).ok_or("PAYLOAD_MISSING")?;
+                    let descriptor = self
+                        .shared_soa
+                        .allocate_json(&bytes, self.render_data.capacities())
+                        .map_err(|_| "SOA_LAYOUT_INVALID")?;
+                    let json =
+                        serde_json::to_string(&descriptor).map_err(|_| "SOA_LAYOUT_INVALID")?;
+                    Ok(js_sys::JSON::parse(&json).map_err(|_| "SOA_LAYOUT_INVALID")?)
                 }
                 _ => Err("UNKNOWN_OPCODE"),
             })();
@@ -1629,28 +1571,6 @@ impl<T: Scene + 'static> Renderer<T> {
         self.context.depth_view = view;
     }
 
-    fn ensure_gltf_pipelines(
-        resources: &mut PipelineLibrary,
-        context: &RendererContext,
-    ) -> [crate::render_data::PipelineKey; 2] {
-        let layout = gpu_scene::vertex_layouts();
-        let culled = resources.get_or_create_pipeline(
-            &context.device,
-            "gltf_standard",
-            &layout,
-            include_str!("../gltf.wgsl"),
-            context.initial_surface_config.format,
-        );
-        let double_sided = resources.get_or_create_pipeline(
-            &context.device,
-            "gltf_standard_double_sided",
-            &layout,
-            include_str!("../gltf.wgsl"),
-            context.initial_surface_config.format,
-        );
-        [culled, double_sided]
-    }
-
     fn plan_compiled(
         &self,
         graph: &crate::render_graph::CompiledGraph,
@@ -1679,6 +1599,31 @@ impl<T: Scene + 'static> Renderer<T> {
     ) -> Result<ActiveCompiledGraph, crate::render_graph::GraphError> {
         use crate::render_graph::*;
         let fail = |message| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", message);
+        let vertex_layouts = gpu_scene::vertex_layouts();
+        let render_declarations: std::collections::HashMap<_, _> = graph
+            .pipelines
+            .render
+            .iter()
+            .map(|declaration| (declaration.name.as_str(), declaration))
+            .collect();
+        let authored_pipelines: std::collections::HashMap<_, _> = graph
+            .pipelines
+            .render
+            .iter()
+            .filter(|declaration| {
+                crate::render_graph::contract(&declaration.name)
+                    .is_some_and(crate::render_graph::Contract::is_raster_draw)
+            })
+            .map(|declaration| {
+                let key = self.resources.get_or_create_authored_pipeline(
+                    &self.context.device,
+                    declaration,
+                    &vertex_layouts,
+                    self.context.initial_surface_config.format,
+                );
+                (declaration.name.clone(), key)
+            })
+            .collect();
         let resolved_pipelines = graph
             .executions
             .iter()
@@ -1687,8 +1632,9 @@ impl<T: Scene + 'static> Renderer<T> {
                 let NormalizedParameters::Raster { .. } = &execution.parameters else {
                     return Ok(None);
                 };
-                self.resources
-                    .find_pipeline(&execution.executor.key)
+                authored_pipelines
+                    .get(&execution.executor.key)
+                    .copied()
                     .map(Some)
                     .ok_or_else(|| {
                         GraphError::at(
@@ -1765,6 +1711,44 @@ impl<T: Scene + 'static> Renderer<T> {
                 ));
             }
         }
+        let compute_layout =
+            self.context
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("graph compute pipeline layout"),
+                    bind_group_layouts: &[],
+                    push_constant_ranges: &[],
+                });
+        let compute = graph
+            .pipelines
+            .compute
+            .iter()
+            .map(|declaration| {
+                let shader =
+                    self.context
+                        .device
+                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some(&declaration.name),
+                            source: wgpu::ShaderSource::Wgsl(declaration.shader.as_str().into()),
+                        });
+                let pipeline =
+                    self.context
+                        .device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(&declaration.name),
+                            layout: Some(&compute_layout),
+                            module: &shader,
+                            entry_point: Some(&declaration.entry),
+                            compilation_options: Default::default(),
+                            cache: None,
+                        });
+                PreparedCompute {
+                    name: declaration.name.clone(),
+                    pipeline,
+                    dispatch: declaration.dispatch,
+                }
+            })
+            .collect();
         let mut textures = Vec::with_capacity(runtime.allocations.classes.len());
         for class in &runtime.allocations.classes {
             let mut gpu_class = Vec::with_capacity(class.slots.len());
@@ -1861,13 +1845,6 @@ impl<T: Scene + 'static> Renderer<T> {
                     bind_group_layouts: &[&fullscreen_layout],
                     push_constant_ranges: &[],
                 });
-        let shader = self
-            .context
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(" fullscreen"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("fullscreen_copy.wgsl").into()),
-            });
         let sampler = self
             .context
             .device
@@ -1974,15 +1951,26 @@ impl<T: Scene + 'static> Renderer<T> {
                             .descriptor
                             .format
                     };
-                    let entry = resolve_fullscreen_entry(&execution.executor.key)
-                        .ok_or_else(|| fail("fullscreen executor mismatch"))?;
+                    let declaration = render_declarations
+                        .get(execution.executor.key.as_str())
+                        .copied()
+                        .ok_or_else(|| fail("fullscreen pipeline declaration missing"))?;
+                    let shader =
+                        self.context
+                            .device
+                            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                                label: Some(&declaration.name),
+                                source: wgpu::ShaderSource::Wgsl(
+                                    declaration.shader.as_str().into(),
+                                ),
+                            });
                     let pipeline = self.context.device.create_render_pipeline(
                         &wgpu::RenderPipelineDescriptor {
                             label: Some(" post pipeline"),
                             layout: Some(&pipeline_layout),
                             vertex: wgpu::VertexState {
                                 module: &shader,
-                                entry_point: Some("vs_main"),
+                                entry_point: Some(&declaration.vertex_entry),
                                 buffers: &[],
                                 compilation_options: Default::default(),
                             },
@@ -1991,7 +1979,7 @@ impl<T: Scene + 'static> Renderer<T> {
                             multisample: Default::default(),
                             fragment: Some(wgpu::FragmentState {
                                 module: &shader,
-                                entry_point: Some(entry),
+                                entry_point: Some(&declaration.fragment_entry),
                                 targets: &[Some(wgpu::ColorTargetState {
                                     format: target_format,
                                     blend: None,
@@ -2137,13 +2125,13 @@ impl<T: Scene + 'static> Renderer<T> {
                         .map_err(|e| GraphError::new("GRAPH_RUNTIME_PLAN_INVALID", e))?;
                     executions.push(PreparedExecution::Pipeline {
                         base,
-                        predicate_ordinal: runtime
+                        predicate: runtime
                             .instance_traversal
                             .as_ref()
                             .and_then(|p| {
                                 p.pipelines.iter().find(|v| v.execution as usize == index)
                             })
-                            .map(|p| p.ordinal)
+                            .map(|p| p.predicate)
                             .ok_or_else(|| fail("pipeline predicate missing"))?,
                         variant,
                     });
@@ -2156,6 +2144,7 @@ impl<T: Scene + 'static> Renderer<T> {
             graph,
             runtime,
             textures,
+            compute,
             executions,
             _fullscreen_layout: fullscreen_layout,
         })
@@ -2387,9 +2376,10 @@ impl<T: Scene + 'static> Renderer<T> {
         let mut render_data =
             RenderData::new(RenderDataConfig::default()).expect("valid render data config");
         let scene = T::setup(&context, &mut resources, &mut render_data);
+        let shared_soa = crate::shared_soa::SharedSoaRegistry::new(render_data.capacities())
+            .expect("default shared SOA layouts are valid");
         let materials = material::MaterialResources::new(&context.device, &context.queue);
         resources.set_material_bind_group_layout(&materials.layout);
-        Self::ensure_gltf_pipelines(&mut resources, &context);
 
         Self {
             events_chan,
@@ -2397,11 +2387,12 @@ impl<T: Scene + 'static> Renderer<T> {
             scene,
             resources,
             render_data,
+            shared_soa,
+            shared_soa_init_sent: false,
             snapshot: crate::shared_snapshot::SharedSnapshot::new(),
             snapshot_init_sent: false,
             scene_frame: Default::default(),
             gpu_scene: Default::default(),
-            instance_traversal: None,
             materials,
             command_ring: None,
             pending_replies: Vec::new(),
@@ -2432,6 +2423,45 @@ impl<T: Scene + 'static> Renderer<T> {
         }
         if !self.drain_commands() {
             return;
+        }
+        let soa_layout_changed = match self
+            .shared_soa
+            .sync_capacities(self.render_data.capacities())
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.post_fatal("SOA_ALLOCATION_FAILED", &error.to_string());
+                return;
+            }
+        };
+        self.shared_soa
+            .synchronize_render_data(&mut self.render_data);
+        if !self.shared_soa_init_sent || soa_layout_changed {
+            let message = js_sys::Object::new();
+            let message_type = if self.shared_soa_init_sent {
+                "soa-layout"
+            } else {
+                "soa-init"
+            };
+            let _ = js_sys::Reflect::set(&message, &"type".into(), &message_type.into());
+            match self.shared_soa.descriptors().and_then(|descriptors| {
+                serde_json::to_string(&descriptors)
+                    .map_err(|_| crate::shared_soa::SharedSoaError::SizeOverflow)
+            }) {
+                Ok(json) => {
+                    if let Ok(descriptors) = js_sys::JSON::parse(&json) {
+                        let _ = js_sys::Reflect::set(&message, &"arrays".into(), &descriptors);
+                        let global =
+                            js_sys::global().unchecked_into::<DedicatedWorkerGlobalScope>();
+                        let _ = global.post_message(&message);
+                        self.shared_soa_init_sent = true;
+                    }
+                }
+                Err(error) => {
+                    self.post_fatal("SOA_ALLOCATION_FAILED", &error.to_string());
+                    return;
+                }
+            }
         }
         let frame_plan = match self.scene_frame.get_or_build(&self.render_data) {
             Ok(plan) => plan,
@@ -2616,40 +2646,6 @@ impl<T: Scene + 'static> Renderer<T> {
         });
         let encode_result = if let Some(active) = rendering_compiled {
             (|| -> Result<(), &'static str> {
-                let plan = active
-                    .runtime
-                    .instance_traversal
-                    .as_ref()
-                    .ok_or("compiled graph instance traversal missing")?;
-                let rebuild = self.instance_traversal.as_ref().is_none_or(|traversal| {
-                    !traversal.matches(
-                        active.id,
-                        plan,
-                        self.gpu_scene.buffer_epoch,
-                        self.gpu_scene.draws.len(),
-                    )
-                });
-                if rebuild {
-                    self.instance_traversal = Some(
-                        instance_traversal::TraversalGpu::create(
-                            &self.context.device,
-                            active.id,
-                            plan,
-                            &self.gpu_scene,
-                        )
-                        .map_err(|error| {
-                            log::error!("instance traversal preparation failed: {error}");
-                            "instance traversal preparation failed"
-                        })?,
-                    );
-                }
-                self.instance_traversal.as_ref().unwrap().encode(
-                    &mut encoder,
-                    &self.context.queue,
-                    planes,
-                    self.gpu_scene.draws.len() as u32,
-                    profile_frame.as_mut(),
-                );
                 executors::encode_compiled(
                     &mut encoder,
                     &texture_view,
@@ -2658,7 +2654,7 @@ impl<T: Scene + 'static> Renderer<T> {
                     &self.gpu_scene,
                     &self.resources,
                     &self.materials,
-                    &self.instance_traversal.as_ref().unwrap().commands,
+                    planes.as_ref(),
                     profile_frame.as_mut(),
                 )
             })()
@@ -2667,10 +2663,6 @@ impl<T: Scene + 'static> Renderer<T> {
                 &mut encoder,
                 &texture_view,
                 &self.context.depth_view,
-                &self.scene,
-                &self.gpu_scene,
-                &self.resources,
-                &self.materials,
                 profile_frame.as_mut(),
             );
             Ok(())

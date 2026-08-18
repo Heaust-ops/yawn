@@ -1,0 +1,7 @@
+{
+  "name": "@yawn/render-graph-ast",
+  "version": "0.1.0",
+  "description": "Canonical Yawn render-graph AST and S-expression codec",
+  "type": "module",
+  "exports": "./src/index.js"
+}

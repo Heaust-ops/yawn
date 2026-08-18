@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { culling } from "../static/render-graph/presets.js";
+import { culling } from "../examples/render-graph-studio/render-graph/presets.js";
 import {
   CATALOG_VERSION, GRAPH_ID, semanticCatalog, nodeDefinitions, descriptors, socketTypes,
-} from "../static/render-graph/catalog.js";
-import { adaptFxNodeSnapshot, mapAuthoringDiagnostic } from "../static/render-graph/adapter.js";
+} from "@yawn/render-graph-fxnode/catalog";
+import { adaptFxNodeSnapshot, mapAuthoringDiagnostic } from "@yawn/render-graph-fxnode";
 
 const authoredNode = (id, typeId) => {
   const definition = nodeDefinitions[typeId];
@@ -123,7 +123,7 @@ test("adapter preserves ordered multisocket links and indexed diagnostics", () =
   };
   const graph = adaptFxNodeSnapshot(raw, 2);
   const targetIndex = graph.nodes.findIndex((node) => node.id === "target");
-  assert.equal(graph.schemaVersion, 3);
+  assert.deepEqual([graph.kind, graph.version, graph.id], ["yawn-render-graph", 1, GRAPH_ID]);
   assert.deepEqual(graph.nodes[targetIndex].inputs.inputs, [
     { node: "source_a", socket: "value" },
     { node: "source_b", socket: "value" },

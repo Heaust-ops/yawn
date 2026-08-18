@@ -101,6 +101,7 @@ toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)"
 echo "Installing Rust toolchain ${toolchain}..."
 rustup toolchain install "$toolchain" --profile minimal \
     --component rust-src \
+    --component rustfmt \
     --target wasm32-unknown-unknown
 
 install_wasm_pack

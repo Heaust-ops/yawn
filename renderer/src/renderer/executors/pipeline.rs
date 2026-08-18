@@ -5,44 +5,6 @@ use crate::renderer::{
 
 use super::super::scene::Scene;
 
-fn encode_scene<'a, T: Scene>(
-    pass: &mut wgpu::RenderPass<'a>,
-    scene: &'a T,
-    gpu: &'a GpuSceneCache,
-    pipelines: &'a PipelineLibrary,
-    materials: &'a MaterialResources,
-) {
-    for (i, bind_group) in scene.bind_groups().iter().enumerate() {
-        pass.set_bind_group(i as u32, bind_group, &[]);
-    }
-    if let (Some(p), Some(n), Some(u), Some(t), Some(i), Some(inst)) = (
-        &gpu.positions.buffer,
-        &gpu.normals.buffer,
-        &gpu.uvs.buffer,
-        &gpu.tangents.buffer,
-        &gpu.indices.buffer,
-        &gpu.instances.buffer,
-    ) {
-        pass.set_vertex_buffer(0, p.slice(..));
-        pass.set_vertex_buffer(1, n.slice(..));
-        pass.set_vertex_buffer(2, u.slice(..));
-        pass.set_vertex_buffer(3, inst.slice(..));
-        pass.set_vertex_buffer(4, t.slice(..));
-        pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
-        for draw in &gpu.draws {
-            pass.set_pipeline(pipelines.get_pipeline(draw.pipeline));
-            if pipelines.requires_material(draw.pipeline) {
-                pass.set_bind_group(2, materials.group(draw.material), &[]);
-            }
-            pass.draw_indexed(
-                draw.indices.clone(),
-                draw.base_vertex,
-                draw.instances.clone(),
-            );
-        }
-    }
-}
-
 pub(crate) fn encode_compiled<T: Scene>(
     encoder: &mut wgpu::CommandEncoder,
     surface: &wgpu::TextureView,
@@ -51,10 +13,24 @@ pub(crate) fn encode_compiled<T: Scene>(
     gpu: &GpuSceneCache,
     pipelines: &PipelineLibrary,
     materials: &MaterialResources,
-    indirect_commands: &wgpu::Buffer,
+    planes: Option<&[[f32; 4]; 6]>,
     mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) -> Result<(), &'static str> {
     use crate::render_graph::{NormalizedColorLoad, NormalizedDepthLoad, StoreOp};
+    for compute in &active.compute {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(&compute.name),
+            timestamp_writes: profile
+                .as_deref_mut()
+                .and_then(|profile| profile.compute_writes(&compute.name)),
+        });
+        pass.set_pipeline(&compute.pipeline);
+        pass.dispatch_workgroups(
+            compute.dispatch[0],
+            compute.dispatch[1],
+            compute.dispatch[2],
+        );
+    }
     let view = |resource: u32| -> Result<&wgpu::TextureView, &'static str> {
         let a = active
             .runtime
@@ -193,10 +169,15 @@ pub(crate) fn encode_compiled<T: Scene>(
                 }
                 PreparedExecution::Pipeline {
                     base,
-                    predicate_ordinal,
+                    predicate,
                     variant,
                     ..
                 } => {
+                    let traversal = active
+                        .runtime
+                        .instance_traversal
+                        .as_ref()
+                        .ok_or("compiled graph instance traversal missing")?;
                     for (i, group) in scene.bind_groups().iter().enumerate() {
                         pass.set_bind_group(i as u32, group, &[]);
                     }
@@ -215,17 +196,30 @@ pub(crate) fn encode_compiled<T: Scene>(
                         pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
                         pass.set_vertex_buffer(3, inst.slice(..));
                         for (draw_index, draw) in gpu.draws.iter().enumerate() {
+                            if !crate::renderer::instance_filter::evaluate(
+                                traversal,
+                                *predicate,
+                                gpu.instance_records
+                                    .get(draw_index)
+                                    .ok_or("instance record missing")?,
+                                gpu.local_aabb_records
+                                    .get(draw_index)
+                                    .ok_or("local aabb record missing")?,
+                                *gpu.instance_type_records
+                                    .get(draw_index)
+                                    .ok_or("instance type record missing")?,
+                                planes,
+                            )? {
+                                continue;
+                            }
                             pass.set_pipeline(variant);
                             if pipelines.requires_material(*base) {
                                 pass.set_bind_group(2, materials.group(draw.material), &[]);
                             }
-                            pass.draw_indexed_indirect(
-                                indirect_commands,
-                                crate::renderer::instance_traversal::command_offset(
-                                    *predicate_ordinal,
-                                    gpu.draws.len(),
-                                    draw_index,
-                                ),
+                            pass.draw_indexed(
+                                draw.indices.clone(),
+                                draw.base_vertex,
+                                draw.instances.clone(),
                             );
                         }
                     }
@@ -236,18 +230,14 @@ pub(crate) fn encode_compiled<T: Scene>(
     Ok(())
 }
 
-pub(crate) fn encode_immediate<T: Scene>(
+pub(crate) fn encode_immediate(
     encoder: &mut wgpu::CommandEncoder,
     color: &wgpu::TextureView,
     depth: &wgpu::TextureView,
-    scene: &T,
-    gpu: &GpuSceneCache,
-    pipelines: &PipelineLibrary,
-    materials: &MaterialResources,
     profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Immediate pipeline pass"),
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("No active render graph"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             depth_slice: None,
             view: color,
@@ -271,7 +261,6 @@ pub(crate) fn encode_immediate<T: Scene>(
             stencil_ops: None,
         }),
         occlusion_query_set: None,
-        timestamp_writes: profile.and_then(|p| p.render_writes("immediate.pipeline")),
+        timestamp_writes: profile.and_then(|p| p.render_writes("no-active-graph")),
     });
-    encode_scene(&mut pass, scene, gpu, pipelines, materials);
 }

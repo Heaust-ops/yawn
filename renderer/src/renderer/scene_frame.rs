@@ -4,14 +4,13 @@ use thiserror::Error;
 
 use crate::render_data::{
     affine_world_aabb, Aabb, GeometryRange, InstanceHandle, InstanceType, MaterialKey, MeshHandle,
-    ModelTransform, NormalMatrix, PipelineKey, RenderData,
+    ModelTransform, NormalMatrix, RenderData,
 };
 
 #[derive(Clone, Debug)]
 pub struct SceneFrameMesh {
     pub handle: MeshHandle,
     pub geometry: GeometryRange,
-    pub pipeline: PipelineKey,
     pub material: MaterialKey,
     pub instance_type: InstanceType,
     pub local_aabb: Aabb,
@@ -115,7 +114,6 @@ impl SceneFramePlan {
             .map(|(dense, (handle, mesh))| SceneFrameMesh {
                 handle,
                 geometry: mesh.geometry,
-                pipeline: mesh.pipeline,
                 material: mesh.material,
                 instance_type: mesh.default_instance_type,
                 local_aabb: mesh.local_aabb,
@@ -168,7 +166,6 @@ mod tests {
             tangents: &[[1., 0., 0., 1.]; 3],
             uvs: &[[0., 0.]; 3],
             indices: &[0, 1, 2],
-            pipeline: PipelineKey::new(0),
             material: crate::render_data::MaterialKey::DEFAULT,
             default_instance_type: instance_type,
             default_transform: IDENTITY_MODEL_TRANSFORM,

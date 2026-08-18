@@ -6,6 +6,11 @@ fn compile_value(value: Value) -> Result<CompiledGraph, GraphError> {
     compile(serde_json::from_value(value).unwrap())
 }
 
+pub(crate) fn ast_bytes(value: &Value) -> Vec<u8> {
+    let graph: Graph = serde_json::from_value(value.clone()).unwrap();
+    super::ast::serialize(&graph).into_bytes()
+}
+
 fn input(node: &str, socket: &str) -> Value {
     json!([{ "node": node, "socket": socket }])
 }

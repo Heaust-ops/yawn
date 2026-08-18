@@ -1,8 +1,20 @@
 use std::{collections::HashMap, num::NonZeroU32};
 
-use crate::render_data::PipelineKey;
-
 use super::DEPTH_FORMAT;
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PipelineKey(u32);
+
+impl PipelineKey {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
 
 /// Identity of a set of bind-group layouts registered with this library.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -127,7 +139,6 @@ pub struct PipelineLibrary {
     default_layout: Option<PipelineLayoutKey>,
     material_layout: Option<PipelineLayoutKey>,
     next_layout: u64,
-    named_bases: HashMap<String, (PipelineKey, RenderPipelineKey)>,
     descriptor_cache: HashMap<RenderPipelineKey, PipelineKey>,
 }
 
@@ -141,7 +152,6 @@ impl PipelineLibrary {
             default_layout: None,
             material_layout: None,
             next_layout: 0,
-            named_bases: HashMap::new(),
             descriptor_cache: HashMap::new(),
         }
     }
@@ -181,11 +191,6 @@ impl PipelineLibrary {
         shader: &str,
         format: wgpu::TextureFormat,
     ) -> RenderPipelineSpec {
-        let (vertex_entry, fragment_entry) = if name == "triangle_colored" {
-            ("v_main", "f_main")
-        } else {
-            ("vs_main", "fs_main")
-        };
         let stage = |entry: &str| OwnedProgrammableStage {
             shader_source: shader.to_owned(),
             entry_point: entry.to_owned(),
@@ -198,7 +203,7 @@ impl PipelineLibrary {
             } else {
                 self.default_layout
             },
-            vertex: stage(vertex_entry),
+            vertex: stage("vs_main"),
             vertex_layouts: layouts
                 .iter()
                 .map(|layout| OwnedVertexBufferLayout {
@@ -207,7 +212,7 @@ impl PipelineLibrary {
                     attributes: layout.attributes.to_vec(),
                 })
                 .collect(),
-            fragment: Some(stage(fragment_entry)),
+            fragment: Some(stage("fs_main")),
             primitive: wgpu::PrimitiveState {
                 cull_mode: (name != "gltf_standard_double_sided").then_some(wgpu::Face::Back),
                 ..Default::default()
@@ -230,7 +235,7 @@ impl PipelineLibrary {
     }
 
     /// Creates or reuses a pipeline solely by its owned descriptor identity.
-    pub fn get_or_create_from_spec(
+    pub(crate) fn get_or_create_from_spec(
         &mut self,
         device: &wgpu::Device,
         spec: &RenderPipelineSpec,
@@ -325,60 +330,31 @@ impl PipelineLibrary {
         pipeline_key
     }
 
-    pub fn create_pipeline(
+    /// Creates a graph-owned scene pipeline from its authored declaration.
+    pub(crate) fn get_or_create_authored_pipeline(
         &mut self,
         device: &wgpu::Device,
-        name: &str,
+        declaration: &crate::render_graph::RenderPipelineDeclaration,
         layouts: &[wgpu::VertexBufferLayout],
-        shader: &str,
-        format: wgpu::TextureFormat,
-    ) -> Result<PipelineKey, String> {
-        let spec = self.compatibility_spec(name, layouts, shader, format);
-        let descriptor = spec.key();
-        if let Some((_, existing)) = self.named_bases.get(name) {
-            return Err(if existing == &descriptor {
-                format!("Pipeline '{name}' already exists")
-            } else {
-                format!("Pipeline '{name}' already exists with a different descriptor")
-            });
-        }
-        let key = self.get_or_create_from_spec(device, &spec, Some(name));
-        self.named_bases.insert(name.to_owned(), (key, descriptor));
-        Ok(key)
-    }
-
-    pub fn find_pipeline(&self, name: &str) -> Option<PipelineKey> {
-        self.named_bases.get(name).map(|v| v.0)
-    }
-    pub fn get_or_create_pipeline(
-        &mut self,
-        device: &wgpu::Device,
-        name: &str,
-        layouts: &[wgpu::VertexBufferLayout],
-        shader: &str,
         format: wgpu::TextureFormat,
     ) -> PipelineKey {
-        let wanted = self.compatibility_spec(name, layouts, shader, format).key();
-        if let Some((key, existing)) = self.named_bases.get(name) {
-            assert_eq!(
-                existing, &wanted,
-                "Pipeline '{name}' requested with a different descriptor"
-            );
-            return *key;
-        }
-        self.create_pipeline(device, name, layouts, shader, format)
-            .unwrap_or_else(|e| panic!("Failed to create pipeline '{name}': {e}"))
-    }
-    pub fn get_pipeline(&self, key: PipelineKey) -> &wgpu::RenderPipeline {
-        &self.pipelines[key.get() as usize]
+        let mut spec =
+            self.compatibility_spec(&declaration.name, layouts, &declaration.shader, format);
+        spec.vertex.entry_point = declaration.vertex_entry.clone();
+        spec.fragment
+            .as_mut()
+            .expect("scene pipelines have fragment stages")
+            .entry_point = declaration.fragment_entry.clone();
+        spec.primitive.cull_mode = (!declaration.double_sided).then_some(wgpu::Face::Back);
+        self.get_or_create_from_spec(device, &spec, Some(&declaration.name))
     }
 
-    pub fn requires_material(&self, key: PipelineKey) -> bool {
+    pub(crate) fn requires_material(&self, key: PipelineKey) -> bool {
         self.material_layout.is_some()
             && self.specs[key.get() as usize].layout == self.material_layout
     }
 
-    pub fn create_target_variant(
+    pub(crate) fn create_target_variant(
         &self,
         device: &wgpu::Device,
         base: PipelineKey,

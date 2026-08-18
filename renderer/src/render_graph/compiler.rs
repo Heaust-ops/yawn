@@ -306,25 +306,7 @@ fn validate_name_grammar(s: &str, path: impl Into<String>) -> Result<(), GraphEr
 }
 
 pub fn parse_and_compile(bytes: &[u8]) -> Result<CompiledGraph, GraphError> {
-    if bytes.len() > MAX_JSON_BYTES {
-        return Err(GraphError::new(
-            "GRAPH_PAYLOAD_TOO_LARGE",
-            "graph payload exceeds 1 MiB",
-        ));
-    }
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| GraphError::new("GRAPH_ENCODING_INVALID", "graph payload is not UTF-8"))?;
-    let probe: serde_json::Value = serde_json::from_str(text)
-        .map_err(|e| GraphError::new("GRAPH_JSON_INVALID", e.to_string()))?;
-    if probe.get("schemaVersion").and_then(|v| v.as_u64()) != Some(3) {
-        return Err(GraphError::new(
-            "GRAPH_SCHEMA_UNSUPPORTED",
-            "schemaVersion must be 3",
-        ));
-    }
-    let graph = serde_json::from_str(text)
-        .map_err(|e| GraphError::new("GRAPH_JSON_INVALID", e.to_string()))?;
-    compile(graph)
+    compile(super::ast::parse(bytes)?)
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
@@ -834,6 +816,7 @@ fn accepts(c: TypeConstraint, ty: SemanticType) -> bool {
 }
 
 pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
+    super::ast::validate_pipeline_declarations(&graph)?;
     if graph.nodes.len() > MAX_EXECUTIONS {
         return Err(error(
             "GRAPH_LIMIT_EXCEEDED",
@@ -3008,6 +2991,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         graph_id: graph.graph_id,
         revision: graph.revision,
         node_count: graph.nodes.len() as u32,
+        pipelines: graph.pipelines,
         resources,
         executions,
         render_passes,

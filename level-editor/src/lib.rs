@@ -1,21 +1,11 @@
 #![cfg(target_arch = "wasm32")]
 
-use ultraviolet::Mat4;
 use wasm_bindgen::prelude::*;
 
-use renderer::app_setup::WebAppRuntime;
 use renderer::camera::Camera;
-use renderer::render_data::{InstanceType, MeshCreateInfo, RenderData};
+use renderer::render_data::RenderData;
 use renderer::renderer as gpu_renderer;
-use renderer::renderer::gpu_scene::vertex_layouts;
 use renderer::renderer::scene::FrameMetadata;
-
-/// Simple vertex format.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    pos: [f32; 3],
-}
 
 struct EditorScene {
     uniform_buffers: [wgpu::Buffer; 2],
@@ -28,7 +18,7 @@ impl renderer::renderer::scene::Scene for EditorScene {
     fn setup(
         renderer_context: &gpu_renderer::RendererContext,
         resources: &mut gpu_renderer::PipelineLibrary,
-        render_data: &mut RenderData,
+        _render_data: &mut RenderData,
     ) -> Self {
         let dimension = ultraviolet::Vec2::new(
             renderer_context.surface_config.width as f32,
@@ -50,21 +40,12 @@ impl renderer::renderer::scene::Scene for EditorScene {
 
         resources.set_bind_group_layouts(&bind_group_layouts);
 
-        let mut scene = EditorScene {
+        EditorScene {
             uniform_buffers: [uniform_resource.buffer, camera_resource.buffer],
             bind_groups: [uniform_resource.bind_group, camera_resource.bind_group],
             frame_metadata,
             cam: camera,
-        };
-
-        scene.create_default_scene(
-            &renderer_context.device,
-            resources,
-            render_data,
-            renderer_context.surface_config.format,
-        );
-
-        scene
+        }
     }
 
     fn frame_metadata_mut(&mut self) -> Option<&mut FrameMetadata> {
@@ -108,116 +89,16 @@ impl renderer::renderer::scene::Scene for EditorScene {
     }
 }
 
-impl EditorScene {
-    /// Ground plane vertex data.
-    const VERTICES: &[Vertex] = &[
-        // First triangle of quad
-        Vertex {
-            pos: [-5.0, 0.0, -5.0],
-        },
-        Vertex {
-            pos: [5.0, 0.0, -5.0],
-        },
-        Vertex {
-            pos: [-5.0, 0.0, 5.0],
-        },
-        // Second triangle of quad
-        Vertex {
-            pos: [5.0, 0.0, -5.0],
-        },
-        Vertex {
-            pos: [5.0, 0.0, 5.0],
-        },
-        Vertex {
-            pos: [-5.0, 0.0, 5.0],
-        },
-    ];
-    // Wind the ground plane so the upward-facing side is front-facing (CCW from
-    // above) to avoid being culled by the default back-face culling.
-    const INDICES: &[u32] = &[0, 2, 1, 3, 5, 4];
-
-    fn create_default_scene(
-        &mut self,
-        device: &wgpu::Device,
-        resources: &mut gpu_renderer::PipelineLibrary,
-        render_data: &mut RenderData,
-        surface_format: wgpu::TextureFormat,
-    ) {
-        let positions: Vec<[f32; 3]> = Self::VERTICES.iter().map(|v| v.pos).collect();
-        // Ground plane normals point upward (Y+)
-        let normals: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]; positions.len()];
-        let tangents: Vec<[f32; 4]> = vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
-        let uvs: &[[f32; 2]] = &[
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ];
-
-        let vertex_layout = vertex_layouts();
-
-        let pipeline_index = resources.get_or_create_pipeline(
-            device,
-            "ground_plane",
-            &vertex_layout,
-            include_str!("./program.wgsl"),
-            surface_format,
-        );
-
-        let scale_factor = 100.0;
-        let scale_matrix = Mat4::from_scale(scale_factor);
-
-        let transform: [[f32; 4]; 4] = scale_matrix.into();
-        render_data
-            .create_mesh(MeshCreateInfo {
-                positions: &positions,
-                normals: &normals,
-                tangents: &tangents,
-                uvs,
-                indices: Self::INDICES,
-                pipeline: pipeline_index,
-                material: renderer::render_data::MaterialKey::DEFAULT,
-                default_instance_type: InstanceType {
-                    words: [1 | 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                },
-                default_transform: transform,
-            })
-            .expect("ground plane geometry is valid");
-    }
-}
-
-/// Entrypoint for the level editor
+/// Start the level editor inside its owning render worker.
 #[wasm_bindgen]
-pub fn main(profile: bool) -> Result<RendererBridge, JsValue> {
+pub fn worker_main(profile: bool) -> u32 {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     wasm_logger::init(wasm_logger::Config::default());
-
-    let runtime = WebAppRuntime::new::<EditorScene>("main-worker", "#canvas0", profile)?;
-    Ok(RendererBridge { runtime })
+    renderer::app_setup::worker_entrypoint::<EditorScene>(profile)
 }
 
-/// Opaque owner of the worker, event listeners, and pinned command ring.
+/// Return this worker's shared WebAssembly memory to messaging clients.
 #[wasm_bindgen]
-pub struct RendererBridge {
-    runtime: renderer::app_setup::WebAppRuntime,
+pub fn worker_memory() -> JsValue {
+    wasm_bindgen::memory()
 }
-
-#[wasm_bindgen]
-impl RendererBridge {
-    #[wasm_bindgen(getter)]
-    pub fn worker(&self) -> web_sys::Worker {
-        web_sys::Worker::clone(&*self.runtime.worker())
-    }
-    #[wasm_bindgen(getter, js_name = ringPtr)]
-    pub fn ring_ptr(&self) -> u32 {
-        self.runtime.ring_ptr()
-    }
-    #[wasm_bindgen(getter)]
-    pub fn memory(&self) -> JsValue {
-        wasm_bindgen::memory()
-    }
-}
-
-renderer::export_worker_entrypoint!();

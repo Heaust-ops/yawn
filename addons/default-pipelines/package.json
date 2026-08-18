@@ -1,0 +1,7 @@
+{
+  "name": "@yawn/default-pipelines",
+  "version": "0.1.0",
+  "description": "Optional graph-authored scene, frame, and compute pipelines for Yawn",
+  "type": "module",
+  "exports": "./src/index.js"
+}

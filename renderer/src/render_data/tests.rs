@@ -14,7 +14,6 @@ fn info() -> MeshCreateInfo<'static> {
         tangents: &TANGENTS,
         uvs: &UVS,
         indices: &INDICES,
-        pipeline: PipelineKey::new(7),
         material: MaterialKey::new(11),
         default_instance_type: InstanceType {
             words: [3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],

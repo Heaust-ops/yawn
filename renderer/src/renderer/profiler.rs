@@ -13,6 +13,7 @@ const SLOT_COUNT: usize = 4;
 const QUERY_COUNT: u32 = (MAX_PROFILE_PASSES * 2) as u32;
 #[cfg(any(target_arch = "wasm32", test))]
 const USED_RESOLVE_SIZE: u64 = QUERY_COUNT as u64 * 8;
+#[cfg(any(target_arch = "wasm32", test))]
 const RESOLVE_SIZE: u64 = USED_RESOLVE_SIZE.next_multiple_of(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

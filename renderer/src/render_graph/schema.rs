@@ -2,16 +2,18 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Graph {
     pub schema_version: u32,
     pub graph_id: String,
     pub revision: u32,
+    #[serde(default)]
+    pub pipelines: PipelineDeclarations,
     pub nodes: Vec<Node>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
     pub id: String,
@@ -19,6 +21,41 @@ pub struct Node {
     pub executor: ExecutorRef,
     pub parameters: serde_json::Value,
     pub inputs: BTreeMap<String, Vec<NodeOutputRef>>,
+}
+
+/// GPU programs shipped with a graph AST and prepared with the graph loadout.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PipelineDeclarations {
+    #[serde(default)]
+    pub render: Vec<RenderPipelineDeclaration>,
+    #[serde(default)]
+    pub compute: Vec<ComputePipelineDeclaration>,
+}
+
+/// A scene render pipeline using Yawn's fixed mesh/instance SOA vertex layout.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RenderPipelineDeclaration {
+    pub name: String,
+    pub shader: String,
+    pub vertex_entry: String,
+    pub fragment_entry: String,
+    #[serde(default)]
+    pub double_sided: bool,
+}
+
+/// A binding-free compute pass dispatched before the graph's render passes.
+///
+/// Bindings are deliberately not implicit: shared SOA bindings will be added as an
+/// explicit AST resource contract rather than inferred from shader source.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ComputePipelineDeclaration {
+    pub name: String,
+    pub shader: String,
+    pub entry: String,
+    pub dispatch: [u32; 3],
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

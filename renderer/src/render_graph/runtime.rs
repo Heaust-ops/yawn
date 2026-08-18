@@ -1656,6 +1656,21 @@ pub fn prepare_runtime_plan(
     limits: Option<&wgpu::Limits>,
 ) -> Result<RuntimePlan, GraphError> {
     validate_canonical_plan(graph)?;
+    if let Some(limits) = limits {
+        for (index, compute) in graph.pipelines.compute.iter().enumerate() {
+            if compute
+                .dispatch
+                .iter()
+                .any(|dimension| *dimension > limits.max_compute_workgroups_per_dimension)
+            {
+                return Err(error(
+                    "GRAPH_RESOURCE_LIMIT",
+                    "compute dispatch exceeds adapter limits",
+                    format!("pipelines.compute[{index}].dispatch"),
+                ));
+            }
+        }
+    }
     if surface.width == 0 || surface.height == 0 {
         return Err(error(
             "GRAPH_SURFACE_INCOMPATIBLE",

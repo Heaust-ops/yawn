@@ -13,7 +13,8 @@ const portalHost = process.env.PUBLIC_URL
   : undefined;
 const serverPort = Number(process.env.PORT) || 8080;
 const wasmSource = path.resolve(__dirname, "level-editor/pkg");
-const wasmDestination = path.resolve(__dirname, "static/level-editor/pkg");
+const exampleRoot = path.resolve(__dirname, "examples/render-graph-studio");
+const wasmDestination = path.resolve(exampleRoot, "level-editor/pkg");
 
 // Vite resolves entry imports before plugin build hooks. Mirror synchronously while
 // loading the config so a clean build always sees the complete generated package.
@@ -45,16 +46,16 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        app: "static/index.html",
+        app: path.resolve(exampleRoot, "index.html"),
       },
     },
     // Relative to 'root'.
-    outDir: "../dist",
+    outDir: "../../dist",
     copyPublicDir: true,
   },
-  // For getting out of index.html from dist/static directory.
-  root: "static",
-  // `static` is source code, not Vite's untransformed public directory. Treating it
+  // Build output stays at the repository root, outside the nested example root.
+  root: exampleRoot,
+  // The example is source code, not Vite's untransformed public directory. Treating it
   // as both makes dev mode reject the generated WASM worker's module imports.
   publicDir: false,
   worker: {
@@ -63,6 +64,39 @@ export default defineConfig({
   resolve: {
     alias: {
       "@fxnode/": `${path.resolve(__dirname, "vendor/fxnode/src")}/`,
+      "@yawn/render-graph-ast": path.resolve(
+        __dirname,
+        "addons/render-graph-ast/src/index.js",
+      ),
+      "@yawn/render-graph-js": path.resolve(
+        __dirname,
+        "addons/render-graph-js/src/index.js",
+      ),
+      "@yawn/render-graph-fxnode/catalog": path.resolve(
+        __dirname,
+        "addons/render-graph-fxnode/src/catalog.js",
+      ),
+      "@yawn/render-graph-fxnode": path.resolve(
+        __dirname,
+        "addons/render-graph-fxnode/src/index.js",
+      ),
+      "@yawn/core/snapshot": path.resolve(
+        __dirname,
+        "packages/yawn-core/src/snapshot.js",
+      ),
+      "@yawn/core": path.resolve(__dirname, "packages/yawn-core/src/index.js"),
+      "@yawn/mesh-handles": path.resolve(
+        __dirname,
+        "addons/mesh-handles/src/index.js",
+      ),
+      "@yawn/gltf-import": path.resolve(
+        __dirname,
+        "addons/gltf-import/src/index.js",
+      ),
+      "@yawn/default-pipelines": path.resolve(
+        __dirname,
+        "addons/default-pipelines/src/index.js",
+      ),
       pkg: path.resolve(__dirname, "level-editor/pkg"),
     },
   },

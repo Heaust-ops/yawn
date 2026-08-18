@@ -1,5 +1,6 @@
-//! Device-free render graph compiler and compiled graph registry.
+//! Device-free render graph AST, compiler, and compiled graph registry.
 
+mod ast;
 mod compiler;
 pub(crate) use compiler::execution_attachments;
 mod contracts;
@@ -9,6 +10,7 @@ mod registry;
 mod runtime;
 mod schema;
 
+pub use ast::{parse as parse_ast, serialize as serialize_ast};
 pub use compiler::{compile, parse_and_compile};
 pub use contracts::*;
 pub use expression::*;
@@ -17,7 +19,7 @@ pub use registry::{CompiledGraphId, Registry};
 pub use runtime::*;
 pub use schema::*;
 
-pub const MAX_JSON_BYTES: usize = 1024 * 1024;
+pub const MAX_AST_BYTES: usize = 1024 * 1024;
 pub const MAX_EXECUTIONS: usize = 1024;
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]

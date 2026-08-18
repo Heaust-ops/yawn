@@ -1,0 +1,10 @@
+{
+  "name": "@yawn/mesh-handles",
+  "version": "0.1.0",
+  "description": "Conventional mesh handles over the Yawn worker and shared-SOA protocol",
+  "type": "module",
+  "exports": "./src/index.js",
+  "dependencies": {
+    "@yawn/core": "0.1.0"
+  }
+}

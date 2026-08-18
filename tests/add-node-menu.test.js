@@ -4,11 +4,11 @@ import {
   addNodeItems,
   moveAddNodeSelection,
   searchAddNodeItems,
-} from "../static/render-graph/add-node-menu.js";
+} from "../examples/render-graph-studio/render-graph/add-node-menu.js";
 import {
   createNodeIdAllocator,
   spawnRequestedNode,
-} from "../static/render-graph/node-spawn.js";
+} from "../examples/render-graph-studio/render-graph/node-spawn.js";
 
 test("add-node model contains all final catalog types in application groups", () => {
   assert.equal(addNodeItems.length, 44);

@@ -5,7 +5,7 @@ use ultraviolet::{Mat4, Vec3};
 
 use crate::render_data::{
     InstanceHandle, InstanceType, MaterialKey, MeshCreateInfo, MeshHandle, ModelTransform,
-    PipelineKey, RenderData, RenderDataError,
+    RenderData, RenderDataError,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -527,7 +527,6 @@ fn decode_gltf_model(mut model: Gltf) -> Result<ImportedScene, ImportError> {
 pub fn install_imported(
     target: &mut RenderData,
     imported: &ImportedScene,
-    pipelines: [PipelineKey; 2],
 ) -> Result<InstalledScene, ImportError> {
     let mut stage = target.replacement_stage()?;
     let mut handles = HashMap::new();
@@ -547,7 +546,6 @@ pub fn install_imported(
             tangents: &geometry.tangents,
             uvs: &geometry.uvs,
             indices: &geometry.indices,
-            pipeline: pipelines[usize::from(geometry.double_sided)],
             material: geometry.material,
             default_instance_type: InstanceType {
                 words: [

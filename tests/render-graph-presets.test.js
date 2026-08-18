@@ -1,23 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import * as presets from "../static/render-graph/presets.js";
-import { descriptors } from "../static/render-graph/catalog.js";
+import * as presets from "../examples/render-graph-studio/render-graph/presets.js";
+import { descriptors } from "@yawn/render-graph-fxnode/catalog";
 
-test("all presets use current schemas, versions, and one frame output", () => {
-  assert.equal(Object.keys(presets.renderGraphPresets).length, 13);
+test("the JSO example is a complete canonical AST with external pipelines", () => {
+  assert.deepEqual(Object.keys(presets.renderGraphPresets), ["jso"]);
   for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
-    assert.deepEqual([graph.schemaVersion, graph.revision], [3, 4], name);
+    assert.deepEqual([graph.kind, graph.version, graph.revision], ["yawn-render-graph", 1, 1], name);
     assert.equal(new Set(graph.nodes.map((node) => node.id)).size, graph.nodes.length, name);
     assert.equal(graph.nodes.filter((node) => node.executor.key === "frame_out").length, 1, name);
     for (const node of graph.nodes)
       assert.equal(node.executor.version, descriptors[node.executor.key].version, `${name}:${node.id}`);
+    assert.deepEqual(graph.pipelines.render.map(({ name }) => name), [
+      "ground_plane", "gltf_standard", "gltf_standard_double_sided", "frame_out",
+    ]);
+    assert.deepEqual(graph.pipelines.compute.map(({ name }) => name), ["initialize_scene"]);
   }
-  const authoredX4 = Object.entries(presets.renderGraphPresets).flatMap(([name, graph]) =>
-    graph.nodes.filter((node) => node.parameters?.texture?.sampleCount === 4)
-      .map((node) => `${name}:${node.id}`));
-  assert.deepEqual(authoredX4, ["msaa:msaa_hdr", "msaa:scene_depth"]);
-  assert.equal(typeof presets.msaa.nodes.find((node) => node.id === "msaa_hdr")
-    .parameters.texture.sampleCount, "number");
 });
 
 test("presets classify demo-owned enable and material bits through type.words[0] predicates", () => {
@@ -35,7 +33,7 @@ test("presets classify demo-owned enable and material bits through type.words[0]
   }
 });
 
-test("culling adds a local-AABB expression to each material predicate", () => {
+test("the example adds a local-AABB expression to each material predicate", () => {
   const byId = Object.fromEntries(presets.culling.nodes.map((node) => [node.id, node]));
   assert.deepEqual(byId.cull.inputs, {
     mesh: [{ node: "mesh", socket: "mesh" }], localAabb: [{ node: "mesh", socket: "localAabb" }],
@@ -45,7 +43,7 @@ test("culling adds a local-AABB expression to each material predicate", () => {
     assert.equal(byId[id].inputs.inputs.at(-1).node, "not_culled");
 });
 
-test("scene pipelines directly share matching explicit color and depth targets", () => {
+test("scene pipelines directly share matching transient color and depth targets", () => {
   for (const [name, graph] of Object.entries(presets.renderGraphPresets)) {
     const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
     const color = byId.ground.inputs.color;

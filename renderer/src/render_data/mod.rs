@@ -26,20 +26,6 @@ pub const IDENTITY_MODEL_TRANSFORM: ModelTransform = [
 pub const IDENTITY_NORMAL_MATRIX: NormalMatrix =
     [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PipelineKey(u32);
-
-impl PipelineKey {
-    pub const fn new(value: u32) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
-
 /// Stable CPU-side identity for a device-independent material.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -91,7 +77,6 @@ pub struct MeshCreateInfo<'a> {
     pub tangents: &'a [[f32; 4]],
     pub uvs: &'a [[f32; 2]],
     pub indices: &'a [u32],
-    pub pipeline: PipelineKey,
     pub material: MaterialKey,
     pub default_instance_type: InstanceType,
     pub default_transform: ModelTransform,
@@ -107,7 +92,6 @@ pub struct CreatedMesh {
 pub struct MeshView {
     pub handle: MeshHandle,
     pub geometry: GeometryRange,
-    pub pipeline: PipelineKey,
     pub material: MaterialKey,
     pub default_instance_type: InstanceType,
     pub local_aabb: Aabb,
@@ -277,7 +261,6 @@ struct MeshSoa {
     vertex_counts: Vec<u32>,
     index_starts: Vec<u32>,
     index_counts: Vec<u32>,
-    pipeline_keys: Vec<PipelineKey>,
     material_keys: Vec<MaterialKey>,
     default_instance_types: Vec<InstanceType>,
     aabb_mins: Vec<[f32; 3]>,
@@ -561,7 +544,6 @@ impl RenderData {
                 index_start: index_range.start,
                 index_count,
             },
-            info.pipeline,
             info.material,
             info.default_instance_type,
             bounds,
@@ -839,7 +821,6 @@ impl MeshSoa {
             vertex_counts: Vec::new(),
             index_starts: Vec::new(),
             index_counts: Vec::new(),
-            pipeline_keys: Vec::new(),
             material_keys: Vec::new(),
             default_instance_types: Vec::new(),
             aabb_mins: Vec::new(),
@@ -859,7 +840,6 @@ impl MeshSoa {
         reserve_vec(&mut self.vertex_counts, target, "meshes")?;
         reserve_vec(&mut self.index_starts, target, "meshes")?;
         reserve_vec(&mut self.index_counts, target, "meshes")?;
-        reserve_vec(&mut self.pipeline_keys, target, "meshes")?;
         reserve_vec(&mut self.material_keys, target, "meshes")?;
         reserve_vec(&mut self.default_instance_types, target, "meshes")?;
         reserve_vec(&mut self.aabb_mins, target, "meshes")?;
@@ -874,7 +854,6 @@ impl MeshSoa {
         &mut self,
         prepared: PreparedSlot,
         geometry: GeometryRange,
-        pipeline: PipelineKey,
         material: MaterialKey,
         default_instance_type: InstanceType,
         bounds: Aabb,
@@ -885,7 +864,6 @@ impl MeshSoa {
         resize_column(&mut self.vertex_counts, len, 0);
         resize_column(&mut self.index_starts, len, 0);
         resize_column(&mut self.index_counts, len, 0);
-        resize_column(&mut self.pipeline_keys, len, PipelineKey::new(0));
         resize_column(&mut self.material_keys, len, MaterialKey::DEFAULT);
         resize_column(&mut self.default_instance_types, len, InstanceType::ZERO);
         resize_column(&mut self.aabb_mins, len, [0.0; 3]);
@@ -897,7 +875,6 @@ impl MeshSoa {
         self.vertex_counts[index] = geometry.vertex_count;
         self.index_starts[index] = geometry.index_start;
         self.index_counts[index] = geometry.index_count;
-        self.pipeline_keys[index] = pipeline;
         self.material_keys[index] = material;
         self.default_instance_types[index] = default_instance_type;
         self.aabb_mins[index] = bounds.min;
@@ -917,7 +894,6 @@ impl MeshSoa {
                 index_start: self.index_starts[index],
                 index_count: self.index_counts[index],
             },
-            pipeline: self.pipeline_keys[index],
             material: self.material_keys[index],
             default_instance_type: self.default_instance_types[index],
             local_aabb: Aabb {

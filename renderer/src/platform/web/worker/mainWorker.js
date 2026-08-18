@@ -1,8 +1,14 @@
-// Generic worker that imports the app's WASM module relative to the generated pkg folder.
-// Works for any application because the relative depth from this file to pkg is stable.
-import initWasm, { clear_payloads, discard_payload, stage_payload, worker_entrypoint } from "/level-editor/pkg/level_editor.js";
+// The level editor's render worker owns its only WASM and WebGPU runtime.
+import initWasm, {
+  clear_payloads,
+  discard_payload,
+  stage_payload,
+  worker_main,
+  worker_memory,
+  worker_window_event,
+} from "/level-editor/pkg/level_editor.js";
 
-export function listenerReady() {
+function listenerReady() {
   if (state !== "waiting-listener") return;
   state = "replaying";
   for (const queued of pending.splice(0)) route(queued);
@@ -24,22 +30,24 @@ addEventListener("message", async (event) => {
   }
   if (state !== "uninitialized") return;
   state = "initializing";
-  const { wasmModule, workerId, memory, entryPtr } = message;
+  const { canvas, profile } = message;
 
-  console.log(
-    "worker: initializing with WASM module",
-    wasmModule,
-    "id:",
-    workerId,
-  );
-
-  // Initialize WASM with the shared module and memory forwarded from the main thread.
+  // The renderer worker exclusively owns the one WASM instance. Other threads
+  // receive only its shared memory and mutate the published SAB layouts.
   try {
-    api = await initWasm({ module_or_path: wasmModule, memory });
-    state = "waiting-listener";
-    worker_entrypoint(entryPtr);
+    api = await initWasm();
   } catch (error) {
-    fatal("WORKER_INIT_FAILED", String(error));
+    fatal("WORKER_INIT_FAILED", error?.stack || String(error));
+    return;
+  }
+  state = "waiting-listener";
+  pending.push({ type: "canvas", canvas });
+  try {
+    const ringPtr = worker_main(profile);
+    postMessage({ type: "bootstrap", memory: worker_memory(), ringPtr });
+    setTimeout(listenerReady, 0);
+  } catch (error) {
+    fatal("WORKER_ENTRY_FAILED", error?.stack || String(error));
   }
 });
 
@@ -51,6 +59,8 @@ function route(message) {
     postMessage({ type: "payload-ready", id: message.id });
   } else if (message?.type === "payload-release") {
     discard_payload(message.id);
+  } else if (message?.type === "window-event") {
+    worker_window_event(message.kind, message.values);
   }
 }
 
