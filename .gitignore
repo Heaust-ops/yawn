@@ -46,6 +46,7 @@ target/
 # WASM build artifacts
 .rsw/
 static/level-editor/
+docs/.vitepress/cache/
 
 # Amp runtime artifacts
 .amp/in/

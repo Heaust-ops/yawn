@@ -2,5 +2,5 @@ services:
   yawn-examples:
     command: npm run examples
     portal:
-      title: Yawn examples
-      description: Example index and WebGPU render graph studio with hot reload.
+      title: Yawn docs and playgrounds
+      description: VitePress package tutorials and isolated WebGPU playgrounds with hot reload.

@@ -32,18 +32,8 @@ function freshWasmPackage() {
     async buildStart() { await mirror(); },
     async writeBundle() {
       const wasmBuildDestination = path.resolve(buildOutput, "renderer/pkg");
-      const cookbookBuildDestination = path.resolve(buildOutput, "cookbook");
-      await Promise.all([
-        mkdir(wasmBuildDestination, { recursive: true }),
-        mkdir(cookbookBuildDestination, { recursive: true }),
-      ]);
-      await Promise.all([
-        cp(wasmSource, wasmBuildDestination, { recursive: true, force: true }),
-        cp(path.resolve(exampleRoot, "cookbook"), cookbookBuildDestination, {
-          recursive: true,
-          force: true,
-        }),
-      ]);
+      await mkdir(wasmBuildDestination, { recursive: true });
+      await cp(wasmSource, wasmBuildDestination, { recursive: true, force: true });
     },
     configureServer(server) {
       server.watcher.add(wasmSource);
@@ -63,6 +53,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         examples: path.resolve(exampleRoot, "index.html"),
+        playground: path.resolve(exampleRoot, "playground/index.html"),
+        playgroundRunner: path.resolve(exampleRoot, "playground/runner.html"),
         renderGraphStudio: path.resolve(
           exampleRoot,
           "render-graph-studio/index.html",
@@ -130,6 +122,19 @@ export default defineConfig({
     headers: {
       "Cross-Origin-Embedder-Policy": "require-corp",
       "Cross-Origin-Opener-Policy": "same-origin",
+    },
+    proxy: {
+      "/docs": {
+        target: "http://127.0.0.1:5174",
+        changeOrigin: true,
+        ws: true,
+        configure(proxy) {
+          proxy.on("proxyRes", (response) => {
+            response.headers["cross-origin-embedder-policy"] = "require-corp";
+            response.headers["cross-origin-opener-policy"] = "same-origin";
+          });
+        },
+      },
     },
     fs: {
       strict: false,

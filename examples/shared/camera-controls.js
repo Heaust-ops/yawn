@@ -1,8 +1,7 @@
 const MIN_DISTANCE = 0.1;
 const MAX_PITCH = Math.PI / 2 - 0.01;
 
-// The camera is ordinary render data, not a core API. This example maps browser
-// controls straight onto its packed SOA row without sending input messages.
+// Browser controls map straight onto the packed camera SOA row without messages.
 export function installCameraRenderDataControls(core, canvas) {
   const camera = core.array("camera.state");
   const abort = new AbortController();

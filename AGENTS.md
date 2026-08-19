@@ -1,5 +1,6 @@
 # Build, Lint, and Test Commands
-- `npm run examples`: Start the examples index with Vite and WASM hot reload
+- `npm run examples`: Start VitePress docs and WebGPU playgrounds with WASM hot reload
+- `npm run docs:build`: Build the VitePress documentation into `dist/docs/`
 - `npm run build`: Build optimized WASM and JS in `dist/` for development
 - `npm run build-release`: Build optimized WASM and JS for production
 - `cargo check`: Validate Rust sources quickly before full builds

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Yawn Playground Runner</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body, main, canvas { width: 100%; height: 100%; margin: 0; }
+      body { overflow: hidden; background: #080b10; color: #e8edf6; font: 13px Inter, system-ui, sans-serif; }
+      canvas { display: block; background: #080b10; }
+      output { position: fixed; left: 14px; bottom: 14px; max-width: calc(100% - 28px); padding: 8px 11px; border: 1px solid #ffffff18; border-radius: 7px; background: #0d121bea; color: #b9c3d2; box-shadow: 0 8px 28px #0008; }
+      body[data-embed="false"] output { display: none; }
+      body[data-error="true"] output { border-color: #ef795d88; color: #ffb8a6; }
+    </style>
+  </head>
+  <body>
+    <main><canvas id="scene"></canvas><output id="status">Waiting for code…</output></main>
+    <script type="module" src="./runner.js"></script>
+  </body>
+</html>

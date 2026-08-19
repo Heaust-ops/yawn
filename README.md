@@ -43,13 +43,11 @@ loadouts, lifecycle, and transient resource management; conveniences live outsid
 - `addons/gltf-import` — glTF worker that writes format-neutral render-data packets directly to a fixed SOA.
 - `addons/mesh-handles` — conventional mesh, instance, camera, and material objects plus optional BVH picking.
 
-The integration example in `examples/render-graph-studio` consumes every package
-through its public API; no example source or shader lives in core.
-
-The focused recipes in `examples/cookbook` show each addon independently, including
-AST/JSO/FXNode authoring, external render and compute programs, graph activation,
-shared glTF import, mesh instances, custom SOA columns, SAB animation, picking, and
-worker-to-worker use.
+The editable playground and Render Graph Studio under `examples/` consume the
+packages through their public APIs; no example source or shader lives in core.
+Tutorial-style package guides and all focused recipes live under `docs/`, including
+AST/JSO/FXNode authoring, render and compute programs, graph activation, shared glTF
+import, mesh instances, custom SOA columns, SAB animation, picking, and worker use.
 
 Example graph authoring:
 

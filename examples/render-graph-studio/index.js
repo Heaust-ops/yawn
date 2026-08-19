@@ -1,6 +1,7 @@
 import { YawnCore, RendererError } from "@yawn/core";
 import { MeshHandles } from "@yawn/mesh-handles";
-import { installCameraRenderDataControls } from "../cookbook/16-camera-render-data.js";
+import { installCameraRenderDataControls } from "../shared/camera-controls.js";
+import { createWorkerTransport } from "../shared/create-worker-transport.js";
 import { loadDemoLoadout } from "./demo-loadouts.js";
 import { adaptFxNodeSnapshot } from "@yawn/render-graph-fxnode";
 import { createGraphAst } from "@yawn/render-graph-ast";
@@ -38,47 +39,6 @@ const state = {
   compiled: {},
   telemetry: null,
 };
-function createWorkerTransport() {
-  const canvas = document.querySelector("#canvas0");
-  const dpr = devicePixelRatio;
-  canvas.width = Math.round(Math.max(1, canvas.clientWidth) * dpr);
-  canvas.height = Math.round(Math.max(1, canvas.clientHeight) * dpr);
-
-  const worker = new Worker(
-    new URL(
-      "../../renderer/src/platform/web/worker/mainWorker.js",
-      import.meta.url,
-    ),
-    { type: "module", name: "yawn-renderer" },
-  );
-  const abort = new AbortController();
-  const options = { signal: abort.signal };
-  const post = (kind, values) =>
-    worker.postMessage({
-      type: "window-event",
-      kind,
-      values: new Float64Array(values),
-    });
-  addEventListener(
-    "resize",
-    () =>
-      post(0, [
-        Math.max(1, canvas.clientWidth),
-        Math.max(1, canvas.clientHeight),
-        devicePixelRatio,
-      ]),
-    options,
-  );
-  const offscreen = canvas.transferControlToOffscreen();
-  worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
-  return {
-    worker,
-    free() {
-      abort.abort();
-    },
-  };
-}
-
 function publish(telemetry) {
   state.telemetry = telemetry;
   document.documentElement.dataset.yawnState = JSON.stringify({
@@ -238,7 +198,7 @@ const pagehide = () => {
 async function start() {
   addEventListener("pagehide", pagehide, { once: true });
   delete document.documentElement.dataset.yawnReady;
-  const transport = createWorkerTransport();
+  const transport = createWorkerTransport(document.querySelector("#canvas0"));
   renderer = new YawnCore(transport);
   meshHandles = new MeshHandles(renderer);
   gltfImporter = new GltfImporter(renderer);
