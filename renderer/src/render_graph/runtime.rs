@@ -366,8 +366,8 @@ fn invalid(message: impl Into<String>, path: impl Into<String>) -> GraphError {
     error("GRAPH_RUNTIME_PLAN_INVALID", message, path)
 }
 
-fn execution_supported(key: &str) -> bool {
-    contract(key).is_some_and(|contract| {
+fn execution_supported(graph: &CompiledGraph, key: &str) -> bool {
+    contract_for(key, &graph.pipelines).is_some_and(|contract| {
         contract.fullscreen_policy.is_some() || contract.is_raster_draw() || key == "frame_out"
     })
 }
@@ -742,7 +742,7 @@ fn validate_pipeline_resolve(
             .filter(|access| matches!(access.mode, AccessMode::ColorResolve { .. }))
             .count()
             == 1;
-    if !contract(&producer.executor.key).is_some_and(Contract::is_raster_draw)
+    if !contract_for(&producer.executor.key, &graph.pipelines).is_some_and(Contract::is_raster_draw)
         || producer.original_node_index != *producer_node_index
         || !exact_output
         || !matches!(&source.origin,
@@ -787,7 +787,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
         }
     }
     for (i, execution) in graph.executions.iter().enumerate() {
-        if !execution_supported(&execution.executor.key) {
+        if !execution_supported(graph, &execution.executor.key) {
             return Err(error(
                 "GRAPH_EXECUTION_UNSUPPORTED",
                 "unsupported execution",
@@ -926,7 +926,8 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
         Ok(())
     }
     for (i, execution) in graph.executions.iter().enumerate() {
-        let contract = contract(&execution.executor.key).expect("supported executor has contract");
+        let contract = contract_for(&execution.executor.key, &graph.pipelines)
+            .expect("supported executor has contract");
         if execution.executor.version != contract.version {
             return Err(invalid(
                 "executor version does not match its contract",
@@ -1011,7 +1012,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                     ));
                 }
                 let producer_execution = &graph.executions[producer as usize];
-                let input_contract = contract(&execution.executor.key)
+                let input_contract = contract_for(&execution.executor.key, &graph.pipelines)
                     .expect("supported executor has contract")
                     .inputs
                     .iter()
@@ -1125,7 +1126,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                             .count()
                             == 1
                     })
-                    && contract(&owner_executions[0].executor.key)
+                    && contract_for(&owner_executions[0].executor.key, &graph.pipelines)
                         .is_some_and(Contract::is_raster_draw)
                     && owner_executions[0].executor.version == 2
                     && graph
@@ -1135,7 +1136,7 @@ fn validate_canonical_plan(graph: &CompiledGraph) -> Result<(), GraphError> {
                         .filter(|input| input.resource == source)
                         .count()
                         == 1
-                    && contract(&owner_executions[0].executor.key)
+                    && contract_for(&owner_executions[0].executor.key, &graph.pipelines)
                         .and_then(|contract| contract.inputs.get(*input_ordinal as usize))
                         .is_some_and(|input| {
                             input.name == *socket
@@ -1365,7 +1366,7 @@ fn validate_instance_traversal(graph: &CompiledGraph) -> Result<(), GraphError> 
         .iter()
         .enumerate()
         .filter_map(|(i, e)| {
-            contract(&e.executor.key)
+            contract_for(&e.executor.key, &graph.pipelines)
                 .is_some_and(Contract::is_raster_draw)
                 .then_some(i as u32)
         })
@@ -1693,8 +1694,8 @@ pub fn prepare_runtime_plan(
     for (i, execution) in graph.executions.iter().enumerate() {
         let path = format!("executions[{i}]");
         match execution.executor.key.as_str() {
-            key if contract(key).is_some_and(Contract::is_raster_draw) => {}
-            _ if contract(&execution.executor.key)
+            key if contract_for(key, &graph.pipelines).is_some_and(Contract::is_raster_draw) => {}
+            _ if contract_for(&execution.executor.key, &graph.pipelines)
                 .is_some_and(|contract| contract.fullscreen_policy.is_some()) => {}
             "frame_out" => {
                 if frame_out_index.replace(i).is_some() {
@@ -1728,7 +1729,9 @@ pub fn prepare_runtime_plan(
     validate_instance_traversal(graph)?;
 
     for (i, execution) in graph.executions.iter().enumerate() {
-        if !contract(&execution.executor.key).is_some_and(Contract::is_raster_draw) {
+        if !contract_for(&execution.executor.key, &graph.pipelines)
+            .is_some_and(Contract::is_raster_draw)
+        {
             continue;
         }
         let NormalizedParameters::Raster {

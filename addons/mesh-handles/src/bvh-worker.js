@@ -1,4 +1,4 @@
-import { SnapshotReader } from "@yawn/core/snapshot";
+import { SnapshotReader } from "./snapshot.js";
 import { DerivedBvh } from "./bvh-core.js";
 
 let reader, bvh = new DerivedBvh(), epoch = 0, updating = false, requestedEpoch = 0;

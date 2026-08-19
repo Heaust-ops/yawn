@@ -12,13 +12,15 @@ import {
   createVelocityColumn,
   customRenderPipelineExample,
   defaultPipelineExample,
-  dropActiveGraph,
   fluentGraphExample,
   fxNodeExportExample,
   importGltf,
+  installCameraRenderDataControls,
   jsoGraphExample,
   loadCompleteScene,
   pickNearest,
+  conventionalSceneHandles,
+  restyleScene,
   setVelocity,
   simpleSceneShader,
   updateInstance,
@@ -63,7 +65,7 @@ test("cookbook graph recipes produce canonical addon-owned ASTs", () => {
   );
 });
 
-test("cookbook graph lifecycle recipe serializes, switches, and drops", async () => {
+test("cookbook graph lifecycle recipe serializes and switches", async () => {
   const calls = [];
   const core = {
     compileGraph(source) {
@@ -74,10 +76,6 @@ test("cookbook graph lifecycle recipe serializes, switches, and drops", async ()
       calls.push(["switch", id]);
       return Promise.resolve();
     },
-    switchToImmediate() {
-      calls.push(["immediate"]);
-      return Promise.resolve();
-    },
     dropCompiledGraph(id) {
       calls.push(["drop", id]);
       return Promise.resolve();
@@ -85,13 +83,8 @@ test("cookbook graph lifecycle recipe serializes, switches, and drops", async ()
   };
   const graph = { id: "lifecycle", revision: 1, nodes: [] };
   const compiled = await compileAndSwitch(core, graph);
-  await dropActiveGraph(core, compiled);
   assert.match(calls[0][1], /^\(yawn-graph 1/);
-  assert.deepEqual(calls.slice(1), [
-    ["switch", [3, 4]],
-    ["immediate"],
-    ["drop", [3, 4]],
-  ]);
+  assert.deepEqual(calls.slice(1), [["switch", [3, 4]]]);
 });
 
 test("cookbook mutation recipes use handles and SOA writes directly", async () => {
@@ -163,7 +156,7 @@ test("cookbook picking and worker-to-worker recipes use public facades", async (
     [0, 0, 0],
     [0, 0, -1],
   );
-  assert.deepEqual(picked.hits[0].instance.handle, [9, 3]);
+  assert.deepEqual(picked.hits[0].instance, [9, 3]);
 
   class Port extends EventTarget {
     postMessage() {}
@@ -183,5 +176,8 @@ test("cookbook picking and worker-to-worker recipes use public facades", async (
   core.dispose();
 
   assert.equal(typeof importGltf, "function");
+  assert.equal(typeof installCameraRenderDataControls, "function");
+  assert.equal(typeof conventionalSceneHandles, "function");
+  assert.equal(typeof restyleScene, "function");
   assert.equal(typeof loadCompleteScene, "function");
 });

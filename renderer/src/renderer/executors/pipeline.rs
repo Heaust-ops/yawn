@@ -1,28 +1,23 @@
 use crate::renderer::{
-    gpu_scene::GpuSceneCache, material::MaterialResources, ActiveCompiledGraph, PipelineLibrary,
-    PreparedExecution,
+    frame_data::FrameData, gpu_scene::GpuSceneCache, material::MaterialResources,
+    ActiveCompiledGraph, PipelineLibrary, PreparedExecution,
 };
 
-use super::super::scene::Scene;
-
-pub(crate) fn encode_compiled<T: Scene>(
+pub(crate) fn encode_compiled(
     encoder: &mut wgpu::CommandEncoder,
     surface: &wgpu::TextureView,
     active: &ActiveCompiledGraph,
-    scene: &T,
+    frame_data: &FrameData,
     gpu: &GpuSceneCache,
     pipelines: &PipelineLibrary,
     materials: &MaterialResources,
     planes: Option<&[[f32; 4]; 6]>,
-    mut profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
 ) -> Result<(), &'static str> {
     use crate::render_graph::{NormalizedColorLoad, NormalizedDepthLoad, StoreOp};
     for compute in &active.compute {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(&compute.name),
-            timestamp_writes: profile
-                .as_deref_mut()
-                .and_then(|profile| profile.compute_writes(&compute.name)),
+            timestamp_writes: None,
         });
         pass.set_pipeline(&compute.pipeline);
         pass.dispatch_workgroups(
@@ -150,7 +145,7 @@ pub(crate) fn encode_compiled<T: Scene>(
             color_attachments: &colors,
             depth_stencil_attachment: depth,
             occlusion_query_set: None,
-            timestamp_writes: profile.as_deref_mut().and_then(|p| p.render_writes(&label)),
+            timestamp_writes: None,
         });
         for &member in &physical.executions {
             match active
@@ -178,7 +173,7 @@ pub(crate) fn encode_compiled<T: Scene>(
                         .instance_traversal
                         .as_ref()
                         .ok_or("compiled graph instance traversal missing")?;
-                    for (i, group) in scene.bind_groups().iter().enumerate() {
+                    for (i, group) in frame_data.bind_groups().iter().enumerate() {
                         pass.set_bind_group(i as u32, group, &[]);
                     }
                     if let (Some(p), Some(n), Some(u), Some(t), Some(ix), Some(inst)) = (
@@ -228,39 +223,4 @@ pub(crate) fn encode_compiled<T: Scene>(
         }
     }
     Ok(())
-}
-
-pub(crate) fn encode_immediate(
-    encoder: &mut wgpu::CommandEncoder,
-    color: &wgpu::TextureView,
-    depth: &wgpu::TextureView,
-    profile: Option<&mut crate::renderer::profiler::ProfileFrame>,
-) {
-    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("No active render graph"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            depth_slice: None,
-            view: color,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color {
-                    r: 0.,
-                    g: 0.,
-                    b: 0.,
-                    a: 1.,
-                }),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: depth,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Clear(1.),
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        }),
-        occlusion_query_set: None,
-        timestamp_writes: profile.and_then(|p| p.render_writes("no-active-graph")),
-    });
 }

@@ -12,9 +12,10 @@ const portalHost = process.env.PUBLIC_URL
   ? new URL(process.env.PUBLIC_URL).hostname
   : undefined;
 const serverPort = Number(process.env.PORT) || 8080;
-const wasmSource = path.resolve(__dirname, "level-editor/pkg");
-const exampleRoot = path.resolve(__dirname, "examples/render-graph-studio");
-const wasmDestination = path.resolve(exampleRoot, "level-editor/pkg");
+const wasmSource = path.resolve(__dirname, "renderer/pkg");
+const exampleRoot = path.resolve(__dirname, "examples");
+const wasmDestination = path.resolve(exampleRoot, "renderer/pkg");
+const buildOutput = path.resolve(__dirname, "dist");
 
 // Vite resolves entry imports before plugin build hooks. Mirror synchronously while
 // loading the config so a clean build always sees the complete generated package.
@@ -29,6 +30,21 @@ function freshWasmPackage() {
   return {
     name: "fresh-wasm-package",
     async buildStart() { await mirror(); },
+    async writeBundle() {
+      const wasmBuildDestination = path.resolve(buildOutput, "renderer/pkg");
+      const cookbookBuildDestination = path.resolve(buildOutput, "cookbook");
+      await Promise.all([
+        mkdir(wasmBuildDestination, { recursive: true }),
+        mkdir(cookbookBuildDestination, { recursive: true }),
+      ]);
+      await Promise.all([
+        cp(wasmSource, wasmBuildDestination, { recursive: true, force: true }),
+        cp(path.resolve(exampleRoot, "cookbook"), cookbookBuildDestination, {
+          recursive: true,
+          force: true,
+        }),
+      ]);
+    },
     configureServer(server) {
       server.watcher.add(wasmSource);
       const update = file => {
@@ -46,14 +62,18 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        app: path.resolve(exampleRoot, "index.html"),
+        examples: path.resolve(exampleRoot, "index.html"),
+        renderGraphStudio: path.resolve(
+          exampleRoot,
+          "render-graph-studio/index.html",
+        ),
       },
     },
     // Relative to 'root'.
-    outDir: "../../dist",
+    outDir: "../dist",
     copyPublicDir: true,
   },
-  // Build output stays at the repository root, outside the nested example root.
+  // Build output stays at the repository root, outside the examples root.
   root: exampleRoot,
   // The example is source code, not Vite's untransformed public directory. Treating it
   // as both makes dev mode reject the generated WASM worker's module imports.
@@ -80,10 +100,6 @@ export default defineConfig({
         __dirname,
         "addons/render-graph-fxnode/src/index.js",
       ),
-      "@yawn/core/snapshot": path.resolve(
-        __dirname,
-        "packages/yawn-core/src/snapshot.js",
-      ),
       "@yawn/core": path.resolve(__dirname, "packages/yawn-core/src/index.js"),
       "@yawn/mesh-handles": path.resolve(
         __dirname,
@@ -97,7 +113,6 @@ export default defineConfig({
         __dirname,
         "addons/default-pipelines/src/index.js",
       ),
-      pkg: path.resolve(__dirname, "level-editor/pkg"),
     },
   },
   plugins: [

@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { YawnCore, RendererError } from "@yawn/core";
-import { MeshHandles } from "@yawn/mesh-handles";
+import * as coreApi from "@yawn/core";
+import { CameraHandle, MaterialHandles, MeshHandles } from "@yawn/mesh-handles";
 import { createGraphAst, serializeGraphAst } from "@yawn/render-graph-ast";
+
+const { YawnCore, RendererError } = coreApi;
 
 const TYPE = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 0x80000000, 0xffffffff];
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -70,19 +72,37 @@ function setup() {
     byteLength: 256, layoutEpoch: 1, writable: false,
   });
   const upload = installArray(memory, {
-    id: 5, name: "upload.gltf", domain: "fixed", scalar: "u32", lanes: 4,
+    id: 5, name: "upload.renderData", domain: "fixed", scalar: "u32", lanes: 4,
     stride: 16, length: 16, capacity: 16, controlPtr: 200064, dataOffset: 64,
     byteLength: 256, layoutEpoch: 1, writable: true,
   });
+  const camera = installArray(memory, {
+    id: 6, name: "camera.state", domain: "fixed", scalar: "f32", lanes: 16,
+    stride: 64, length: 1, capacity: 1, controlPtr: 200384, dataOffset: 64,
+    byteLength: 64, layoutEpoch: 1, writable: true,
+  });
+  new Float32Array(memory.buffer, camera.controlPtr + camera.dataOffset, 16).set([
+    4, 3, 6, 1,
+    0, 0, 0, 1,
+    0, 1, 0, 0,
+    Math.PI / 4, 16 / 9, 0.1, 1000,
+  ]);
+  const material = installArray(memory, {
+    id: 7, name: "material.state", domain: "fixed", scalar: "u32", lanes: 28,
+    stride: 112, length: 4, capacity: 4, controlPtr: 200512, dataOffset: 64,
+    byteLength: 448, layoutEpoch: 1, writable: true,
+  });
+  const materialFloats = new Float32Array(memory.buffer, material.controlPtr + material.dataOffset, material.byteLength / 4);
+  materialFloats.set([1, 1, 1, 1, 0, 0, 0, 0, 1, 0.5, 1, 1, 0, 0.5, 1.5, 0.04], 28);
   const worker = new WorkerMock();
   const bridge = { memory, ringPtr: 0, worker, freed: false, free() { this.freed = true; } };
   const core = new YawnCore(bridge);
-  worker.reply({ type: "soa-init", arrays: [transform, type, generation, meshGeneration, upload] });
-  return { memory, ring, worker, bridge, core, handles: new MeshHandles(core), transform, type, generation, upload };
+  worker.reply({ type: "soa-init", arrays: [transform, type, generation, meshGeneration, upload, camera, material] });
+  return { memory, ring, worker, bridge, core, handles: new MeshHandles(core), transform, type, generation, upload, camera, material };
 }
 
 async function imported(fixture) {
-  const loading = fixture.core.commitGlbUpload(fixture.core.array("upload.gltf"), 8);
+  const loading = fixture.core.commitRenderDataUpload(fixture.core.array("upload.renderData"), 8);
   fixture.worker.reply({
     type: "reply",
     request: 1,
@@ -93,6 +113,7 @@ async function imported(fixture) {
         defaultInstance: [8, 5],
         defaultType: TYPE,
       }],
+      materials: [{ key: 1 }],
     },
   });
   const [mesh] = fixture.handles.fromImportedScene(await loading);
@@ -105,10 +126,10 @@ async function imported(fixture) {
   return mesh;
 }
 
-test("core commits shared scene uploads through metadata-only opcode 1", async () => {
+test("core commits generic shared render-data packets through metadata-only opcode 1", async () => {
   const fixture = setup();
-  const pending = fixture.core.commitGlbUpload(fixture.core.array("upload.gltf"), 8, { framing: "interior" });
-  assert.deepEqual([...new Int32Array(fixture.memory.buffer, 64, 6)], [2, 1, 1, 5, 8, 1]);
+  const pending = fixture.core.commitRenderDataUpload(fixture.core.array("upload.renderData"), 8);
+  assert.deepEqual([...new Int32Array(fixture.memory.buffer, 64, 6)], [2, 1, 1, 5, 8, 0]);
   fixture.worker.reply({ type: "reply", request: 1, ok: true, result: { meshes: [] } });
   assert.deepEqual(await pending, { meshes: [] });
 });
@@ -125,17 +146,6 @@ test("mesh handles are a separate conventional facade over core commands", async
   fixture.worker.reply({ type: "reply", request: 2, ok: true, result: [4, 2] });
   const instance = await creating;
   assert.deepEqual(instance.handle, [4, 2]);
-});
-
-test("mesh handle picking wraps core protocol handles", async () => {
-  const core = {
-    async pickRay() {
-      return { epoch: 4, hits: [{ instance: [3, 9], distance: 2 }] };
-    },
-  };
-  const result = await new MeshHandles(core).pickRay([0, 0, 0], [1, 0, 0]);
-  assert.deepEqual(result.hits[0].instance.handle, [3, 9]);
-  assert.equal(result.hits[0].distance, 2);
 });
 
 test("frequent instance mutations write guarded SOA lanes without ring messages", async () => {
@@ -156,6 +166,55 @@ test("frequent instance mutations write guarded SOA lanes without ring messages"
   assert.deepEqual([...type.slice(base, base + 16)].map(value => value >>> 0), TYPE);
   assert.equal(Atomics.load(type, base + 16) >>> 0, 5);
   assert.equal(Atomics.load(type, base + 17) >>> 0, 1);
+});
+
+test("camera is render data with no dedicated core API", () => {
+  const fixture = setup();
+  const camera = fixture.core.array("camera.state");
+  const ringBefore = Atomics.load(fixture.ring, 5);
+  const control = new Int32Array(fixture.memory.buffer, fixture.camera.controlPtr, 16);
+  const sequenceBefore = Atomics.load(control, 9);
+  const state = camera.read(0);
+  state[0] = 5;
+  state[1] = 4;
+  camera.write(0, state);
+
+  assert.equal("SharedCamera" in coreApi, false);
+  assert.deepEqual(camera.read(0).slice(0, 3), [5, 4, 6]);
+  assert.equal(Atomics.load(fixture.ring, 5), ringBefore);
+  assert.equal(Atomics.load(control, 9), sequenceBefore + 2);
+});
+
+test("camera handle exposes conventional properties using only the shared row", () => {
+  const fixture = setup();
+  const camera = new CameraHandle(fixture.core);
+  const ringBefore = Atomics.load(fixture.ring, 5);
+
+  camera.update({ position: [5, 4, 7], target: [1, 0, 0], fovY: Math.PI / 3 });
+
+  assert.deepEqual(camera.position, [5, 4, 7]);
+  assert.deepEqual(camera.target, [1, 0, 0]);
+  assert.ok(Math.abs(camera.fovY - Math.PI / 3) < 1e-6);
+  assert.equal(Atomics.load(fixture.ring, 5), ringBefore);
+  assert.throws(() => camera.update({ near: 2, far: 1 }), RangeError);
+});
+
+test("material handles mutate packed GPU material rows without messages", () => {
+  const fixture = setup();
+  const [material] = new MaterialHandles(fixture.core).fromImportedScene({ materials: [{ key: 1 }] });
+  const ringBefore = Atomics.load(fixture.ring, 5);
+  const control = new Int32Array(fixture.memory.buffer, fixture.material.controlPtr, 16);
+  const sequenceBefore = Atomics.load(control, 9);
+
+  material.update({ baseColor: [0.2, 0.4, 0.8, 1], metallic: 0.25, roughness: 0.75, ior: 2 });
+
+  assert.equal(material.key, 1);
+  assert.deepEqual(material.baseColor.map(value => Math.round(value * 10) / 10), [0.2, 0.4, 0.8, 1]);
+  assert.equal(material.metallic, 0.25);
+  assert.equal(material.roughness, 0.75);
+  assert.equal(material.ior, 2);
+  assert.equal(Atomics.load(fixture.ring, 5), ringBefore);
+  assert.equal(Atomics.load(control, 9), sequenceBefore + 2);
 });
 
 test("generation columns reject stale handles and are read-only", async () => {
@@ -221,6 +280,7 @@ test("graph lifecycle remains FIFO and uses opcodes 8 and 9", async () => {
   const first = fixture.core.switchCompiledGraph([9, 4]);
   const second = fixture.core.dropCompiledGraph([2, 1]);
   assert.equal(Atomics.load(fixture.ring, 5), 1);
+  assert.deepEqual([...new Int32Array(fixture.memory.buffer, 64, 5)], [2, 9, 1, 9, 4]);
   fixture.worker.reply({ type: "reply", request: 1, ok: true });
   await first;
   await new Promise(queueMicrotask);

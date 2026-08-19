@@ -6,7 +6,31 @@ export class GltfImportError extends Error {
   }
 }
 
-/** Fetches glTF in a dedicated worker and commits only shared-memory upload metadata. */
+function frameCamera(core, bounds, framing) {
+  if (!bounds || framing === false) return;
+  if (framing !== undefined && framing !== "exterior" && framing !== "interior")
+    throw new TypeError("framing must be exterior, interior, or false");
+  const min = bounds.min, max = bounds.max;
+  if (!Array.isArray(min) || !Array.isArray(max) || min.length !== 3 || max.length !== 3) return;
+  const center = min.map((value, axis) => (value + max[axis]) * 0.5);
+  const extent = max.map((value, axis) => value - min[axis]);
+  const radius = Math.max(1, Math.hypot(...extent) * 0.5);
+  const camera = core.array("camera.state");
+  const state = camera.read(0);
+  const interior = framing === "interior";
+  const eye = interior
+    ? [center[0], center[1] + radius * 0.05, center[2]]
+    : [center[0] + radius * 1.8, center[1] + radius * 1.4, center[2] + radius * 1.8];
+  const target = interior ? [center[0] + radius, center[1], center[2]] : center;
+  state.splice(0, 3, ...eye);
+  state.splice(4, 3, ...target);
+  state.splice(8, 3, 0, 1, 0);
+  state[14] = Math.max(radius * 0.001, 0.1);
+  state[15] = Math.max(radius * 6, 1.1);
+  camera.write(0, state);
+}
+
+/** Parses glTF in a dedicated worker and publishes a generic render-data packet through shared memory. */
 export class GltfImporter {
   #core;
   #worker;
@@ -16,7 +40,8 @@ export class GltfImporter {
   #disposed = false;
 
   constructor(core, { workerFactory } = {}) {
-    if (!core?.allocateArray || !core?.commitGlbUpload) throw new TypeError("core must implement the Yawn shared upload protocol");
+    if (!core?.allocateArray || !core?.commitRenderDataUpload)
+      throw new TypeError("core must implement the Yawn shared render-data protocol");
     this.#core = core;
     this.#worker = workerFactory
       ? workerFactory()
@@ -55,7 +80,7 @@ export class GltfImporter {
       if (message.type === "allocate") {
         const length = Math.ceil(message.byteLength / 16);
         pending.array = await this.#core.allocateArray({
-          name: "upload.gltf",
+          name: "upload.renderData",
           domain: "fixed",
           scalar: "u32",
           lanes: 4,
@@ -68,11 +93,11 @@ export class GltfImporter {
           ...pending.array.share(),
         });
       } else if (message.type === "ready") {
-        const result = await this.#core.commitGlbUpload(
+        const result = await this.#core.commitRenderDataUpload(
           pending.array,
           message.byteLength,
-          pending.options,
         );
+        frameCamera(this.#core, result.bounds, pending.options.framing);
         this.#pending.delete(message.request);
         pending.resolve(result);
       } else if (message.type === "error") {

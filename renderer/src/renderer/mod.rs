@@ -9,19 +9,18 @@ use web_sys::DedicatedWorkerGlobalScope;
 use crate::render_data::RenderDataConfig;
 use crate::{
     command_ring::CommandRing,
-    gltf::{install_imported, ModelBounds},
-    message::{camera_drag, CameraDrag, DrainEventError, MouseMessage, ResizeMessage, WindowEvent},
-    render_data::{InstanceHandle, InstanceType, MeshHandle, RenderData},
-    renderer::scene::Scene,
+    render_data::{
+        upload::{decode_render_data_packet, prepare_render_data},
+        InstanceHandle, InstanceType, MeshHandle, RenderData,
+    },
 };
 
 pub mod executors;
+pub(crate) mod frame_data;
 pub mod gpu_scene;
 pub mod instance_filter;
 pub mod material;
 pub mod pipeline_library;
-pub mod profiler;
-pub mod scene;
 pub mod scene_frame;
 
 use pipeline_library::PipelineKey;
@@ -29,23 +28,11 @@ pub use pipeline_library::PipelineLibrary;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DeviceFeaturePlan {
-    hard: wgpu::Features,
-    initial: wgpu::Features,
-    profiling_enabled: bool,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn device_feature_plan(profile: bool, supported: wgpu::Features) -> DeviceFeaturePlan {
-    let hard = wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    let profiling = profiler::Profiler::requested_features(profile, supported);
-    DeviceFeaturePlan {
-        hard,
-        initial: hard | profiling,
-        profiling_enabled: !profiling.is_empty(),
-    }
+#[derive(Debug, Clone)]
+pub struct ResizeMessage {
+    pub scale_factor: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 fn supports_planned_x4_attachment(
@@ -61,21 +48,6 @@ fn supports_planned_x4_attachment(
 #[cfg(test)]
 mod device_feature_tests {
     use super::*;
-
-    #[test]
-    fn retry_plan_never_drops_hard_features() {
-        let hard_only = device_feature_plan(false, wgpu::Features::INDIRECT_FIRST_INSTANCE);
-        assert_eq!(hard_only.initial, hard_only.hard);
-        assert!(!hard_only.profiling_enabled);
-
-        let profiled = device_feature_plan(
-            true,
-            wgpu::Features::INDIRECT_FIRST_INSTANCE | wgpu::Features::TIMESTAMP_QUERY,
-        );
-        assert!(profiled.initial.contains(profiled.hard));
-        assert!(profiled.initial.contains(wgpu::Features::TIMESTAMP_QUERY));
-        assert!(profiled.profiling_enabled);
-    }
 
     #[test]
     fn adapter_x4_policy_distinguishes_depth_and_color_resolve() {
@@ -787,33 +759,26 @@ struct ActiveCompiledGraph {
     _fullscreen_layout: wgpu::BindGroupLayout,
 }
 
-#[derive(Clone, Copy)]
-enum UploadGraph {
-    Immediate,
-    Compiled(bool),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FrameTargetSource {
     PendingSwitch,
     PendingResize,
     Active,
-    Immediate,
 }
 
 fn select_frame_target_source(
     pending_switch: bool,
     pending_resize: bool,
     active: bool,
-) -> FrameTargetSource {
+) -> Option<FrameTargetSource> {
     if pending_switch {
-        FrameTargetSource::PendingSwitch
+        Some(FrameTargetSource::PendingSwitch)
     } else if pending_resize {
-        FrameTargetSource::PendingResize
+        Some(FrameTargetSource::PendingResize)
     } else if active {
-        FrameTargetSource::Active
+        Some(FrameTargetSource::Active)
     } else {
-        FrameTargetSource::Immediate
+        None
     }
 }
 
@@ -833,7 +798,7 @@ fn acquisition_action(source: FrameTargetSource, error: &wgpu::SurfaceError) -> 
     match source {
         FrameTargetSource::PendingSwitch => AcquisitionAction::RejectSwitch,
         FrameTargetSource::PendingResize => AcquisitionAction::DropResize,
-        FrameTargetSource::Active | FrameTargetSource::Immediate => match error {
+        FrameTargetSource::Active => match error {
             wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
                 AcquisitionAction::ReconfigureAndSkip
             }
@@ -844,52 +809,37 @@ fn acquisition_action(source: FrameTargetSource, error: &wgpu::SurfaceError) -> 
     }
 }
 
-fn classify_upload_graph(graph: &ActiveCompiledGraph) -> UploadGraph {
-    UploadGraph::Compiled(
-        graph
-            .runtime
-            .instance_traversal
-            .as_ref()
-            .is_some_and(|p| p.requires_camera),
-    )
-}
-
-fn upload_query_for_render(pending: Option<UploadGraph>, active: Option<UploadGraph>) -> bool {
-    match pending.or(active) {
-        Some(UploadGraph::Compiled(value)) => value,
-        Some(UploadGraph::Immediate) | None => false,
-    }
+fn requires_camera(graph: &ActiveCompiledGraph) -> bool {
+    graph
+        .runtime
+        .instance_traversal
+        .as_ref()
+        .is_some_and(|plan| plan.requires_camera)
 }
 
 fn resolve_culling_frustum(
     required: bool,
-    read: impl FnOnce() -> Option<Result<[[f32; 4]; 6], crate::camera::FrustumError>>,
+    read: impl FnOnce() -> Result<[[f32; 4]; 6], crate::render_data::camera::FrustumError>,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
     if !required {
         return Ok(None);
     }
     match read() {
-        Some(Ok(planes)) => Ok(Some(planes)),
-        Some(Err(error)) => Err(crate::render_graph::GraphError::new(
+        Ok(planes) => Ok(Some(planes)),
+        Err(error) => Err(crate::render_graph::GraphError::new(
             "GRAPH_EXECUTION_FAILED",
             format!("camera frustum is invalid: {error}"),
-        )),
-        None => Err(crate::render_graph::GraphError::new(
-            "GRAPH_EXECUTION_FAILED",
-            "culling graph requires a camera frustum, but the scene has no camera",
         )),
     }
 }
 
-fn update_validate_write_scene<S: scene::Scene>(
-    scene: &mut S,
+fn update_frame_data(
+    frame_data: &mut frame_data::FrameData,
     queue: &wgpu::Queue,
     requires_camera: bool,
 ) -> Result<Option<[[f32; 4]; 6]>, crate::render_graph::GraphError> {
-    scene.update_cpu();
-    let planes = resolve_culling_frustum(requires_camera, || scene.frustum_planes())?;
-    scene.write_uniforms(queue);
-    Ok(planes)
+    frame_data.update(queue);
+    resolve_culling_frustum(requires_camera, || frame_data.frustum_planes())
 }
 impl ActiveCompiledGraph {
     fn id(&self) -> crate::render_graph::CompiledGraphId {
@@ -912,48 +862,23 @@ impl ActiveCompiledGraph {
     }
 }
 
-enum SwitchTarget {
-    Immediate,
-    Compiled(ActiveCompiledGraph),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResolvedSwitchRequest {
-    Immediate,
-    Compiled(crate::render_graph::CompiledGraphId),
-}
-
 fn resolve_switch_request(
     registry: &crate::render_graph::Registry,
     pending: bool,
-    mode: u32,
     slot: u32,
     generation: u32,
-) -> Result<ResolvedSwitchRequest, crate::render_graph::GraphError> {
+) -> Result<crate::render_graph::CompiledGraphId, crate::render_graph::GraphError> {
     if pending {
         return Err(crate::render_graph::GraphError::new(
             "GRAPH_SWITCH_PENDING",
             "a graph switch is pending",
         ));
     }
-    match mode {
-        0 if slot == 0 && generation == 0 => Ok(ResolvedSwitchRequest::Immediate),
-        0 => Err(crate::render_graph::GraphError::new(
-            "STALE_GRAPH_ID",
-            "immediate mode requires a zero id",
-        )),
-        1 => {
-            let id = crate::render_graph::CompiledGraphId { slot, generation };
-            // Resolve the registry entry here, before any GPU preparation or pending
-            // state mutation. Registry::get is also the compiled-graph availability gate.
-            registry.get(id)?;
-            Ok(ResolvedSwitchRequest::Compiled(id))
-        }
-        _ => Err(crate::render_graph::GraphError::new(
-            "GRAPH_EXECUTION_UNSUPPORTED",
-            "unknown render mode",
-        )),
-    }
+    let id = crate::render_graph::CompiledGraphId { slot, generation };
+    // Resolve the registry entry here, before any GPU preparation or pending
+    // state mutation. Registry::get is also the compiled-graph availability gate.
+    registry.get(id)?;
+    Ok(id)
 }
 
 fn drop_graph_request(
@@ -990,49 +915,21 @@ mod switch_request_tests {
 
     use super::*;
 
-    fn graph(requires_camera: bool) -> UploadGraph {
-        UploadGraph::Compiled(requires_camera)
-    }
-
     #[test]
-    fn upload_selection_follows_the_graph_rendered_for_the_commit_frame() {
-        let selected = upload_query_for_render;
-        assert!(!selected(Some(graph(false)), Some(graph(true))));
-        assert_eq!(
-            selected(Some(UploadGraph::Immediate), Some(graph(true))),
-            false
-        );
-        assert_eq!(
-            selected(Some(UploadGraph::Immediate), Some(graph(true))),
-            false
-        );
-        assert!(selected(None, Some(graph(true))));
-        assert!(!selected(None, Some(UploadGraph::Immediate)));
-        assert!(!selected(None, None));
-    }
-
-    #[test]
-    fn frame_target_precedence_and_pending_resize_upload_are_exact() {
+    fn frame_target_precedence_is_exact() {
         assert_eq!(
             select_frame_target_source(true, true, true),
-            FrameTargetSource::PendingSwitch
+            Some(FrameTargetSource::PendingSwitch)
         );
         assert_eq!(
             select_frame_target_source(false, true, true),
-            FrameTargetSource::PendingResize
+            Some(FrameTargetSource::PendingResize)
         );
         assert_eq!(
             select_frame_target_source(false, false, true),
-            FrameTargetSource::Active
+            Some(FrameTargetSource::Active)
         );
-        assert_eq!(
-            select_frame_target_source(false, false, false),
-            FrameTargetSource::Immediate
-        );
-        assert!(!upload_query_for_render(
-            Some(graph(false)),
-            Some(graph(true))
-        ));
+        assert_eq!(select_frame_target_source(false, false, false), None);
     }
 
     #[test]
@@ -1044,13 +941,11 @@ mod switch_request_tests {
             assert_eq!(acquisition_action(PendingSwitch, &error), RejectSwitch);
             assert_eq!(acquisition_action(PendingResize, &error), DropResize);
         }
-        for source in [Active, Immediate] {
-            assert_eq!(acquisition_action(source, &Lost), ReconfigureAndSkip);
-            assert_eq!(acquisition_action(source, &Outdated), ReconfigureAndSkip);
-            assert_eq!(acquisition_action(source, &Timeout), Skip);
-            assert_eq!(acquisition_action(source, &Other), Halt);
-        }
-        for source in [PendingSwitch, PendingResize, Active, Immediate] {
+        assert_eq!(acquisition_action(Active, &Lost), ReconfigureAndSkip);
+        assert_eq!(acquisition_action(Active, &Outdated), ReconfigureAndSkip);
+        assert_eq!(acquisition_action(Active, &Timeout), Skip);
+        assert_eq!(acquisition_action(Active, &Other), Halt);
+        for source in [PendingSwitch, PendingResize, Active] {
             assert_eq!(acquisition_action(source, &OutOfMemory), Halt);
         }
     }
@@ -1061,7 +956,7 @@ mod switch_request_tests {
         assert_eq!(
             resolve_culling_frustum(false, || {
                 reads += 1;
-                None
+                Ok([[0.; 4]; 6])
             })
             .unwrap(),
             None
@@ -1070,10 +965,8 @@ mod switch_request_tests {
             reads, 0,
             "inactive frustum filtering must not read the camera"
         );
-        let missing = resolve_culling_frustum(true, || None).unwrap_err();
-        assert!(missing.message.contains("no camera"));
         let invalid = resolve_culling_frustum(true, || {
-            Some(Err(crate::camera::FrustumError::Degenerate { plane: 2 }))
+            Err(crate::render_data::camera::FrustumError::Degenerate { plane: 2 })
         })
         .unwrap_err();
         assert_eq!(invalid.code, "GRAPH_EXECUTION_FAILED");
@@ -1090,14 +983,14 @@ mod switch_request_tests {
         let active = "existing_graph";
         let pending: Option<&str> = None;
         assert_eq!(
-            resolve_switch_request(&registry, false, 1, id.slot, id.generation).unwrap(),
-            ResolvedSwitchRequest::Compiled(id)
+            resolve_switch_request(&registry, false, id.slot, id.generation).unwrap(),
+            id
         );
         assert_eq!(active, "existing_graph");
         assert_eq!(pending, None);
         assert!(registry.contains(id));
 
-        let pending_error = resolve_switch_request(&registry, true, 1, id.slot, id.generation)
+        let pending_error = resolve_switch_request(&registry, true, id.slot, id.generation)
             .expect_err("an existing pending request must win");
         assert_eq!(pending_error.code, "GRAPH_SWITCH_PENDING");
         assert_eq!(active, "existing_graph");
@@ -1156,7 +1049,7 @@ mod switch_request_tests {
 
 struct PendingSwitch {
     request: u32,
-    target: SwitchTarget,
+    target: ActiveCompiledGraph,
 }
 
 #[derive(Clone, Copy)]
@@ -1237,18 +1130,17 @@ pub struct RendererContext {
     pub surface_config: wgpu::SurfaceConfiguration,
     pub surface: wgpu::Surface<'static>,
     initial_surface_config: wgpu::SurfaceConfiguration,
-    pub depth_texture: wgpu::Texture,
-    pub depth_view: wgpu::TextureView,
 }
 
-pub struct Renderer<T: scene::Scene> {
-    events_chan: Receiver<WindowEvent>,
+pub struct Renderer {
+    events_chan: Receiver<ResizeMessage>,
     context: RendererContext,
     resources: PipelineLibrary,
-    scene: T,
+    frame_data: frame_data::FrameData,
     render_data: RenderData,
     shared_soa: crate::shared_soa::SharedSoaRegistry,
     shared_soa_init_sent: bool,
+    camera_publish_required: bool,
     snapshot: crate::shared_snapshot::SharedSnapshot,
     snapshot_init_sent: bool,
     scene_frame: scene_frame::SceneFrameCache,
@@ -1257,7 +1149,6 @@ pub struct Renderer<T: scene::Scene> {
     pub(crate) command_ring: Option<&'static CommandRing>,
     pending_replies: Vec<JsValue>,
     gpu_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    framing_radius: f32,
     graph_registry: crate::render_graph::Registry,
     active_compiled: Option<ActiveCompiledGraph>,
     pending_switch: Option<PendingSwitch>,
@@ -1266,10 +1157,9 @@ pub struct Renderer<T: scene::Scene> {
     next_preparation_token: u64,
     preparation_completions: Rc<RefCell<Vec<PreparationCompletion>>>,
     halted: bool,
-    profiler: profiler::Profiler,
 }
 
-impl<T: Scene + 'static> Renderer<T> {
+impl Renderer {
     fn surface_config(
         contract: &crate::render_graph::RuntimeSurfaceContract,
     ) -> wgpu::SurfaceConfiguration {
@@ -1350,13 +1240,9 @@ impl<T: Scene + 'static> Renderer<T> {
                     &mut self.graph_registry,
                     id,
                     self.active_compiled.as_ref().map(ActiveCompiledGraph::id),
-                    self.pending_switch.as_ref().and_then(|pending| {
-                        if let SwitchTarget::Compiled(active) = &pending.target {
-                            Some(active.id())
-                        } else {
-                            None
-                        }
-                    }),
+                    self.pending_switch
+                        .as_ref()
+                        .map(|pending| pending.target.id()),
                     self.pending_resize.as_ref().map(ActiveCompiledGraph::id),
                     self.in_flight.as_ref().map(|preparation| preparation.id),
                 );
@@ -1371,24 +1257,14 @@ impl<T: Scene + 'static> Renderer<T> {
                     self.pending_switch.is_some() || self.in_flight.is_some(),
                     words[2],
                     words[3],
-                    words[4],
                 )
-                .and_then(|target| match target {
-                    ResolvedSwitchRequest::Immediate => {
-                        self.pending_switch = Some(PendingSwitch {
-                            request,
-                            target: SwitchTarget::Immediate,
-                        });
-                        Ok(())
-                    }
-                    ResolvedSwitchRequest::Compiled(id) => {
-                        let graph = self.graph_registry.get(id)?.clone();
-                        self.begin_compiled_preparation(
-                            id,
-                            graph,
-                            PreparationPurpose::Switch { request },
-                        )
-                    }
+                .and_then(|id| {
+                    let graph = self.graph_registry.get(id)?.clone();
+                    self.begin_compiled_preparation(
+                        id,
+                        graph,
+                        PreparationPurpose::Switch { request },
+                    )
                 });
                 if let Err(error) = outcome {
                     self.reply(request, Err(error.into()));
@@ -1397,67 +1273,29 @@ impl<T: Scene + 'static> Renderer<T> {
             }
             let outcome: Result<JsValue, &'static str> = (|| match opcode {
                 1 => {
-                    if words[4] > 1 {
-                        return Err("INVALID_FRAMING");
-                    }
                     let bytes = self
                         .shared_soa
                         .read_fixed_bytes(words[2], words[3])
                         .map_err(|_| "SHARED_UPLOAD_INVALID")?;
-                    let imported =
-                        crate::gltf::decode_gltf_owned(bytes).map_err(|_| "GLB_INVALID")?;
+                    let upload = decode_render_data_packet(&bytes)
+                        .map_err(|_| "RENDER_DATA_PACKET_INVALID")?;
                     // Build a complete GPU candidate first. Neither the live scene nor
                     // its material epoch changes if image decode/resource creation fails.
                     let prepared_materials = self
                         .materials
-                        .prepare(&self.context.device, &self.context.queue, &imported)
+                        .prepare(&self.context.device, &self.context.queue, &upload)
                         .map_err(|_| "MATERIAL_INVALID")?;
-                    let installed = install_imported(&mut self.render_data, &imported)
+                    let prepared_data = prepare_render_data(&self.render_data, &upload)
                         .map_err(|_| "INSTALL_FAILED")?;
-                    // RenderData replacement and material publication are adjacent in
-                    // this synchronous command, preventing a frame with mixed assets.
+                    self.shared_soa
+                        .publish_materials(&upload.materials)
+                        .map_err(|_| "MATERIAL_SHARED_STATE_FAILED")?;
+                    self.render_data
+                        .replace_with(prepared_data.stage)
+                        .map_err(|_| "INSTALL_FAILED")?;
                     self.materials
                         .install(prepared_materials, self.render_data.revision());
-                    if let Some(ModelBounds { min, max }) = installed.bounds {
-                        let center = ultraviolet::Vec3::new(
-                            (min[0] + max[0]) * 0.5,
-                            (min[1] + max[1]) * 0.5,
-                            (min[2] + max[2]) * 0.5,
-                        );
-                        let extent = ultraviolet::Vec3::new(
-                            max[0] - min[0],
-                            max[1] - min[1],
-                            max[2] - min[2],
-                        );
-                        let radius = (0.5
-                            * (extent.x * extent.x + extent.y * extent.y + extent.z * extent.z)
-                                .sqrt())
-                        .max(1.0);
-                        self.framing_radius = radius;
-                        log::info!(
-                            "framing imported scene: center={center:?}, extent={extent:?}, radius={radius}"
-                        );
-                        self.scene.set_camera_depth_range(
-                            (radius * 0.001).max(0.1),
-                            (radius * 6.0).max(1.1),
-                        );
-                        if words[4] == 1 {
-                            self.scene.set_camera_look_at(
-                                center + ultraviolet::Vec3::new(0.0, radius * 0.05, 0.0),
-                                center + ultraviolet::Vec3::new(radius, 0.0, 0.0),
-                            );
-                        } else {
-                            self.scene.set_camera_look_at(
-                                center
-                                    + ultraviolet::Vec3::new(
-                                        radius * 1.8,
-                                        radius * 1.4,
-                                        radius * 1.8,
-                                    ),
-                                center,
-                            );
-                        }
-                    }
+                    let installed = prepared_data.installed;
                     let result = js_sys::Object::new();
                     let meshes = js_sys::Array::new();
                     for h in installed.meshes {
@@ -1492,6 +1330,30 @@ impl<T: Scene + 'static> Renderer<T> {
                         meshes.push(&item);
                     }
                     js_sys::Reflect::set(&result, &"meshes".into(), &meshes).unwrap();
+                    let materials = js_sys::Array::new();
+                    for material in &upload.materials {
+                        let item = js_sys::Object::new();
+                        js_sys::Reflect::set(&item, &"key".into(), &material.key.get().into())
+                            .unwrap();
+                        materials.push(&item);
+                    }
+                    js_sys::Reflect::set(&result, &"materials".into(), &materials).unwrap();
+                    if let Some(bounds) = installed.bounds {
+                        let value = js_sys::Object::new();
+                        js_sys::Reflect::set(
+                            &value,
+                            &"min".into(),
+                            &js_sys::Array::from_iter(bounds.min.into_iter().map(JsValue::from)),
+                        )
+                        .unwrap();
+                        js_sys::Reflect::set(
+                            &value,
+                            &"max".into(),
+                            &js_sys::Array::from_iter(bounds.max.into_iter().map(JsValue::from)),
+                        )
+                        .unwrap();
+                        js_sys::Reflect::set(&result, &"bounds".into(), &value).unwrap();
+                    }
                     Ok(result.into())
                 }
                 3 => {
@@ -1538,39 +1400,6 @@ impl<T: Scene + 'static> Renderer<T> {
         true
     }
 
-    fn create_depth_texture(
-        device: &wgpu::Device,
-        config: &wgpu::SurfaceConfiguration,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let size = wgpu::Extent3d {
-            width: config.width.max(1),
-            height: config.height.max(1),
-            depth_or_array_layers: 1,
-        };
-
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth texture"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        (texture, view)
-    }
-
-    fn recreate_depth_texture(&mut self) {
-        let (texture, view) =
-            Self::create_depth_texture(&self.context.device, &self.context.surface_config);
-        self.context.depth_texture = texture;
-        self.context.depth_view = view;
-    }
-
     fn plan_compiled(
         &self,
         graph: &crate::render_graph::CompiledGraph,
@@ -1611,7 +1440,7 @@ impl<T: Scene + 'static> Renderer<T> {
             .render
             .iter()
             .filter(|declaration| {
-                crate::render_graph::contract(&declaration.name)
+                crate::render_graph::contract_for(&declaration.name, &graph.pipelines)
                     .is_some_and(crate::render_graph::Contract::is_raster_draw)
             })
             .map(|declaration| {
@@ -1865,8 +1694,9 @@ impl<T: Scene + 'static> Renderer<T> {
             });
         let mut executions = Vec::new();
         for (index, execution) in graph.executions.iter().enumerate() {
-            let contract = crate::render_graph::contract(&execution.executor.key)
-                .ok_or_else(|| fail("executor contract missing"))?;
+            let contract =
+                crate::render_graph::contract_for(&execution.executor.key, &graph.pipelines)
+                    .ok_or_else(|| fail("executor contract missing"))?;
             match execution.executor.key.as_str() {
                 "frustum_cull" => continue,
                 _ if execution.executor.key == "frame_out"
@@ -2179,7 +2009,7 @@ impl<T: Scene + 'static> Renderer<T> {
                 .instance_traversal
                 .as_ref()
                 .is_some_and(|p| p.requires_camera),
-            || self.scene.frustum_planes(),
+            || self.frame_data.frustum_planes(),
         )?;
         let restart_graph = graph.clone();
         self.next_preparation_token = self.next_preparation_token.wrapping_add(1).max(1);
@@ -2241,7 +2071,7 @@ impl<T: Scene + 'static> Renderer<T> {
                 (PreparationPurpose::Switch { request }, Ok(candidate)) => {
                     self.pending_switch = Some(PendingSwitch {
                         request,
-                        target: SwitchTarget::Compiled(candidate),
+                        target: candidate,
                     });
                 }
                 (PreparationPurpose::Switch { request }, Err(error)) => {
@@ -2263,8 +2093,7 @@ impl<T: Scene + 'static> Renderer<T> {
     #[cfg(target_arch = "wasm32")]
     pub async fn new(
         canvas: web_sys::OffscreenCanvas,
-        events_chan: Receiver<WindowEvent>,
-        profile: bool,
+        events_chan: Receiver<ResizeMessage>,
     ) -> Self {
         let id = wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU,
@@ -2275,7 +2104,7 @@ impl<T: Scene + 'static> Renderer<T> {
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
             .unwrap();
-        let mut adapter = instance
+        let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
@@ -2284,54 +2113,27 @@ impl<T: Scene + 'static> Renderer<T> {
             .await
             .unwrap();
 
-        let feature_plan = device_feature_plan(profile, adapter.features());
+        let required_features = wgpu::Features::INDIRECT_FIRST_INSTANCE;
         assert!(
-            adapter.features().contains(feature_plan.hard),
+            adapter.features().contains(required_features),
             "WebGPU adapter lacks required indirect-first-instance support"
         );
         let descriptor = wgpu::DeviceDescriptor {
-            required_features: feature_plan.initial,
+            required_features,
             required_limits: wgpu::Limits::default(),
             label: None,
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::default(),
         };
 
-        let (device, queue) = match adapter.request_device(&descriptor).await {
-            Ok(result) => result,
-            Err(error) if feature_plan.profiling_enabled => {
-                log::warn!("timestamp-enabled device request failed, retrying baseline: {error}");
-                adapter = instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        compatible_surface: Some(&surface),
-                        force_fallback_adapter: false,
-                        ..Default::default()
-                    })
-                    .await
-                    .expect("surface-compatible adapter required for baseline device");
-                assert!(
-                    adapter.features().contains(feature_plan.hard),
-                    "reacquired WebGPU adapter lacks required indirect-first-instance support"
-                );
-                let baseline = wgpu::DeviceDescriptor {
-                    required_features: feature_plan.hard,
-                    required_limits: wgpu::Limits::default(),
-                    label: None,
-                    memory_hints: wgpu::MemoryHints::default(),
-                    trace: wgpu::Trace::default(),
-                };
-                adapter.request_device(&baseline).await.unwrap()
-            }
-            Err(error) => panic!("baseline WebGPU device request failed: {error}"),
-        };
+        let (device, queue) = adapter.request_device(&descriptor).await.unwrap();
         assert!(
-            device.features().contains(feature_plan.hard),
+            device.features().contains(required_features),
             "WebGPU device lacks required indirect-first-instance support"
         );
         info!("Adapter info: {:?}", adapter.get_info());
         info!("Adapter features: {:?}", adapter.features());
         info!("Adapter limits: {:?}", adapter.limits());
-        let profiler = profiler::Profiler::new(profile, &device, &queue).await;
         let gpu_error = std::sync::Arc::new(std::sync::Mutex::new(None));
         let error_flag = gpu_error.clone();
         device.on_uncaptured_error(Box::new(move |error| {
@@ -2359,8 +2161,6 @@ impl<T: Scene + 'static> Renderer<T> {
         );
         surface.configure(&device, &surface_config);
 
-        let (depth_texture, depth_view) = Self::create_depth_texture(&device, &surface_config);
-
         let mut resources = PipelineLibrary::new();
         let context = RendererContext {
             adapter,
@@ -2369,26 +2169,28 @@ impl<T: Scene + 'static> Renderer<T> {
             queue,
             initial_surface_config: surface_config.clone(),
             surface_config,
-            depth_texture,
-            depth_view,
         };
 
-        let mut render_data =
+        let render_data =
             RenderData::new(RenderDataConfig::default()).expect("valid render data config");
-        let scene = T::setup(&context, &mut resources, &mut render_data);
-        let shared_soa = crate::shared_soa::SharedSoaRegistry::new(render_data.capacities())
+        let mut frame_data = frame_data::FrameData::new(&context, &mut resources);
+        let mut shared_soa = crate::shared_soa::SharedSoaRegistry::new(render_data.capacities())
             .expect("default shared SOA layouts are valid");
+        shared_soa
+            .publish_camera(frame_data.camera_mut())
+            .expect("initial shared camera publication succeeds");
         let materials = material::MaterialResources::new(&context.device, &context.queue);
         resources.set_material_bind_group_layout(&materials.layout);
 
         Self {
             events_chan,
             context,
-            scene,
+            frame_data,
             resources,
             render_data,
             shared_soa,
             shared_soa_init_sent: false,
+            camera_publish_required: false,
             snapshot: crate::shared_snapshot::SharedSnapshot::new(),
             snapshot_init_sent: false,
             scene_frame: Default::default(),
@@ -2397,7 +2199,6 @@ impl<T: Scene + 'static> Renderer<T> {
             command_ring: None,
             pending_replies: Vec::new(),
             gpu_error,
-            framing_radius: 0.0,
             graph_registry: Default::default(),
             active_compiled: None,
             pending_switch: None,
@@ -2406,7 +2207,6 @@ impl<T: Scene + 'static> Renderer<T> {
             next_preparation_token: 0,
             preparation_completions: Default::default(),
             halted: false,
-            profiler,
         }
     }
 
@@ -2436,6 +2236,13 @@ impl<T: Scene + 'static> Renderer<T> {
         };
         self.shared_soa
             .synchronize_render_data(&mut self.render_data);
+        if let Some(rows) = self.shared_soa.take_material_words() {
+            self.materials.synchronize(&self.context.queue, &rows);
+        }
+        if let Err(error) = self.synchronize_shared_camera() {
+            self.post_fatal("SOA_CAMERA_INVALID", &error.to_string());
+            return;
+        }
         if !self.shared_soa_init_sent || soa_layout_changed {
             let message = js_sys::Object::new();
             let message_type = if self.shared_soa_init_sent {
@@ -2505,28 +2312,26 @@ impl<T: Scene + 'static> Renderer<T> {
             Ok(None) => {}
             Err(error) => log::error!("picking snapshot failed closed with error {error}"),
         }
-        let pending = self.pending_switch.as_ref().map(|p| match &p.target {
-            SwitchTarget::Immediate => UploadGraph::Immediate,
-            SwitchTarget::Compiled(graph) => classify_upload_graph(graph),
-        });
-        let target_source = select_frame_target_source(
+        let Some(target_source) = select_frame_target_source(
             self.pending_switch.is_some(),
             self.pending_resize.is_some(),
             self.active_compiled.is_some(),
-        );
-        let selected = match target_source {
-            FrameTargetSource::PendingSwitch => pending,
-            FrameTargetSource::PendingResize => {
-                self.pending_resize.as_ref().map(classify_upload_graph)
-            }
-            FrameTargetSource::Active => self.active_compiled.as_ref().map(classify_upload_graph),
-            FrameTargetSource::Immediate => Some(UploadGraph::Immediate),
+        ) else {
+            self.post_state();
+            return;
         };
-        let query = upload_query_for_render(selected, None);
+        let query = match target_source {
+            FrameTargetSource::PendingSwitch => {
+                requires_camera(&self.pending_switch.as_ref().unwrap().target)
+            }
+            FrameTargetSource::PendingResize => {
+                requires_camera(self.pending_resize.as_ref().unwrap())
+            }
+            FrameTargetSource::Active => requires_camera(self.active_compiled.as_ref().unwrap()),
+        };
         // Resolve again immediately before every active frame. Do this before scene
         // upload so an invalid camera cannot mutate GPU state or produce a frame.
-        let planes = match update_validate_write_scene(&mut self.scene, &self.context.queue, query)
-        {
+        let planes = match update_frame_data(&mut self.frame_data, &self.context.queue, query) {
             Ok(planes) => planes,
             Err(error) => {
                 match target_source {
@@ -2538,7 +2343,7 @@ impl<T: Scene + 'static> Renderer<T> {
                         self.pending_resize = None;
                         log::error!("compiled graph resize preflight failed: {}", error.message);
                     }
-                    FrameTargetSource::Active | FrameTargetSource::Immediate => {
+                    FrameTargetSource::Active => {
                         self.post_fatal("GRAPH_EXECUTION_FAILED", &error.message);
                     }
                 }
@@ -2558,22 +2363,13 @@ impl<T: Scene + 'static> Renderer<T> {
         // the last possible point before acquisition, but retain the known-good
         // configuration and active graph identity until presentation succeeds.
         let candidate_config = match target_source {
-            FrameTargetSource::PendingSwitch => match &self.pending_switch.as_ref().unwrap().target
-            {
-                SwitchTarget::Compiled(active) => Self::surface_config(&active.runtime.surface),
-                SwitchTarget::Immediate => {
-                    let mut config = self.context.initial_surface_config.clone();
-                    config.width = self.context.surface_config.width;
-                    config.height = self.context.surface_config.height;
-                    config
-                }
-            },
+            FrameTargetSource::PendingSwitch => {
+                Self::surface_config(&self.pending_switch.as_ref().unwrap().target.runtime.surface)
+            }
             FrameTargetSource::PendingResize => {
                 Self::surface_config(&self.pending_resize.as_ref().unwrap().runtime.surface)
             }
-            FrameTargetSource::Active | FrameTargetSource::Immediate => {
-                self.context.surface_config.clone()
-            }
+            FrameTargetSource::Active => self.context.surface_config.clone(),
         };
         let restore_config = (candidate_config != self.context.surface_config)
             .then(|| self.context.surface_config.clone());
@@ -2628,49 +2424,21 @@ impl<T: Scene + 'static> Renderer<T> {
                 });
 
         let rendering_compiled = match target_source {
-            FrameTargetSource::PendingSwitch => match &self.pending_switch.as_ref().unwrap().target
-            {
-                SwitchTarget::Compiled(active) => Some(active),
-                SwitchTarget::Immediate => None,
-            },
-            FrameTargetSource::PendingResize => self.pending_resize.as_ref(),
-            FrameTargetSource::Active => self.active_compiled.as_ref(),
-            FrameTargetSource::Immediate => None,
+            FrameTargetSource::PendingSwitch => &self.pending_switch.as_ref().unwrap().target,
+            FrameTargetSource::PendingResize => self.pending_resize.as_ref().unwrap(),
+            FrameTargetSource::Active => self.active_compiled.as_ref().unwrap(),
         };
-        let mut profile_frame = self.profiler.begin(|| match rendering_compiled {
-            None => "immediate".to_owned(),
-            Some(active) => format!(
-                "graph:{}:{}:{}:{}",
-                active.graph.graph_id, active.graph.revision, active.id.slot, active.id.generation
-            ),
-        });
-        let encode_result = if let Some(active) = rendering_compiled {
-            (|| -> Result<(), &'static str> {
-                executors::encode_compiled(
-                    &mut encoder,
-                    &texture_view,
-                    active,
-                    &self.scene,
-                    &self.gpu_scene,
-                    &self.resources,
-                    &self.materials,
-                    planes.as_ref(),
-                    profile_frame.as_mut(),
-                )
-            })()
-        } else {
-            executors::encode_immediate(
-                &mut encoder,
-                &texture_view,
-                &self.context.depth_view,
-                profile_frame.as_mut(),
-            );
-            Ok(())
-        };
+        let encode_result = executors::encode_compiled(
+            &mut encoder,
+            &texture_view,
+            rendering_compiled,
+            &self.frame_data,
+            &self.gpu_scene,
+            &self.resources,
+            &self.materials,
+            planes.as_ref(),
+        );
         if let Err(error) = encode_result {
-            if let Some(frame) = profile_frame.take() {
-                self.profiler.cancel(frame);
-            }
             // A surface must have no acquired texture (or objects retaining its view)
             // when configure is called to roll back a transactional candidate.
             drop(encoder);
@@ -2694,38 +2462,31 @@ impl<T: Scene + 'static> Renderer<T> {
             }
             return;
         }
-        let profile_map = profile_frame.and_then(|frame| self.profiler.finish(&mut encoder, frame));
         self.context.queue.submit(std::iter::once(encoder.finish()));
-        if let Some(request) = profile_map {
-            self.profiler.map(request);
-        }
         surface_texture.present();
         if let Some(pending) = self.pending_switch.take() {
             // A successful user switch supersedes any resize recreation of the
             // previously active graph. Retain that resize candidate only as a
             // fallback while the switch is being prepared or attempted.
             self.pending_resize = None;
-            let result = match pending.target {
-                SwitchTarget::Immediate => {
-                    self.active_compiled = None;
-                    js_sys::JSON::parse(r#"{"mode":"immediate"}"#).unwrap_or(JsValue::NULL)
-                }
-                SwitchTarget::Compiled(active) => {
-                    let summary = serde_json::json!({
-                        "mode":"compiled",
-                        "compiledId":[active.id().slot, active.id().generation],
-                        "graphId":active.graph_id(),
-                        "revision":active.revision(),
-                        "schemaVersion":active.schema_version()
-                    });
-                    self.active_compiled = Some(active);
-                    js_sys::JSON::parse(&summary.to_string()).unwrap_or(JsValue::NULL)
-                }
-            };
+            let active = pending.target;
+            let summary = serde_json::json!({
+                "mode":"compiled",
+                "compiledId":[active.id().slot, active.id().generation],
+                "graphId":active.graph_id(),
+                "revision":active.revision(),
+                "schemaVersion":active.schema_version()
+            });
+            self.active_compiled = Some(active);
+            let result = js_sys::JSON::parse(&summary.to_string()).unwrap_or(JsValue::NULL);
             self.reply(pending.request, Ok(result));
         } else if let Some(candidate) = self.pending_resize.take() {
             self.active_compiled = Some(candidate);
         }
+        self.post_state();
+    }
+
+    fn post_state(&mut self) {
         let global = js_sys::global().unchecked_into::<DedicatedWorkerGlobalScope>();
         for reply in self.pending_replies.drain(..) {
             let _ = global.post_message(&reply);
@@ -2765,13 +2526,12 @@ impl<T: Scene + 'static> Renderer<T> {
                 }
                 .into(),
             ),
-            ("framingRadius", self.framing_radius.into()),
             (
                 "renderMode",
                 if active.is_some() {
                     "compiled".into()
                 } else {
-                    "immediate".into()
+                    "inactive".into()
                 },
             ),
             ("activeCompiledId", active_id),
@@ -2806,9 +2566,6 @@ impl<T: Scene + 'static> Renderer<T> {
             let _ = js_sys::Reflect::set(&telemetry, &key.into(), &value);
         }
         let _ = global.post_message(&telemetry);
-        if let Some(snapshot) = self.profiler.snapshot_json(js_sys::Date::now()) {
-            let _ = global.post_message(&snapshot);
-        }
     }
 
     fn post_fatal(&mut self, code: &str, message: &str) {
@@ -2825,63 +2582,18 @@ impl<T: Scene + 'static> Renderer<T> {
         let _ = global.post_message(&value);
     }
 
-    pub async fn handle_event(renderer: Rc<RefCell<Self>>, event: WindowEvent) {
-        match event {
-            WindowEvent::PointerMove(msg) => {
-                renderer.borrow_mut().mouse_move(msg);
-            }
-            WindowEvent::Resize(msg) => {
-                renderer.borrow_mut().resize(msg);
-            }
-            WindowEvent::PointerClick(msg) => {
-                log::info!("click start");
-
-                let mut r = renderer.borrow_mut();
-                let x = (msg.offset_x * msg.scale_factor) as f32;
-                let y = (msg.offset_y * msg.scale_factor) as f32;
-                r.scene.handle_mouse_click(x, y);
-                log::info!("clicked");
-            }
-            WindowEvent::PointerWheel(msg) => {
-                let mut r = renderer.borrow_mut();
-                r.scene.handle_zoom(msg.delta_y_pixels);
-            }
+    fn drain_resize_events(&mut self) {
+        let events: Vec<_> = self.events_chan.try_iter().collect();
+        for event in events {
+            self.resize(event);
         }
     }
 
-    fn drain_events(renderer: &Rc<RefCell<Self>>) -> Result<(), DrainEventError> {
-        loop {
-            let event = renderer.try_borrow_mut()?.events_chan.try_recv()?;
-
-            let renderer_clone = renderer.clone();
-            spawn_local(async move {
-                Self::handle_event(renderer_clone, event).await;
-            });
-        }
-    }
-
-    pub fn run_render_loop(renderer: Rc<RefCell<Renderer<T>>>) {
+    pub fn run_render_loop(renderer: Rc<RefCell<Renderer>>) {
         let render_frame: Closure<dyn FnMut(f32)> = Closure::new(move |time: f32| {
-            {
-                if let Err(e) = Self::drain_events(&renderer) {
-                    match e {
-                        DrainEventError::ChannelEmpty => {
-                            // Normal condition, no error needed
-                        }
-                        DrainEventError::ChannelDisconnected => {
-                            log::warn!("Event channel disconnected; stopping event polling");
-                        }
-                        DrainEventError::BorrowError(_) => {
-                            log::error!("Failed to borrow renderer: {}", e);
-                        }
-                    }
-                }
-            }
-
-            {
-                if let Ok(mut r) = renderer.try_borrow_mut() {
-                    r.render(time);
-                }
+            if let Ok(mut renderer) = renderer.try_borrow_mut() {
+                renderer.drain_resize_events();
+                renderer.render(time);
             }
 
             Self::run_render_loop(renderer.clone());
@@ -2954,10 +2666,7 @@ impl<T: Scene + 'static> Renderer<T> {
                 }
                 _ => {
                     self.halted = true;
-                    self.post_fatal(
-                        "SURFACE_FRAME_FAILED",
-                        "immediate surface format is unsupported",
-                    );
+                    self.post_fatal("SURFACE_FRAME_FAILED", "base surface format is unsupported");
                     return;
                 }
             };
@@ -2973,16 +2682,12 @@ impl<T: Scene + 'static> Renderer<T> {
                 self.post_fatal("SURFACE_FRAME_FAILED", &error.message);
                 return;
             }
-            // Resize always establishes the exact immediate fallback first. Compiled
-            // configuration is transactional and is applied only by the commit frame.
+            // Resize establishes the base surface dimensions first. Compiled graph
+            // configuration remains transactional until its commit frame.
             self.configure_surface(self.context.initial_surface_config.clone());
-            self.recreate_depth_texture();
-            self.scene.resize(
-                new_width as f64,
-                new_height as f64,
-                msg.scale_factor,
-                &self.context.queue,
-            );
+            self.frame_data
+                .resize(new_width as f64, new_height as f64, &self.context.queue);
+            self.camera_publish_required = true;
             if let Some((id, graph)) = restore {
                 match self.plan_compiled(&graph, new_width, new_height) {
                     Ok(runtime) => {
@@ -3011,16 +2716,22 @@ impl<T: Scene + 'static> Renderer<T> {
         }
     }
 
-    pub fn mouse_move(&mut self, msg: MouseMessage) {
-        let delta_x = msg.movement_x as f32;
-        let delta_y = msg.movement_y as f32;
-        match camera_drag(msg.buttons) {
-            Some(CameraDrag::Orbit) => self.scene.handle_orbit(delta_x, delta_y),
-            Some(CameraDrag::Pan) => {
-                self.scene
-                    .handle_pan(delta_x, delta_y, msg.viewport_height as f32);
+    fn synchronize_shared_camera(&mut self) -> Result<(), crate::shared_soa::SharedSoaError> {
+        let camera = self.frame_data.camera_mut();
+        let outcome = if self.camera_publish_required {
+            self.shared_soa.publish_camera(camera)
+        } else {
+            self.shared_soa.synchronize_camera(camera)
+        };
+        match outcome {
+            Ok(()) => {
+                self.camera_publish_required = false;
+                Ok(())
             }
-            None => {}
+            // Another thread owns the sequence lock for only a handful of atomic stores;
+            // skip this frame and consume or publish the complete row on the next one.
+            Err(crate::shared_soa::SharedSoaError::Busy) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 }

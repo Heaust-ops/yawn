@@ -6,7 +6,6 @@ export async function connectFromWorker(port, options = {}) {
     worker: port,
     memory: options.memory,
     ringPtr: options.ringPtr,
-    pickingWorkerFactory: options.pickingWorkerFactory,
     free: options.free,
   });
   await core.ready;

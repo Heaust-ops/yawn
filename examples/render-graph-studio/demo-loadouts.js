@@ -21,7 +21,7 @@ export function encodeGeometryGlb({positions,normals,texcoords,indices}) {
   const vertexCount=streams[0].length/3, bounds=finiteMinMax(streams[0],3);
   if(indices.some(value=>value>=vertexCount))throw new TypeError("Invalid demo geometry");
   const nodes=[]; for(let z=-1;z<=1;z++)for(let x=-1;x<=1;x++)nodes.push({mesh:0,translation:[x*3,0,z*3]});
-  const json={asset:{version:"2.0",generator:"yawn-phase8"},scene:0,scenes:[{nodes:nodes.map((_,i)=>i)}],nodes,meshes:[{primitives:[{attributes:{POSITION:0,NORMAL:1,TEXCOORD_0:2},indices:3}]}],buffers:[{byteLength}],bufferViews:views,accessors:[
+  const json={asset:{version:"2.0",generator:"yawn-demo"},scene:0,scenes:[{nodes:nodes.map((_,i)=>i)}],nodes,meshes:[{primitives:[{attributes:{POSITION:0,NORMAL:1,TEXCOORD_0:2},indices:3}]}],buffers:[{byteLength}],bufferViews:views,accessors:[
     {bufferView:0,componentType:5126,count:vertexCount,type:"VEC3",min:bounds.min,max:bounds.max},
     {bufferView:1,componentType:5126,count:vertexCount,type:"VEC3"},
     {bufferView:2,componentType:5126,count:vertexCount,type:"VEC2"},
@@ -57,7 +57,7 @@ const galleryPngBase64=Object.freeze({
 });
 const decodeBase64=value=>{const binary=atob(value),bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);return bytes;};
 
-/** Build the deterministic Phase 6 PBR shader validation gallery. */
+/** Build a deterministic PBR shader validation gallery. */
 export function createMaterialGalleryGlb(){
   // A modest shared sphere keeps the embedded GLB compact while making roughness
   // and normal-map responses much easier to compare than the former cubes.
@@ -78,7 +78,7 @@ export function createMaterialGalleryGlb(){
   ];
   const nodes=materials.map((material,index)=>({name:material.name,mesh:index,translation:[(index%4-1.5)*2.5,(1.5-Math.floor(index/4))*2.5,0],...(index===15?{scale:[-1.25,0.7,1.1]}:{})}));
   const meshes=materials.map((material,index)=>({name:material.name,primitives:[{attributes:{POSITION:0,NORMAL:1,TEXCOORD_0:2},indices:3,material:index}]}));
-  const json={asset:{version:"2.0",generator:"yawn-phase6-pbr-gallery"},extensionsUsed:["KHR_materials_ior"],scene:0,scenes:[{name:"Phase 6 deterministic PBR gallery",nodes:nodes.map((_,i)=>i)}],nodes,meshes,materials,
+  const json={asset:{version:"2.0",generator:"yawn-pbr-gallery"},extensionsUsed:["KHR_materials_ior"],scene:0,scenes:[{name:"Deterministic PBR gallery",nodes:nodes.map((_,i)=>i)}],nodes,meshes,materials,
     samplers:[{magFilter:9728,minFilter:9728,wrapS:10497,wrapT:10497}],images:images.map((_,i)=>({name:["Odd-width sRGB base color and emissive","Odd-width linear MR and AO","Odd-width OpenGL normal map"][i],bufferView:i+4,mimeType:"image/png"})),textures:images.map((_,i)=>({sampler:0,source:i})),
     buffers:[{byteLength}],bufferViews,accessors:[{bufferView:0,componentType:5126,count:vertexCount,type:"VEC3",min:bounds.min,max:bounds.max},{bufferView:1,componentType:5126,count:vertexCount,type:"VEC3"},{bufferView:2,componentType:5126,count:vertexCount,type:"VEC2"},{bufferView:3,componentType:5125,count:geometry.indices.length,type:"SCALAR"}]};
   let jsonBytes=encoder.encode(JSON.stringify(json));const jsonLength=align4(jsonBytes.length),total=12+8+jsonLength+8+byteLength,out=new ArrayBuffer(total),view=new DataView(out),bytes=new Uint8Array(out);

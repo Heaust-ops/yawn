@@ -51,13 +51,15 @@ function normalizePipelines(raw = {}) {
       vertexEntry: pipeline.vertexEntry ?? "vs_main",
       fragmentEntry: pipeline.fragmentEntry ?? "fs_main",
       doubleSided: pipeline.doubleSided ?? false,
+      material: pipeline.material ?? false,
     };
     if (
       !identifier(result.name) ||
       !identifier(result.vertexEntry) ||
       !identifier(result.fragmentEntry) ||
       typeof result.shader !== "string" ||
-      typeof result.doubleSided !== "boolean"
+      typeof result.doubleSided !== "boolean" ||
+      typeof result.material !== "boolean"
     )
       fail("AST_PIPELINE", "invalid render pipeline declaration");
     return result;

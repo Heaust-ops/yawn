@@ -1,4 +1,4 @@
-/** Shared render-data snapshot protocol used by core picking workers. */
+/** Shared render-data snapshot protocol consumed by the mesh-handle BVH worker. */
 export const SNAPSHOT = Object.freeze({
   MAGIC: 0x504e5359, BLOB_MAGIC: 0x32534452, VERSION: 1, BYTES: 256,
   SLOTS: 3, SLOT_BYTES: 64, SCHEMA: 2, INIT: 0, OPEN: 1, FAILED: 2,

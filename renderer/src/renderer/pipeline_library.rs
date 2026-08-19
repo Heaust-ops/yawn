@@ -171,11 +171,11 @@ impl PipelineLibrary {
         key
     }
 
-    /// Registers the glTF-only layout, preserving scene groups at 0 and 1.
+    /// Registers the optional material layout after the frame and render-data groups.
     pub fn set_material_bind_group_layout(&mut self, layout: &wgpu::BindGroupLayout) {
         let base = self
             .default_layout
-            .expect("scene layouts must be registered first");
+            .expect("render-data layouts must be registered first");
         let mut layouts = self.layout_bindings[&base].clone();
         layouts.push(layout.clone());
         let key = PipelineLayoutKey(self.next_layout);
@@ -184,12 +184,13 @@ impl PipelineLibrary {
         self.material_layout = Some(key);
     }
 
-    fn compatibility_spec(
+    fn authored_spec(
         &self,
-        name: &str,
         layouts: &[wgpu::VertexBufferLayout],
         shader: &str,
         format: wgpu::TextureFormat,
+        material: bool,
+        double_sided: bool,
     ) -> RenderPipelineSpec {
         let stage = |entry: &str| OwnedProgrammableStage {
             shader_source: shader.to_owned(),
@@ -198,7 +199,7 @@ impl PipelineLibrary {
             zero_initialize_workgroup_memory: true,
         };
         RenderPipelineSpec {
-            layout: if name.starts_with("gltf_") {
+            layout: if material {
                 self.material_layout.or(self.default_layout)
             } else {
                 self.default_layout
@@ -214,7 +215,7 @@ impl PipelineLibrary {
                 .collect(),
             fragment: Some(stage("fs_main")),
             primitive: wgpu::PrimitiveState {
-                cull_mode: (name != "gltf_standard_double_sided").then_some(wgpu::Face::Back),
+                cull_mode: (!double_sided).then_some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -330,7 +331,7 @@ impl PipelineLibrary {
         pipeline_key
     }
 
-    /// Creates a graph-owned scene pipeline from its authored declaration.
+    /// Creates a graph-owned render-data pipeline from its authored declaration.
     pub(crate) fn get_or_create_authored_pipeline(
         &mut self,
         device: &wgpu::Device,
@@ -338,14 +339,18 @@ impl PipelineLibrary {
         layouts: &[wgpu::VertexBufferLayout],
         format: wgpu::TextureFormat,
     ) -> PipelineKey {
-        let mut spec =
-            self.compatibility_spec(&declaration.name, layouts, &declaration.shader, format);
+        let mut spec = self.authored_spec(
+            layouts,
+            &declaration.shader,
+            format,
+            declaration.material,
+            declaration.double_sided,
+        );
         spec.vertex.entry_point = declaration.vertex_entry.clone();
         spec.fragment
             .as_mut()
-            .expect("scene pipelines have fragment stages")
+            .expect("render-data pipelines have fragment stages")
             .entry_point = declaration.fragment_entry.clone();
-        spec.primitive.cull_mode = (!declaration.double_sided).then_some(wgpu::Face::Back);
         self.get_or_create_from_spec(device, &spec, Some(&declaration.name))
     }
 
@@ -463,11 +468,12 @@ mod tests {
     use super::*;
 
     fn spec() -> RenderPipelineSpec {
-        PipelineLibrary::new().compatibility_spec(
-            "x",
+        PipelineLibrary::new().authored_spec(
             &[],
             "shader",
             wgpu::TextureFormat::Rgba8Unorm,
+            false,
+            false,
         )
     }
 

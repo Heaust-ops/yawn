@@ -13,3 +13,5 @@ export * from "./12-direct-sab-animation.js";
 export * from "./13-bvh-picking.js";
 export * from "./14-worker-to-worker.js";
 export * from "./15-complete-scene.js";
+export * from "./16-camera-render-data.js";
+export * from "./17-conventional-handles.js";

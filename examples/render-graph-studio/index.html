@@ -71,11 +71,6 @@
         text-transform: uppercase;
         letter-spacing: 0.08em;
       }
-      #profile-menu { min-width: 210px; color: #9da9ba; }
-      #profile-menu summary { cursor: pointer; color: #eef2f8; }
-      #profile-menu table { width: 100%; font-size: 11px; }
-      #profile-menu th { text-align: left; font-weight: 500; }
-      #profile-menu td { text-align: right; font-variant-numeric: tabular-nums; }
       select,
       button {
         font: inherit;
@@ -165,7 +160,7 @@
             >Scene loadout<select id="loadout-select">
               <option value="cubes">Cubes</option>
               <option value="spheres">UV spheres</option>
-              <option value="materials">Phase 6 PBR gallery</option>
+              <option value="materials">PBR material gallery</option>
             </select></label
           ><label class="field" for="graph-select"
             >Graph preset<select id="graph-select">
@@ -175,7 +170,7 @@
           >
         </div>
         <canvas id="canvas0"></canvas
-        ><output id="demo-status" aria-live="polite">Starting Phase 8…</output>
+        ><output id="demo-status" aria-live="polite">Starting renderer…</output>
       </section>
       <section class="editor" aria-label="Render graph editor">
         <div class="editor-bar">

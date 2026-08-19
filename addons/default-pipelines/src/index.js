@@ -1,5 +1,5 @@
 export const gltfShader = /* wgsl */ `
-struct UniformData { mouse_move: vec2<f32>, mouse_click: vec2<f32>, resolution: vec2<f32>, time: f32, _padding0: f32, camera_position: vec4<f32> }
+struct UniformData { resolution: vec2<f32>, time: f32, _padding0: f32, camera_position: vec4<f32> }
 struct MaterialData { base_color_factor: vec4<f32>, emissive_factor: vec4<f32>, surface_factors: vec4<f32>, alpha_optics: vec4<f32>, flags: vec4<u32>, uv_sets: vec4<u32>, debug_extras: vec4<u32> }
 @group(0) @binding(0) var<uniform> uni: UniformData;
 @group(1) @binding(0) var<uniform> view_proj: mat4x4<f32>;
@@ -76,8 +76,8 @@ export const noopComputeShader = /* wgsl */ `@compute @workgroup_size(1) fn main
 export const defaultPipelines = Object.freeze({
   render: Object.freeze([
     Object.freeze({ name: "ground_plane", shader: groundShader, vertexEntry: "vs_main", fragmentEntry: "fs_main" }),
-    Object.freeze({ name: "gltf_standard", shader: gltfShader, vertexEntry: "vs_main", fragmentEntry: "fs_main" }),
-    Object.freeze({ name: "gltf_standard_double_sided", shader: gltfShader, vertexEntry: "vs_main", fragmentEntry: "fs_main", doubleSided: true }),
+    Object.freeze({ name: "gltf_standard", shader: gltfShader, vertexEntry: "vs_main", fragmentEntry: "fs_main", material: true }),
+    Object.freeze({ name: "gltf_standard_double_sided", shader: gltfShader, vertexEntry: "vs_main", fragmentEntry: "fs_main", doubleSided: true, material: true }),
     Object.freeze({ name: "frame_out", shader: frameShader, vertexEntry: "vs_main", fragmentEntry: "fs_frame_out" }),
   ]),
   compute: Object.freeze([

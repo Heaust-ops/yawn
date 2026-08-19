@@ -11,9 +11,3 @@ export async function compileAndSwitch(core, graph) {
     throw error;
   }
 }
-
-/** Return to clear-only mode before releasing an active compiled loadout. */
-export async function dropActiveGraph(core, compiled) {
-  await core.switchToImmediate();
-  await core.dropCompiledGraph(compiled.compiledId);
-}

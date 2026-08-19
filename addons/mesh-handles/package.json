@@ -1,7 +1,7 @@
 {
   "name": "@yawn/mesh-handles",
   "version": "0.1.0",
-  "description": "Conventional mesh handles over the Yawn worker and shared-SOA protocol",
+  "description": "Conventional mesh, instance, camera, and material handles over Yawn render data",
   "type": "module",
   "exports": "./src/index.js",
   "dependencies": {

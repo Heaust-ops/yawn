@@ -1,7 +1,5 @@
-import { SnapshotReader } from "./snapshot.js";
-
 const HEADER_WORDS = 16, SLOT_WORDS = 40, CAPACITY = 1024, SLOT_VERSION = 2;
-const OP = { IMPORT_GLB: 1, CREATE_INSTANCE: 3, DESTROY_INSTANCE: 6, COMPILE_GRAPH: 7, DROP_GRAPH: 8, SWITCH_GRAPH: 9, ALLOCATE_SOA: 11 };
+const OP = { INSTALL_RENDER_DATA: 1, CREATE_INSTANCE: 3, DESTROY_INSTANCE: 6, COMPILE_GRAPH: 7, DROP_GRAPH: 8, SWITCH_GRAPH: 9, ALLOCATE_SOA: 11 };
 
 export class RendererError extends Error {
   constructor(code, details) { super(details?.message ?? code); this.name = "RendererError"; this.code = code; this.details = details; }
@@ -12,9 +10,8 @@ export class YawnCore extends EventTarget {
   #pending = new Map(); #payloadPending = new Map(); #payloadActive = new Set(); #ready; #disposed = false;
   #readyResolve; #readyReject; #arrays = new Map();
   #transportReady = false;
-  #telemetry; #profile; #stopped = false;
+  #telemetry; #stopped = false; #renderDataSnapshot;
   #graphQueue = []; #graphBusy = false;
-  #bvh; #snapshotReader; #picking = true; #snapshotEpoch = 0; #pickNext = 1; #picks = new Map();
 
   constructor(bridge) {
     super();
@@ -31,20 +28,11 @@ export class YawnCore extends EventTarget {
     this.#worker.addEventListener("error", () => this.#fail("WORKER_ERROR"));
     this.#worker.addEventListener("messageerror", () => this.#fail("WORKER_MESSAGE_ERROR"));
     this.#worker.start?.();
-    try {
-      const factory = bridge.pickingWorkerFactory;
-      if (factory) {
-        this.#bvh = factory();
-        this.#bvh.addEventListener("message", e => this.#bvhMessage(e.data));
-        this.#bvh.addEventListener("error", () => this.#disablePicking("PICKING_FAILED"));
-        this.#bvh.addEventListener("messageerror", () => this.#disablePicking("PICKING_FAILED"));
-      } else this.#picking = false;
-    } catch { this.#picking = false; }
   }
 
   get ready() { return this.#ready; }
   get telemetry() { return this.#telemetry; }
-  get profile() { return this.#profile; }
+  get renderDataSnapshot() { return this.#renderDataSnapshot; }
 
   array(name) {
     const array = this.#arrays.get(name);
@@ -99,9 +87,6 @@ export class YawnCore extends EventTarget {
     } else if (message?.type === "telemetry") {
       this.#telemetry = message;
       this.dispatchEvent(new CustomEvent("renderer-frame", { detail: message }));
-    } else if (message?.type === "profile-snapshot") {
-      this.#profile = message;
-      this.dispatchEvent(new CustomEvent("renderer-profile", { detail: message }));
     } else if (message?.type === "fatal") {
       console.error("renderer worker fatal", JSON.stringify(message));
       this.#fail(message.code || "WORKER_FATAL");
@@ -117,11 +102,18 @@ export class YawnCore extends EventTarget {
     } else if (message?.type === "snapshot-init") {
       try {
         if (message.controlVersion !== 1 || message.schemaVersion !== 2) throw new Error("version");
-        this.#snapshotReader = new SnapshotReader(this.#bridge.memory, message.controlPtr);
-        this.#bvh?.postMessage({type:"init",memory:this.#bridge.memory,controlPtr:message.controlPtr,controlVersion:1,schemaVersion:2});
-      } catch { this.#disablePicking("PICK_PROTOCOL_MISMATCH"); }
+        this.#renderDataSnapshot = Object.freeze({
+          memory: this.#bridge.memory,
+          controlPtr: message.controlPtr,
+          controlVersion: message.controlVersion,
+          schemaVersion: message.schemaVersion,
+        });
+        this.dispatchEvent(new CustomEvent("yawn-render-data-snapshot", { detail: this.#renderDataSnapshot }));
+      } catch { this.#fail("SNAPSHOT_PROTOCOL_MISMATCH"); }
     } else if (message?.type === "snapshot-published") {
-      try { this.#snapshotEpoch=this.#snapshotReader?.latest().epoch||0; this.#bvh?.postMessage({type:"update",epoch:this.#snapshotEpoch}); } catch { this.#disablePicking("PICK_PROTOCOL_MISMATCH"); }
+      this.dispatchEvent(new CustomEvent("yawn-render-data-snapshot-published", {
+        detail: Object.freeze({ epoch: message.epoch >>> 0 }),
+      }));
     }
   }
 
@@ -132,30 +124,10 @@ export class YawnCore extends EventTarget {
     return this.#arrays.get(descriptor.name);
   }
 
-  #disablePicking(code) { this.#picking=false; const allowed=new Set(["PICK_UNAVAILABLE","PICK_PROTOCOL_MISMATCH","PICK_WORKER_ERROR","PICK_STALE","DISPOSED"]); const error=new RendererError(allowed.has(code)?code:"PICK_WORKER_ERROR"); for(const p of this.#picks.values())p.reject(error); this.#picks.clear(); try{this.#bvh?.terminate?.();}catch{} this.#bvh=null; }
-  #bvhMessage(message) {
-    if(message?.type==="fatal"){this.#disablePicking(message.code);return;}
-    if(message?.type!=="pick")return;
-    const p=this.#picks.get(message.request);if(!p)return;this.#picks.delete(message.request);
-    let latest=0;try{latest=this.#snapshotReader.latest().epoch;this.#snapshotEpoch=latest;}catch{this.#disablePicking("PICK_PROTOCOL_MISMATCH");p.reject(new RendererError("PICK_PROTOCOL_MISMATCH"));return;}
-    if(message.stale||p.epoch!==message.epoch||message.epoch!==latest){if(!p.retried&&latest){this.#sendPick({...p,retried:true},latest);}else p.reject(new RendererError("PICK_STALE"));return;}
-    const hits=(message.hits||[]).map(hit=>({instance:[hit.slot>>>0,hit.generation>>>0],distance:hit.distance}));p.resolve({epoch:latest,hits});
-  }
-  #sendPick(p,epoch){const request=this.#pickNext++>>>0||this.#pickNext++;p.epoch=epoch;this.#picks.set(request,p);try{this.#bvh.postMessage({type:"pick",request,epoch,origin:p.origin,direction:p.direction,maxDistance:p.maxDistance,maxHits:p.maxHits});}catch{this.#picks.delete(request);p.reject(new RendererError("PICK_WORKER_ERROR"));}}
-
-  pickRay(origin,direction,{maxDistance=Infinity,maxHits=1}={}) {
-    const vector=(v,name)=>{if(!v||v.length!==3||[...v].some(x=>typeof x!=="number"||!Number.isFinite(x)))throw new TypeError(`${name} must contain 3 finite numbers`);return [...v];};
-    origin=vector(origin,"origin");direction=vector(direction,"direction");if(direction.every(x=>x===0))throw new TypeError("direction must be nonzero");if(typeof maxDistance!=="number"||(!(Number.isFinite(maxDistance)&&maxDistance>=0)&&maxDistance!==Infinity)||!Number.isInteger(maxHits)||maxHits<1||maxHits>64)throw new TypeError("invalid pick options");
-    if(this.#disposed)return Promise.reject(new RendererError("DISPOSED"));if(!this.#picking||!this.#bvh||!this.#snapshotReader)return Promise.reject(new RendererError("PICK_UNAVAILABLE"));
-    let epoch;try{epoch=this.#snapshotReader.latest().epoch;this.#snapshotEpoch=epoch;}catch{return Promise.reject(new RendererError("PICK_PROTOCOL_MISMATCH"));}if(!epoch)return Promise.reject(new RendererError("PICK_STALE"));
-    return new Promise((resolve,reject)=>this.#sendPick({resolve,reject,origin,direction,maxDistance,maxHits,retried:false},epoch));
-  }
-
   #stop() {
     if (this.#stopped) return;
     this.#stopped = true;
     try { this.#worker?.terminate?.(); } catch { /* best effort */ }
-    try { this.#bvh?.postMessage?.({type:"dispose"}); this.#bvh?.terminate?.(); } catch { /* best effort */ }
     try { this.#bridge?.free?.(); } catch { /* best effort */ }
     this.#bridge = null;
   }
@@ -171,7 +143,6 @@ export class YawnCore extends EventTarget {
     this.#payloadPending.clear();
     for (const pending of this.#graphQueue) pending.reject(error);
     this.#graphQueue.length = 0;
-    this.#disablePicking(code === "DISPOSED" ? "DISPOSED" : "PICK_WORKER_ERROR");
     this.#stop();
   }
 
@@ -211,14 +182,13 @@ export class YawnCore extends EventTarget {
     return promise;
   }
 
-  commitGlbUpload(array, byteLength, { framing = "exterior" } = {}) {
+  commitRenderDataUpload(array, byteLength) {
     if (this.#disposed) throw new RendererError("DISPOSED");
-    if (framing !== "exterior" && framing !== "interior") throw new TypeError("framing must be exterior or interior");
     if (!(array instanceof SharedSoaArray) || array.domain !== "fixed" || array.scalar !== "u32" || array.stride !== array.lanes * 4)
       throw new TypeError("array must be a packed fixed uint32 shared array");
     if (!Number.isInteger(byteLength) || byteLength < 1 || byteLength > array.length * array.lanes * 4)
       throw new RangeError("byteLength is outside the shared array");
-    return this.#enqueue(OP.IMPORT_GLB, [array.id, byteLength, framing === "interior" ? 1 : 0]);
+    return this.#enqueue(OP.INSTALL_RENDER_DATA, [array.id, byteLength]);
   }
 
   async createInstance(mesh, transform, { type = Array(16).fill(0) } = {}) {
@@ -306,11 +276,7 @@ export class YawnCore extends EventTarget {
   switchCompiledGraph(compiledId) {
     validateCompiledId(compiledId);
     if (compiledId[0] === 0 && compiledId[1] === 0) throw new TypeError("compiledId must be nonzero");
-    return this.#graphCall(() => this.#enqueue(OP.SWITCH_GRAPH, [1, ...compiledId]));
-  }
-
-  switchToImmediate() {
-    return this.#graphCall(() => this.#enqueue(OP.SWITCH_GRAPH, [0, 0, 0]));
+    return this.#graphCall(() => this.#enqueue(OP.SWITCH_GRAPH, compiledId));
   }
 
   dispose() { this.#fail("DISPOSED"); }

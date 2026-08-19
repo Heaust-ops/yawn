@@ -2,8 +2,5 @@
   "name": "@yawn/core",
   "version": "0.1.0",
   "type": "module",
-  "exports": {
-    ".": "./src/index.js",
-    "./snapshot": "./src/snapshot.js"
-  }
+  "exports": "./src/index.js"
 }

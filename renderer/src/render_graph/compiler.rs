@@ -460,7 +460,11 @@ fn normalize_texture(
     })
 }
 
-fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
+fn decode(
+    node: &Node,
+    i: usize,
+    pipelines: &PipelineDeclarations,
+) -> Result<NormalizedParameters, GraphError> {
     let base = format!("nodes[{i}].parameters");
     let invalid =
         |e: serde_json::Error| error("GRAPH_PARAMETERS_INVALID", &e.to_string(), base.clone());
@@ -733,7 +737,7 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 descriptor: normalize_texture(p.texture, &base)?,
             }
         }
-        key if contract(key).is_some_and(|contract| contract.is_raster_draw()) => {
+        key if contract_for(key, pipelines).is_some_and(|contract| contract.is_raster_draw()) => {
             let p: RasterParameters =
                 serde_json::from_value(node.parameters.clone()).map_err(invalid)?;
             if !p.clear_depth.is_finite() || !(0.0..=1.0).contains(&p.clear_depth) {
@@ -758,10 +762,10 @@ fn decode(node: &Node, i: usize) -> Result<NormalizedParameters, GraphError> {
                 predicate_default: p.predicate_default,
             }
         }
-        key if contract(key)
+        key if contract_for(key, pipelines)
             .is_some_and(|contract| contract.execution == ExecutionClass::Expression) =>
         {
-            let contract = contract(key).unwrap();
+            let contract = contract_for(key, pipelines).unwrap();
             let object = node.parameters.as_object().ok_or_else(|| {
                 error(
                     "GRAPH_PARAMETERS_INVALID",
@@ -909,7 +913,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         .iter()
         .enumerate()
         .map(|(i, n)| {
-            contract(&n.executor.key).ok_or_else(|| {
+            contract_for(&n.executor.key, &graph.pipelines).ok_or_else(|| {
                 error(
                     "GRAPH_UNKNOWN_EXECUTOR",
                     "unknown executor",
@@ -931,7 +935,7 @@ pub fn compile(graph: Graph) -> Result<CompiledGraph, GraphError> {
         .nodes
         .iter()
         .enumerate()
-        .map(|(i, n)| decode(n, i))
+        .map(|(i, n)| decode(n, i, &graph.pipelines))
         .collect::<Result<_, _>>()?;
     if graph
         .nodes

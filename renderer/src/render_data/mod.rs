@@ -1,5 +1,7 @@
+pub(crate) mod camera;
 mod handle;
 mod range_allocator;
+pub(crate) mod upload;
 
 pub use handle::{InstanceHandle, MeshHandle};
 
@@ -32,7 +34,7 @@ pub const IDENTITY_NORMAL_MATRIX: NormalMatrix =
 pub struct MaterialKey(u32);
 
 impl MaterialKey {
-    /// The glTF/default material.
+    /// The default material.
     pub const DEFAULT: Self = Self(0);
 
     pub const fn new(value: u32) -> Self {
@@ -428,6 +430,9 @@ impl RenderData {
 
     /// Creates an empty transactional successor whose handles cannot alias this data.
     pub fn replacement_stage(&self) -> Result<ReplacementStage, RenderDataError> {
+        // Preflight the only fallible operation left at commit time. With the stage
+        // prepared synchronously, lineage and handle generations cannot drift.
+        self.next_revision()?;
         let capacities = self.capacities();
         let mut stage = Self::new(RenderDataConfig {
             initial_vertices: capacities.vertices,

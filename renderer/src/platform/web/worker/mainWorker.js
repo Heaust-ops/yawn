@@ -1,4 +1,4 @@
-// The level editor's render worker owns its only WASM and WebGPU runtime.
+// The render worker owns its only WASM and WebGPU runtime.
 import initWasm, {
   clear_payloads,
   discard_payload,
@@ -6,7 +6,7 @@ import initWasm, {
   worker_main,
   worker_memory,
   worker_window_event,
-} from "/level-editor/pkg/level_editor.js";
+} from "/renderer/pkg/renderer.js";
 
 function listenerReady() {
   if (state !== "waiting-listener") return;
@@ -30,7 +30,7 @@ addEventListener("message", async (event) => {
   }
   if (state !== "uninitialized") return;
   state = "initializing";
-  const { canvas, profile } = message;
+  const { canvas } = message;
 
   // The renderer worker exclusively owns the one WASM instance. Other threads
   // receive only its shared memory and mutate the published SAB layouts.
@@ -43,7 +43,7 @@ addEventListener("message", async (event) => {
   state = "waiting-listener";
   pending.push({ type: "canvas", canvas });
   try {
-    const ringPtr = worker_main(profile);
+    const ringPtr = worker_main();
     postMessage({ type: "bootstrap", memory: worker_memory(), ringPtr });
     setTimeout(listenerReady, 0);
   } catch (error) {

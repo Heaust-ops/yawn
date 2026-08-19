@@ -8,7 +8,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::render_data::{InstanceHandle, RenderData, RenderDataCapacities};
+use crate::render_data::{
+    camera::Camera,
+    upload::{Material, MaterialState},
+    InstanceHandle, MaterialKey, RenderData, RenderDataCapacities,
+};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"YSOA");
 pub const VERSION: u32 = 1;
@@ -344,6 +348,8 @@ fn valid_name(value: &str) -> bool {
 pub struct SharedSoaRegistry {
     arrays: BTreeMap<String, SharedArray>,
     next_id: u32,
+    layout_changed: bool,
+    material_keys: Vec<MaterialKey>,
     published_instance_generations: BTreeMap<u32, u32>,
     published_mesh_generations: BTreeMap<u32, u32>,
 }
@@ -353,6 +359,8 @@ impl SharedSoaRegistry {
         let mut registry = Self {
             arrays: BTreeMap::new(),
             next_id: 1,
+            layout_changed: false,
+            material_keys: Vec::new(),
             published_instance_generations: BTreeMap::new(),
             published_mesh_generations: BTreeMap::new(),
         };
@@ -389,9 +397,28 @@ impl SharedSoaRegistry {
                 stride: Some(16),
                 length: None,
             },
+            ArrayRequest {
+                name: "camera.state".into(),
+                domain: ArrayDomain::Fixed,
+                scalar: ScalarType::F32,
+                lanes: 16,
+                stride: Some(64),
+                length: Some(1),
+            },
+            ArrayRequest {
+                name: "material.state".into(),
+                domain: ArrayDomain::Fixed,
+                scalar: ScalarType::U32,
+                lanes: MaterialState::LANES,
+                stride: Some(112),
+                length: Some(1),
+            },
         ] {
             registry.allocate(request, capacities)?;
         }
+        registry.publish_materials(&[Material::default()])?;
+        registry.material_keys.clear();
+        registry.layout_changed = false;
         Ok(registry)
     }
 
@@ -447,7 +474,7 @@ impl SharedSoaRegistry {
                 return Err(SharedSoaError::LayoutConflict);
             }
             if request.domain == ArrayDomain::Fixed {
-                existing.resize(capacity)?;
+                self.layout_changed |= existing.resize(capacity)?;
             }
             return existing.descriptor();
         }
@@ -460,6 +487,7 @@ impl SharedSoaRegistry {
         let array = SharedArray::new(id, request, stride / 4, capacity)?;
         let descriptor = array.descriptor()?;
         self.arrays.insert(name, array);
+        self.layout_changed = true;
         Ok(descriptor)
     }
 
@@ -514,12 +542,132 @@ impl SharedSoaRegistry {
         Ok(bytes)
     }
 
+    /// Publish an infrequent worker-owned camera reset into the canonical shared row.
+    pub fn publish_camera(&mut self, camera: &Camera) -> Result<(), SharedSoaError> {
+        let array = self
+            .arrays
+            .get_mut("camera.state")
+            .ok_or(SharedSoaError::UnknownArray)?;
+        let sequence = array.try_lock().ok_or(SharedSoaError::Busy)?;
+        for (lane, value) in camera.shared_state().into_iter().enumerate() {
+            array
+                .data_word(0, lane as u32)
+                .store(value.to_bits(), Ordering::Relaxed);
+        }
+        array.unlock(sequence);
+        Ok(())
+    }
+
+    /// Apply a newly published shared camera row. Invalid external rows are replaced
+    /// with the last valid worker state so all writers can recover on their next read.
+    pub fn synchronize_camera(&mut self, camera: &mut Camera) -> Result<(), SharedSoaError> {
+        let Some(array) = self.arrays.get_mut("camera.state") else {
+            return Err(SharedSoaError::UnknownArray);
+        };
+        if !array.changed() {
+            return Ok(());
+        }
+        let sequence = array.try_lock().ok_or(SharedSoaError::Busy)?;
+        let state = std::array::from_fn(|lane| {
+            f32::from_bits(array.data_word(0, lane as u32).load(Ordering::Acquire))
+        });
+        array.unlock(sequence);
+        if !camera.apply_shared_state(state) {
+            self.publish_camera(camera)?;
+        }
+        Ok(())
+    }
+
+    /// Replaces the packed material rows after a transactional render-data upload.
+    pub fn publish_materials(&mut self, materials: &[Material]) -> Result<(), SharedSoaError> {
+        let length = materials
+            .iter()
+            .map(|material| material.key.get())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(SharedSoaError::SizeOverflow)?;
+        self.allocate(
+            ArrayRequest {
+                name: "material.state".into(),
+                domain: ArrayDomain::Fixed,
+                scalar: ScalarType::U32,
+                lanes: MaterialState::LANES,
+                stride: Some(112),
+                length: Some(length),
+            },
+            RenderDataCapacities {
+                vertices: 0,
+                indices: 0,
+                meshes: 0,
+                instances: 0,
+            },
+        )?;
+        let array = self
+            .arrays
+            .get_mut("material.state")
+            .ok_or(SharedSoaError::UnknownArray)?;
+        let sequence = (0..1024)
+            .find_map(|_| array.try_lock())
+            .ok_or(SharedSoaError::Busy)?;
+        let fallback = MaterialState::from(&Material::default()).words();
+        for slot in 0..length {
+            for (lane, word) in fallback.iter().copied().enumerate() {
+                array
+                    .data_word(slot, lane as u32)
+                    .store(word, Ordering::Relaxed);
+            }
+        }
+        for material in materials {
+            for (lane, word) in MaterialState::from(material)
+                .words()
+                .into_iter()
+                .enumerate()
+            {
+                array
+                    .data_word(material.key.get(), lane as u32)
+                    .store(word, Ordering::Relaxed);
+            }
+        }
+        array.unlock(sequence);
+        self.material_keys = materials.iter().map(|material| material.key).collect();
+        self.material_keys.sort_by_key(|key| key.get());
+        self.material_keys.dedup();
+        Ok(())
+    }
+
+    /// Takes complete changed material rows for one batched queue write per material.
+    pub fn take_material_words(
+        &mut self,
+    ) -> Option<Vec<(MaterialKey, [u32; MaterialState::LANES as usize])>> {
+        let array = self.arrays.get_mut("material.state")?;
+        if !array.changed() {
+            return None;
+        }
+        let sequence = array.try_lock()?;
+        let rows = self
+            .material_keys
+            .iter()
+            .copied()
+            .map(|key| {
+                let words = std::array::from_fn(|lane| {
+                    array
+                        .data_word(key.get(), lane as u32)
+                        .load(Ordering::Acquire)
+                });
+                (key, words)
+            })
+            .collect();
+        array.unlock(sequence);
+        Some(rows)
+    }
+
     /// Reallocates matching-domain columns before a frame. Old blocks stay pinned.
     pub fn sync_capacities(
         &mut self,
         capacities: RenderDataCapacities,
     ) -> Result<bool, SharedSoaError> {
-        let mut changed = false;
+        let mut changed = std::mem::take(&mut self.layout_changed);
         for array in self.arrays.values_mut() {
             if array.request.domain == ArrayDomain::Fixed {
                 continue;
@@ -719,6 +867,83 @@ mod tests {
     }
 
     #[test]
+    fn camera_is_one_aligned_row_and_external_updates_are_validated() {
+        let mut registry = SharedSoaRegistry::new(capacities(8)).unwrap();
+        let descriptor = registry.arrays["camera.state"].descriptor().unwrap();
+        assert_eq!(descriptor.domain, ArrayDomain::Fixed);
+        assert_eq!(descriptor.scalar, ScalarType::F32);
+        assert_eq!(
+            (descriptor.lanes, descriptor.stride, descriptor.length),
+            (16, 64, 1)
+        );
+
+        let mut camera = Camera::new(1.5);
+        registry.publish_camera(&camera).unwrap();
+        let mut external = camera.shared_state();
+        external[0..3].copy_from_slice(&[2.0, 1.0, 4.0]);
+        external[13] = 2.0;
+        let array = registry.arrays.get_mut("camera.state").unwrap();
+        let sequence = array.word(9).load(Ordering::Acquire);
+        array.word(9).store(sequence + 1, Ordering::Release);
+        for (lane, value) in external.into_iter().enumerate() {
+            array
+                .data_word(0, lane as u32)
+                .store(value.to_bits(), Ordering::Relaxed);
+        }
+        array.word(9).store(sequence + 2, Ordering::Release);
+
+        registry.synchronize_camera(&mut camera).unwrap();
+        assert_eq!(camera.shared_state(), external);
+
+        let valid = camera.shared_state();
+        let array = registry.arrays.get_mut("camera.state").unwrap();
+        let sequence = array.word(9).load(Ordering::Acquire);
+        array.word(9).store(sequence + 1, Ordering::Release);
+        array
+            .data_word(0, 13)
+            .store(f32::NAN.to_bits(), Ordering::Relaxed);
+        array.word(9).store(sequence + 2, Ordering::Release);
+        registry.synchronize_camera(&mut camera).unwrap();
+        let recovered = registry.arrays["camera.state"].data_word(0, 13);
+        assert_eq!(f32::from_bits(recovered.load(Ordering::Acquire)), valid[13]);
+    }
+
+    #[test]
+    fn material_rows_are_packed_resized_and_consumed_after_external_writes() {
+        let mut registry = SharedSoaRegistry::new(capacities(8)).unwrap();
+        let mut material = Material {
+            key: MaterialKey::new(3),
+            ..Material::default()
+        };
+        material.base_color_factor = [0.2, 0.4, 0.8, 1.0];
+        material.roughness_factor = 0.75;
+        registry.publish_materials(&[material.clone()]).unwrap();
+        let descriptor = registry.arrays["material.state"].descriptor().unwrap();
+        assert_eq!(
+            (
+                descriptor.scalar,
+                descriptor.lanes,
+                descriptor.stride,
+                descriptor.length
+            ),
+            (ScalarType::U32, 28, 112, 4)
+        );
+
+        let array = registry.arrays.get_mut("material.state").unwrap();
+        let sequence = array.word(9).load(Ordering::Acquire);
+        array.word(9).store(sequence + 1, Ordering::Release);
+        array
+            .data_word(3, 9)
+            .store(0.25f32.to_bits(), Ordering::Relaxed);
+        array.word(9).store(sequence + 2, Ordering::Release);
+        let rows = registry.take_material_words().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, MaterialKey::new(3));
+        assert_eq!(f32::from_bits(rows[0].1[9]), 0.25);
+        assert!(registry.take_material_words().is_none());
+    }
+
+    #[test]
     fn custom_layouts_are_aligned_idempotent_and_conflict_checked() {
         let mut registry = SharedSoaRegistry::new(capacities(8)).unwrap();
         let request = ArrayRequest {
@@ -761,7 +986,7 @@ mod tests {
     fn fixed_arrays_grow_and_publish_stable_byte_uploads() {
         let mut registry = SharedSoaRegistry::new(capacities(8)).unwrap();
         let request = |length| ArrayRequest {
-            name: "upload.gltf".into(),
+            name: "upload.renderData".into(),
             domain: ArrayDomain::Fixed,
             scalar: ScalarType::U32,
             lanes: 4,
@@ -773,18 +998,18 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!((second.length, second.capacity), (2, 2));
 
-        let array = registry.arrays.get_mut("upload.gltf").unwrap();
+        let array = registry.arrays.get_mut("upload.renderData").unwrap();
         let sequence = array.try_lock().unwrap();
         array
             .data_word(0, 0)
-            .store(u32::from_le_bytes(*b"glTF"), Ordering::Relaxed);
+            .store(u32::from_le_bytes(*b"YRDP"), Ordering::Relaxed);
         array
             .data_word(0, 1)
             .store(u32::from_le_bytes([2, 0, 0, 0]), Ordering::Relaxed);
         array.unlock(sequence);
         assert_eq!(
             registry.read_fixed_bytes(first.id, 8).unwrap(),
-            b"glTF\x02\0\0\0"
+            b"YRDP\x02\0\0\0"
         );
     }
 

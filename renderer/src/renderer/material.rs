@@ -1,92 +1,15 @@
 use std::collections::HashMap;
 
-use bytemuck::{Pod, Zeroable};
 use image::DynamicImage;
 use wgpu::util::DeviceExt;
 
-use crate::{
-    gltf::{AlphaMode, ImageSource, ImportedScene, Material, SamplerMetadata, TextureReference},
-    render_data::MaterialKey,
+use crate::render_data::{
+    upload::{AddressMode, FilterMode, Material, MaterialState, RenderDataUpload, SamplerMetadata},
+    MaterialKey,
 };
-
-const BASE: u32 = 1 << 0;
-const MR: u32 = 1 << 1;
-const NORMAL: u32 = 1 << 2;
-const OCCLUSION: u32 = 1 << 3;
-const EMISSIVE: u32 = 1 << 4;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct GpuMaterial {
-    pub base_color_factor: [f32; 4],
-    pub emissive_factor: [f32; 4],
-    pub surface_factors: [f32; 4],
-    pub alpha_optics: [f32; 4],
-    pub flags: [u32; 4],
-    pub uv_sets: [u32; 4],
-    /// Internal shader diagnostics; zero means the normal shaded view.
-    pub debug_extras: [u32; 4],
-}
-
-fn enabled(reference: Option<TextureReference>, bit: u32) -> u32 {
-    reference.filter(|r| r.tex_coord == 0).map_or(0, |_| bit)
-}
-
-impl From<&Material> for GpuMaterial {
-    fn from(value: &Material) -> Self {
-        Self {
-            base_color_factor: value.base_color_factor,
-            emissive_factor: [
-                value.emissive_factor[0],
-                value.emissive_factor[1],
-                value.emissive_factor[2],
-                0.0,
-            ],
-            surface_factors: [
-                value.metallic_factor,
-                value.roughness_factor,
-                value.normal_scale,
-                value.occlusion_strength,
-            ],
-            alpha_optics: [
-                match value.alpha_mode {
-                    AlphaMode::Opaque => 0.0,
-                    AlphaMode::Mask => 1.0,
-                    AlphaMode::Blend => 2.0,
-                },
-                value.alpha_cutoff,
-                value.ior,
-                if value.ior == 0.0 {
-                    1.0
-                } else {
-                    ((value.ior - 1.0) / (value.ior + 1.0)).powi(2)
-                },
-            ],
-            flags: [
-                enabled(value.base_color_texture, BASE)
-                    | enabled(value.metallic_roughness_texture, MR)
-                    | enabled(value.normal_texture, NORMAL)
-                    | enabled(value.occlusion_texture, OCCLUSION)
-                    | enabled(value.emissive_texture, EMISSIVE),
-                u32::from(value.double_sided),
-                0,
-                0,
-            ],
-            uv_sets: [
-                value.base_color_texture.map_or(0, |x| x.tex_coord),
-                value.metallic_roughness_texture.map_or(0, |x| x.tex_coord),
-                value.normal_texture.map_or(0, |x| x.tex_coord),
-                value.occlusion_texture.map_or(0, |x| x.tex_coord),
-            ],
-            debug_extras: [value.emissive_texture.map_or(0, |x| x.tex_coord), 0, 0, 0],
-        }
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaterialError {
-    #[error("external image sources are unsupported")]
-    ExternalImage,
     #[error("unsupported image MIME type: {0}")]
     Mime(String),
     #[error("image decode failed: {0}")]
@@ -97,8 +20,13 @@ pub enum MaterialError {
     InvalidRgba(&'static str),
 }
 
+struct MaterialBinding {
+    group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+}
+
 pub(super) struct PreparedMaterials {
-    groups: HashMap<MaterialKey, wgpu::BindGroup>,
+    groups: HashMap<MaterialKey, MaterialBinding>,
     textures: Vec<wgpu::Texture>,
     views: Vec<[wgpu::TextureView; 2]>,
     samplers: Vec<wgpu::Sampler>,
@@ -106,8 +34,8 @@ pub(super) struct PreparedMaterials {
 
 pub struct MaterialResources {
     pub layout: wgpu::BindGroupLayout,
-    groups: HashMap<MaterialKey, wgpu::BindGroup>,
-    fallback: wgpu::BindGroup,
+    groups: HashMap<MaterialKey, MaterialBinding>,
+    fallback: MaterialBinding,
     fallback_views: Vec<wgpu::TextureView>,
     fallback_sampler: wgpu::Sampler,
     textures: Vec<wgpu::Texture>,
@@ -208,12 +136,18 @@ fn slot_uses_srgb(slot: usize) -> bool {
     matches!(slot, 0 | 4)
 }
 
-fn address(value: &str) -> wgpu::AddressMode {
+fn address(value: AddressMode) -> wgpu::AddressMode {
     match value {
-        "ClampToEdge" => wgpu::AddressMode::ClampToEdge,
-        "MirroredRepeat" => wgpu::AddressMode::MirrorRepeat,
-        "Repeat" => wgpu::AddressMode::Repeat,
-        _ => unreachable!("gltf crate returned unknown wrap"),
+        AddressMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+        AddressMode::MirrorRepeat => wgpu::AddressMode::MirrorRepeat,
+        AddressMode::Repeat => wgpu::AddressMode::Repeat,
+    }
+}
+
+fn filter(value: FilterMode) -> wgpu::FilterMode {
+    match value {
+        FilterMode::Nearest => wgpu::FilterMode::Nearest,
+        FilterMode::Linear => wgpu::FilterMode::Linear,
     }
 }
 
@@ -227,29 +161,13 @@ fn sampler_descriptor(metadata: Option<&SamplerMetadata>) -> wgpu::SamplerDescri
             wgpu::AddressMode::Repeat,
         ),
         |m| {
-            let mag = match m.mag_filter.as_deref() {
-                Some("Nearest") => wgpu::FilterMode::Nearest,
-                Some("Linear") | None => wgpu::FilterMode::Linear,
-                _ => unreachable!(),
-            };
-            let (min, mip) = match m.min_filter.as_deref() {
-                Some("Nearest") => (wgpu::FilterMode::Nearest, wgpu::FilterMode::Nearest),
-                Some("Linear") => (wgpu::FilterMode::Linear, wgpu::FilterMode::Nearest),
-                Some("NearestMipmapNearest") => {
-                    (wgpu::FilterMode::Nearest, wgpu::FilterMode::Nearest)
-                }
-                Some("LinearMipmapNearest") => {
-                    (wgpu::FilterMode::Linear, wgpu::FilterMode::Nearest)
-                }
-                Some("NearestMipmapLinear") => {
-                    (wgpu::FilterMode::Nearest, wgpu::FilterMode::Linear)
-                }
-                Some("LinearMipmapLinear") | None => {
-                    (wgpu::FilterMode::Linear, wgpu::FilterMode::Linear)
-                }
-                _ => unreachable!(),
-            };
-            (mag, min, mip, address(&m.wrap_s), address(&m.wrap_t))
+            (
+                filter(m.mag_filter),
+                filter(m.min_filter),
+                filter(m.mipmap_filter),
+                address(m.address_u),
+                address(m.address_v),
+            )
         },
     );
     wgpu::SamplerDescriptor {
@@ -289,7 +207,7 @@ impl MaterialResources {
             ));
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("glTF material group 2"),
+            label: Some("render-data material group 2"),
             entries: &entries,
         });
         let colors = [[255, 255, 255, 255], [128, 128, 255, 255], [0, 0, 0, 255]];
@@ -333,11 +251,11 @@ impl MaterialResources {
         material: &Material,
         views: [&wgpu::TextureView; 5],
         samplers: [&wgpu::Sampler; 5],
-    ) -> wgpu::BindGroup {
+    ) -> MaterialBinding {
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material uniform"),
-            contents: bytemuck::bytes_of(&GpuMaterial::from(material)),
-            usage: wgpu::BufferUsages::UNIFORM,
+            contents: bytemuck::bytes_of(&MaterialState::from(material)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
@@ -355,30 +273,28 @@ impl MaterialResources {
                 resource: wgpu::BindingResource::Sampler(sampler),
             });
         }
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
             layout,
             entries: &entries,
-        })
+        });
+        MaterialBinding { group, uniform }
     }
 
     pub(super) fn prepare(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        scene: &ImportedScene,
+        scene: &RenderDataUpload,
     ) -> Result<PreparedMaterials, MaterialError> {
         let max_dimension = device.limits().max_texture_dimension_2d;
         let mut textures = Vec::with_capacity(scene.images.len());
         let mut views = Vec::with_capacity(scene.images.len());
         for image in &scene.images {
-            if !matches!(image.source, ImageSource::BufferView(_)) {
-                return Err(MaterialError::ExternalImage);
-            }
-            let format = match image.mime_type.as_deref() {
-                Some("image/png") => image::ImageFormat::Png,
-                Some("image/jpeg") => image::ImageFormat::Jpeg,
-                other => return Err(MaterialError::Mime(other.unwrap_or("missing").into())),
+            let format = match image.mime_type.as_str() {
+                "image/png" => image::ImageFormat::Png,
+                "image/jpeg" => image::ImageFormat::Jpeg,
+                other => return Err(MaterialError::Mime(other.into())),
             };
             let decoded = image::load_from_memory_with_format(&image.encoded_data, format)?;
             let (width, height, rgba) = normalize_rgba(decoded);
@@ -386,7 +302,7 @@ impl MaterialResources {
             let (texture, image_views) = upload_rgba(
                 device,
                 queue,
-                "glTF embedded image",
+                "render-data image",
                 width,
                 height,
                 bytes_per_row,
@@ -464,7 +380,24 @@ impl MaterialResources {
     }
 
     pub fn group(&self, key: MaterialKey) -> &wgpu::BindGroup {
-        self.groups.get(&key).unwrap_or(&self.fallback)
+        &self.groups.get(&key).unwrap_or(&self.fallback).group
+    }
+
+    pub fn synchronize(
+        &self,
+        queue: &wgpu::Queue,
+        rows: &[(MaterialKey, [u32; MaterialState::LANES as usize])],
+    ) {
+        for (key, words) in rows {
+            let binding = self
+                .groups
+                .get(key)
+                .or_else(|| (*key == MaterialKey::DEFAULT).then_some(&self.fallback));
+            if let Some(binding) = binding {
+                let state = MaterialState::from_words(*words);
+                queue.write_buffer(&binding.uniform, 0, bytemuck::bytes_of(&state));
+            }
+        }
     }
 }
 
@@ -510,30 +443,30 @@ mod tests {
     }
     #[test]
     fn material_uniform_is_112_bytes() {
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 112);
+        assert_eq!(std::mem::size_of::<MaterialState>(), 112);
     }
     #[test]
     fn texcoord_one_disables_slot() {
         let mut m = Material::default();
-        m.base_color_texture = Some(TextureReference {
+        m.base_color_texture = Some(crate::render_data::upload::TextureReference {
             texture: 0,
             tex_coord: 1,
         });
-        assert_eq!(GpuMaterial::from(&m).flags[0] & BASE, 0);
+        assert_eq!(MaterialState::from(&m).flags[0] & 1, 0);
     }
     #[test]
     fn material_packing_includes_ior_f0_flags_and_uv_sets() {
         let mut m = Material::default();
         m.ior = 2.0;
         m.double_sided = true;
-        m.normal_texture = Some(TextureReference {
+        m.normal_texture = Some(crate::render_data::upload::TextureReference {
             texture: 4,
             tex_coord: 0,
         });
-        let gpu = GpuMaterial::from(&m);
+        let gpu = MaterialState::from(&m);
         assert_eq!(gpu.alpha_optics[2], 2.0);
         assert!((gpu.alpha_optics[3] - 1.0 / 9.0).abs() < 1e-6);
-        assert_eq!(gpu.flags[0] & NORMAL, NORMAL);
+        assert_eq!(gpu.flags[0] & (1 << 2), 1 << 2);
         assert_eq!(gpu.flags[1], 1);
         assert_eq!(gpu.uv_sets[2], 0);
     }
@@ -541,18 +474,18 @@ mod tests {
     fn explicit_ior_sentinel_packs_unit_f0() {
         let mut material = Material::default();
         material.ior = 0.0;
-        let gpu = GpuMaterial::from(&material);
+        let gpu = MaterialState::from(&material);
         assert_eq!(gpu.alpha_optics[2], 0.0);
         assert_eq!(gpu.alpha_optics[3], 1.0);
     }
     #[test]
     fn sampler_translation_is_exact() {
         let m = SamplerMetadata {
-            index: 0,
-            mag_filter: Some("Nearest".into()),
-            min_filter: Some("LinearMipmapNearest".into()),
-            wrap_s: "ClampToEdge".into(),
-            wrap_t: "MirroredRepeat".into(),
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Nearest,
+            address_u: AddressMode::ClampToEdge,
+            address_v: AddressMode::MirrorRepeat,
         };
         let d = sampler_descriptor(Some(&m));
         assert_eq!(d.mag_filter, wgpu::FilterMode::Nearest);

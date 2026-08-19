@@ -1,14 +1,27 @@
 pub mod app_setup;
-pub mod camera;
 pub mod command_ring;
-pub mod gltf;
-pub mod message;
 pub mod platform;
 pub mod render_data;
 pub mod render_graph;
 pub mod renderer;
 pub mod shared_snapshot;
 pub mod shared_soa;
+
+/// Start the core renderer inside its owning worker.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn worker_main() -> u32 {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    wasm_logger::init(wasm_logger::Config::default());
+    app_setup::worker_entrypoint()
+}
+
+/// Return this worker's shared WebAssembly memory to messaging clients.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn worker_memory() -> wasm_bindgen::JsValue {
+    wasm_bindgen::memory()
+}
 
 #[cfg(target_arch = "wasm32")]
 thread_local! { static PAYLOADS: std::cell::RefCell<std::collections::HashMap<u32, Vec<u8>>> = Default::default(); }

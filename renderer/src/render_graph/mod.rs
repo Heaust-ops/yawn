@@ -10,7 +10,6 @@ mod registry;
 mod runtime;
 mod schema;
 
-pub use ast::{parse as parse_ast, serialize as serialize_ast};
 pub use compiler::{compile, parse_and_compile};
 pub use contracts::*;
 pub use expression::*;

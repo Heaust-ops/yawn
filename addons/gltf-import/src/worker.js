@@ -1,4 +1,5 @@
 import { writeSharedUpload } from "./shared-upload.js";
+import { gltfToRenderDataPacket } from "./gltf.js";
 
 const downloads = new Map();
 
@@ -10,16 +11,17 @@ addEventListener("message", async ({ data: message }) => {
       if (!response.ok) throw new Error(`HTTP_${response.status}`);
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (!bytes.byteLength) throw new Error("GLTF_EMPTY");
-      downloads.set(request, bytes);
-      postMessage({ type: "allocate", request, byteLength: bytes.byteLength });
+      const packet = await gltfToRenderDataPacket(bytes, message.url);
+      downloads.set(request, packet);
+      postMessage({ type: "allocate", request, byteLength: packet.byteLength });
       return;
     }
     if (message?.type === "storage") {
-      const bytes = downloads.get(request);
-      if (!bytes) throw new Error("GLTF_REQUEST_UNKNOWN");
-      writeSharedUpload(message.buffer, message.descriptor, bytes);
+      const packet = downloads.get(request);
+      if (!packet) throw new Error("GLTF_REQUEST_UNKNOWN");
+      writeSharedUpload(message.buffer, message.descriptor, packet);
       downloads.delete(request);
-      postMessage({ type: "ready", request, byteLength: bytes.byteLength });
+      postMessage({ type: "ready", request, byteLength: packet.byteLength });
     }
   } catch (error) {
     downloads.delete(request);

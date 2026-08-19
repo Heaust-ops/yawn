@@ -322,10 +322,12 @@ pub fn parse(bytes: &[u8]) -> Result<Graph, GraphError> {
     })
 }
 
+#[cfg(test)]
 fn push_string(out: &mut String, value: &str) {
     out.push_str(&serde_json::to_string(value).expect("strings always serialize"));
 }
 
+#[cfg(test)]
 fn push_json(out: &mut String, value: &Value) {
     match value {
         Value::Null => out.push_str("null"),
@@ -357,6 +359,7 @@ fn push_json(out: &mut String, value: &Value) {
 }
 
 /// Serializes an internal graph for fixtures and cross-language conformance tests.
+#[cfg(test)]
 pub fn serialize(graph: &Graph) -> String {
     let mut out = format!("(yawn-graph {AST_VERSION}\n  (id ");
     push_string(&mut out, &graph.graph_id);
@@ -425,12 +428,14 @@ pub(crate) fn validate_pipeline_declarations(graph: &Graph) -> Result<(), GraphE
                 ));
             }
         }
-        if !super::contract(name).is_some_and(|contract| {
-            contract.is_raster_draw() || contract.fullscreen_policy.is_some() || name == "frame_out"
+        if super::contract(name).is_some_and(|contract| {
+            !contract.is_raster_draw()
+                && contract.fullscreen_policy.is_none()
+                && name != "frame_out"
         }) {
             return Err(GraphError::new(
                 "GRAPH_EXECUTION_UNSUPPORTED",
-                format!("authored render pipeline '{name}' has no render executor"),
+                format!("authored render pipeline '{name}' conflicts with a core executor"),
             ));
         }
         shader_bytes = shader_bytes.saturating_add(shader.len());

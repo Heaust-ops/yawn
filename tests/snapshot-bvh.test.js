@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SnapshotReader, SnapshotProtocolError } from "../packages/yawn-core/src/snapshot.js";
+import { SnapshotReader, SnapshotProtocolError } from "../addons/mesh-handles/src/snapshot.js";
 import { DerivedBvh } from "../addons/mesh-handles/src/bvh-core.js";
+import { MeshHandles } from "../addons/mesh-handles/src/index.js";
 import { YawnCore } from "../packages/yawn-core/src/index.js";
 
 const align16 = value => (value + 15) & ~15;
@@ -108,25 +109,27 @@ class WorkerMock extends EventTarget {
   reply(data) { this.dispatchEvent(new MessageEvent("message", { data })); }
 }
 
-test("core picking returns protocol handles and exact epoch", async () => {
+test("mesh addon owns picking and returns wrapped handles at the exact epoch", async () => {
   const scene = snapshotFixture();
   const ring = 8192;
   const ringHeader = new Int32Array(scene.memory.buffer, ring, 16);
   ringHeader.set([0x4e574159, 2, 1024, 40]);
   const rendererWorker = new WorkerMock(), bvhWorker = new WorkerMock();
-  const bridge = { memory: scene.memory, ringPtr: ring, worker: rendererWorker, pickingWorkerFactory: () => bvhWorker, free() {} };
+  const bridge = { memory: scene.memory, ringPtr: ring, worker: rendererWorker, free() {} };
   const client = new YawnCore(bridge);
+  const handles = new MeshHandles(client, { pickingWorkerFactory: () => bvhWorker });
   rendererWorker.reply({ type: "soa-init", arrays: [] });
   await client.ready;
   rendererWorker.reply({ type: "snapshot-init", controlPtr: 0, controlVersion: 1, schemaVersion: 2 });
   rendererWorker.reply({ type: "snapshot-published", epoch: 1 });
-  const picking = client.pickRay([0, 0, 0], [1, 0, 0]);
+  const picking = handles.pickRay([0, 0, 0], [1, 0, 0]);
   const request = bvhWorker.messages.find(message => message.type === "pick");
   bvhWorker.reply({ type: "pick", request: request.request, epoch: 1, stale: false, hits: [{ slot: 10, generation: 3, distance: 2 }] });
   const result = await picking;
   assert.equal(result.epoch, 1);
   assert.equal(result.hits[0].distance, 2);
-  assert.deepEqual(result.hits[0].instance, [10, 3]);
+  assert.deepEqual(result.hits[0].instance.handle, [10, 3]);
+  handles.dispose();
   client.dispose();
   assert.equal(bvhWorker.terminated, true);
 });

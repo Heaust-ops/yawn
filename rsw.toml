@@ -32,7 +32,7 @@ dir = "my-template"
 #! When there is only `name`, other fields will use the default configuration
 
 [[crates]]
-name = "level-editor"
+name = "renderer"
 root = "."
 out-dir = "pkg"
 target = "web"

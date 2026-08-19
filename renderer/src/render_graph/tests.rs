@@ -42,8 +42,17 @@ fn node(id: &str, key: &str, version: u32, parameters: Value, inputs: Value) -> 
         "parameters": parameters, "inputs": inputs })
 }
 
+fn render_pipeline_declarations() -> Value {
+    json!({"render":[
+        {"name":"unlit","shader":"shader","vertexEntry":"vs_main","fragmentEntry":"fs_main","doubleSided":false,"material":false},
+        {"name":"material","shader":"shader","vertexEntry":"vs_main","fragmentEntry":"fs_main","doubleSided":false,"material":true},
+        {"name":"material_double_sided","shader":"shader","vertexEntry":"vs_main","fragmentEntry":"fs_main","doubleSided":true,"material":true}
+    ],"compute":[]})
+}
+
 pub(crate) fn full_cull_graph() -> Value {
-    json!({ "schemaVersion": 3, "graphId": "typed", "revision": 1, "nodes": [
+    json!({ "schemaVersion": 3, "graphId": "typed", "revision": 1,
+        "pipelines": render_pipeline_declarations(), "nodes": [
         texture("color", "rgba16_float"), texture("depth", "depth32_float"),
         node("mesh", "mesh", 2, json!({}), json!({})),
         node("words", "separate_u32x16", 1, json!({"valueDefault":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}),
@@ -54,7 +63,7 @@ pub(crate) fn full_cull_graph() -> Value {
         node("visible", "not", 1, json!({"operandDefault":false}), json!({"operand":input("cull","isFrustumCulled")})),
         node("class", "and", 2, json!({}),
             json!({"inputs":[input("bits","bit0")[0].clone(),input("visible","value")[0].clone()]})),
-        node("pipeline", "gltf_standard", 2,
+        node("pipeline", "material", 2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"predicate":input("class","value"),"color":input("color","texture"),"depth":input("depth","texture")})),
         node("frame", "frame_out", 3,
@@ -68,12 +77,11 @@ pub(crate) fn full_cull_graph() -> Value {
 fn catalog_exposes_final_mesh_pipeline_and_generic_expression_contracts() {
     assert_eq!(contract("mesh").unwrap().version, 2);
     assert!(contract("pipeline").is_none());
-    for key in [
-        "ground_plane",
-        "gltf_standard",
-        "gltf_standard_double_sided",
-    ] {
-        let contract = contract(key).unwrap();
+    assert!(contract("material").is_none());
+    let pipelines: PipelineDeclarations =
+        serde_json::from_value(render_pipeline_declarations()).unwrap();
+    for key in ["unlit", "material", "material_double_sided"] {
+        let contract = contract_for(key, &pipelines).unwrap();
         assert_eq!(contract.version, 2);
         assert!(contract.is_raster_draw());
     }
@@ -90,7 +98,7 @@ fn catalog_exposes_final_mesh_pipeline_and_generic_expression_contracts() {
             ("localAabb", SemanticType::LocalAabb)
         ]
     );
-    let predicate = contract("gltf_standard")
+    let predicate = contract_for("material", &pipelines)
         .unwrap()
         .inputs
         .iter()
@@ -376,7 +384,7 @@ fn pipeline_predicate_defaults_true_and_expression_edges_are_validated() {
 #[test]
 fn raster_executors_reject_removed_pipeline_parameter() {
     let mut graph = full_cull_graph();
-    graph["nodes"][8]["parameters"]["pipeline"] = json!("gltf_standard");
+    graph["nodes"][8]["parameters"]["pipeline"] = json!("material");
     let error = compile_value(graph).unwrap_err();
     assert_eq!(error.code, "GRAPH_PARAMETERS_INVALID");
     assert_eq!(error.details["path"], "nodes[8].parameters");
@@ -426,7 +434,7 @@ fn sibling_raster_writers_form_one_ordered_physical_pass() {
         9,
         node(
             "sibling",
-            "ground_plane",
+            "unlit",
             2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"color":input("color","texture"),"depth":input("depth","texture")}),
@@ -476,12 +484,13 @@ fn expression_provenance_rejects_cross_mesh_values() {
 }
 
 fn implicit_pipeline_graph() -> Value {
-    json!({ "schemaVersion": 3, "graphId": "implicit", "revision": 1, "nodes": [
+    json!({ "schemaVersion": 3, "graphId": "implicit", "revision": 1,
+        "pipelines": render_pipeline_declarations(), "nodes": [
         node("mesh", "mesh", 2, json!({}), json!({})),
-        node("first", "ground_plane", 2,
+        node("first", "unlit", 2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh")})),
-        node("second", "gltf_standard", 2,
+        node("second", "material", 2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"color":input("first","color"),"depth":input("first","depth")})),
         node("frame", "frame_out", 3,
@@ -493,12 +502,12 @@ fn implicit_pipeline_graph() -> Value {
 fn three_raster_graph() -> Value {
     let mut graph = full_cull_graph();
     let nodes = graph["nodes"].as_array_mut().unwrap();
-    nodes[8]["executor"] = json!({"key":"ground_plane","version":2});
+    nodes[8]["executor"] = json!({"key":"unlit","version":2});
     nodes.insert(
         9,
         node(
             "standard",
-            "gltf_standard",
+            "material",
             2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[1,0,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"color":input("pipeline","color"),"depth":input("pipeline","depth")}),
@@ -508,7 +517,7 @@ fn three_raster_graph() -> Value {
         10,
         node(
             "double",
-            "gltf_standard_double_sided",
+            "material_double_sided",
             2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":0.5,"clearColor":[0,1,0,1],"predicateDefault":true}),
             json!({"mesh":input("mesh","mesh"),"color":input("standard","color"),"depth":input("standard","depth")}),
@@ -857,7 +866,9 @@ fn runtime_rejects_noncanonical_physical_passes() {
 
 #[test]
 fn contract_v4_declares_strict_default_policies() {
-    let pipeline = contract("gltf_standard").unwrap();
+    let declarations: PipelineDeclarations =
+        serde_json::from_value(render_pipeline_declarations()).unwrap();
+    let pipeline = contract_for("material", &declarations).unwrap();
     assert_eq!(pipeline.version, 2);
     assert_eq!(pipeline.inputs[0].default_policy, InputDefaultPolicy::None);
     assert_eq!(
@@ -1115,7 +1126,7 @@ fn fullscreen_output_is_a_valid_raster_attachment_root() {
         11,
         node(
             "later",
-            "ground_plane",
+            "unlit",
             2,
             json!({"depthCompare":"less_equal","depthWriteEnabled":true,"clearDepth":1.0,"clearColor":[0,0,0,1],"predicateDefault":true}),
             json!({

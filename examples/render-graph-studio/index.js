@@ -1,5 +1,6 @@
 import { YawnCore, RendererError } from "@yawn/core";
-import { MeshHandles, createPickingWorker } from "@yawn/mesh-handles";
+import { MeshHandles } from "@yawn/mesh-handles";
+import { installCameraRenderDataControls } from "../cookbook/16-camera-render-data.js";
 import { loadDemoLoadout } from "./demo-loadouts.js";
 import { adaptFxNodeSnapshot } from "@yawn/render-graph-fxnode";
 import { createGraphAst } from "@yawn/render-graph-ast";
@@ -37,11 +38,7 @@ const state = {
   compiled: {},
   telemetry: null,
 };
-export const profileRequested = (search) =>
-  new URLSearchParams(search).get("profile") === "1";
-const profileEnabled = profileRequested(location.search);
-
-function createWorkerTransport(profile) {
+function createWorkerTransport() {
   const canvas = document.querySelector("#canvas0");
   const dpr = devicePixelRatio;
   canvas.width = Math.round(Math.max(1, canvas.clientWidth) * dpr);
@@ -62,16 +59,6 @@ function createWorkerTransport(profile) {
       kind,
       values: new Float64Array(values),
     });
-  const mouseValues = (event) => [
-    devicePixelRatio,
-    event.buttons,
-    event.movementX,
-    event.movementY,
-    event.offsetX,
-    event.offsetY,
-    Math.max(1, canvas.clientHeight),
-  ];
-
   addEventListener(
     "resize",
     () =>
@@ -82,106 +69,19 @@ function createWorkerTransport(profile) {
       ]),
     options,
   );
-  canvas.addEventListener(
-    "pointerdown",
-    (event) => {
-      if (event.pointerType === "mouse" && (event.button === 1 || event.button === 2)) {
-        event.preventDefault();
-        canvas.setPointerCapture(event.pointerId);
-      }
-    },
-    options,
-  );
-  canvas.addEventListener(
-    "pointermove",
-    (event) => {
-      if (
-        event.pointerType === "mouse" &&
-        canvas.hasPointerCapture(event.pointerId) &&
-        (event.buttons & 6) !== 0
-      ) {
-        event.preventDefault();
-        post(1, mouseValues(event));
-      }
-    },
-    options,
-  );
-  for (const type of ["pointerup", "pointercancel"]) {
-    canvas.addEventListener(
-      type,
-      (event) => {
-        if (canvas.hasPointerCapture(event.pointerId)) {
-          canvas.releasePointerCapture(event.pointerId);
-        }
-      },
-      options,
-    );
-  }
-  canvas.addEventListener(
-    "click",
-    (event) => {
-      if (event.button === 0) post(2, mouseValues(event));
-    },
-    options,
-  );
-  canvas.addEventListener(
-    "wheel",
-    (event) => {
-      event.preventDefault();
-      const delta =
-        event.deltaMode === 0
-          ? event.deltaY
-          : event.deltaMode === 1
-            ? event.deltaY * 16
-            : event.deltaMode === 2
-              ? event.deltaY * Math.max(1, canvas.clientHeight)
-              : null;
-      if (Number.isFinite(delta)) post(3, [delta]);
-    },
-    { ...options, passive: false },
-  );
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault(), options);
-
   const offscreen = canvas.transferControlToOffscreen();
-  worker.postMessage({ type: "init", canvas: offscreen, profile }, [offscreen]);
+  worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
   return {
     worker,
-    pickingWorkerFactory: createPickingWorker,
     free() {
       abort.abort();
     },
   };
 }
 
-function installProfileMenu() {
-  if (!profileEnabled) return;
-  const menu = document.createElement("details");
-  menu.id = "profile-menu";
-  menu.innerHTML =
-    '<summary>GPU profile</summary><div id="profile-status">Waiting for GPU timestamps…</div><table><tbody id="profile-passes"></tbody></table>';
-  document.querySelector(".toolbar")?.append(menu);
-  on(renderer, "renderer-profile", (event) => {
-    const p = event.detail;
-    document.querySelector("#profile-status").textContent = p.available
-      ? `${p.graph} · epoch ${p.epoch} · ${p.dropped} dropped`
-      : "GPU timestamps unavailable";
-    document.querySelector("#profile-passes").replaceChildren(
-      ...Object.entries(p.passes || {}).map(([id, ms]) => {
-        const row = document.createElement("tr"),
-          name = document.createElement("th"),
-          value = document.createElement("td");
-        name.textContent = id;
-        value.textContent = `${Number(ms).toFixed(3)} ms`;
-        row.append(name, value);
-        return row;
-      }),
-    );
-  });
-}
-
 function publish(telemetry) {
   state.telemetry = telemetry;
-  document.documentElement.dataset.phase8State = JSON.stringify({
+  document.documentElement.dataset.yawnState = JSON.stringify({
     activeLoadout: state.loadout,
     activeGraph: state.graph,
     renderDataRevision: telemetry.revision,
@@ -195,7 +95,6 @@ function publish(telemetry) {
     draws: telemetry.draws,
     instances: telemetry.instances,
     indices: telemetry.indices,
-    framingRadius: telemetry.framingRadius,
     gpuError: telemetry.gpuError,
   });
 }
@@ -252,9 +151,9 @@ async function transaction(label, operation, rollback) {
       try {
         await rollback?.();
       } catch (rollbackError) {
-        console.error("Phase 8 rollback failed", rollbackError);
+        console.error("Render graph rollback failed", rollbackError);
       }
-      console.error("Phase 8 transaction failed", error);
+      console.error("Render graph transaction failed", error);
       status(`Failed · ${error?.code ?? error?.message ?? error}`);
     }
     return false;
@@ -328,6 +227,7 @@ async function cleanup() {
     await editor?.destroy();
   } finally {
     gltfImporter?.dispose();
+    meshHandles?.dispose();
     renderer?.dispose();
   }
 }
@@ -337,12 +237,15 @@ const pagehide = () => {
 
 async function start() {
   addEventListener("pagehide", pagehide, { once: true });
-  delete document.documentElement.dataset.phase8Ready;
-  renderer = new YawnCore(createWorkerTransport(profileEnabled));
+  delete document.documentElement.dataset.yawnReady;
+  const transport = createWorkerTransport();
+  renderer = new YawnCore(transport);
   meshHandles = new MeshHandles(renderer);
   gltfImporter = new GltfImporter(renderer);
-  installProfileMenu();
   await renderer.ready;
+  listeners.push(
+    installCameraRenderDataControls(renderer, document.querySelector("#canvas0")),
+  );
   const nextEditor = await createRenderGraphEditor(
     document.querySelector("#graph-editor"),
   );
@@ -465,11 +368,11 @@ async function start() {
     },
   );
   if (!initialized) throw new Error("Initial demo transaction failed");
-  document.documentElement.dataset.phase8Ready = "true";
+  document.documentElement.dataset.yawnReady = "true";
 }
 const startupError = (error) => {
   if (cleaned) return;
-  console.error("Phase 8 startup failed", error);
+  console.error("Render graph startup failed", error);
   status(`Startup failed · ${error?.code ?? error}`);
   void cleanup();
 };

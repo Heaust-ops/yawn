@@ -1,5 +1,5 @@
 use crate::command_ring::CommandRing;
-use crate::message::WindowEvent;
+use crate::renderer::ResizeMessage;
 use log::info;
 use std::sync::mpsc::Receiver;
 use std::{cell::RefCell, rc::Rc};
@@ -7,18 +7,12 @@ use wasm_bindgen::{prelude::*, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::MessageEvent;
 
-pub async fn run_render_loop<T: crate::renderer::scene::Scene + 'static>(
-    events_chan: Receiver<WindowEvent>,
-    ring: &'static CommandRing,
-    profile: bool,
-) {
+pub async fn run_render_loop(events_chan: Receiver<ResizeMessage>, ring: &'static CommandRing) {
     use crate::renderer::Renderer;
 
     let canvas = wait_for_canvas_transfer().await;
 
-    let renderer = Rc::new(RefCell::new(
-        Renderer::<T>::new(canvas, events_chan, profile).await,
-    ));
+    let renderer = Rc::new(RefCell::new(Renderer::new(canvas, events_chan).await));
     renderer.borrow_mut().command_ring = Some(ring);
     Renderer::run_render_loop(renderer);
 }

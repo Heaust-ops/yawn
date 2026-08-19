@@ -202,17 +202,6 @@ pub static CONTRACTS: &[Contract] = &[
     c!("mesh", 2, Source, NONE_I, MESH_O, false, None),
     c!("texture", 2, Source, NONE_I, TEXTURE_O, false, None),
     c!("frustum_cull", 2, Expression, CULL_I, CULL_O, false, None),
-    c!("ground_plane", 2, Render, RASTER_I, RASTER_O, false, None),
-    c!("gltf_standard", 2, Render, RASTER_I, RASTER_O, false, None),
-    c!(
-        "gltf_standard_double_sided",
-        2,
-        Render,
-        RASTER_I,
-        RASTER_O,
-        false,
-        None
-    ),
     c!(
         "and",
         2,
@@ -442,4 +431,28 @@ pub static CONTRACTS: &[Contract] = &[
 ];
 pub fn contract(key: &str) -> Option<&'static Contract> {
     CONTRACTS.iter().find(|c| c.key == key)
+}
+
+static AUTHORED_RENDER_PIPELINE: Contract = c!(
+    "authored_render_pipeline",
+    2,
+    Render,
+    RASTER_I,
+    RASTER_O,
+    false,
+    None
+);
+
+/// Resolve static core executors or a render pipeline declared by this graph.
+pub fn contract_for(
+    key: &str,
+    pipelines: &crate::render_graph::PipelineDeclarations,
+) -> Option<&'static Contract> {
+    contract(key).or_else(|| {
+        pipelines
+            .render
+            .iter()
+            .any(|pipeline| pipeline.name == key)
+            .then_some(&AUTHORED_RENDER_PIPELINE)
+    })
 }

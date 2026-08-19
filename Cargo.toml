@@ -1,47 +1,25 @@
 [workspace]
-members = ["renderer", "level-editor"]
+members = ["renderer"]
 resolver = "2"
 
 [workspace.dependencies]
 wasm-bindgen = { version = "0.2.100", features = ["enable-interning"] }
 wasm-bindgen-futures = "0.4.50"
 console_error_panic_hook = "0.1.7"
-console_log = "1.0.0"
 log = "0.4.27"
 wasm-logger = "0.2.0"
 web-sys = { version = "0.3.77", features = [
-    "Window",
-    "Document",
-    "Element",
-    "HtmlCanvasElement",
-    "HtmlInputElement",
-    "File",
-    "FileList",
     "OffscreenCanvas",
-    "MouseEvent",
-    "PointerEvent",
-    "WheelEvent",
-    "Worker",
     "DedicatedWorkerGlobalScope",
-    "Event",
-    "MessageEvent",
-    "Blob",
-    "BlobPropertyBag",
-    "Url",
-    "Request",
-    "RequestInit",
-    "RequestMode",
-    "Response",
-    "Headers",
-    "AddEventListenerOptions"
+    "MessageEvent"
 ]}
 js-sys = "0.3.77"
 bytemuck = { version = "1.23.1", features = ["derive"] }
-cgmath = "0.18"
-raw-window-handle = "0.6.2"
 wgpu = "26.0.1"
 thiserror = "2.0.15"
 ultraviolet = "0.10.0"
-futures = "0.3"
-gltf = { version = "1.4", features = ["extras", "names", "KHR_lights_punctual", "KHR_materials_ior"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = "z"
+lto = true

@@ -43,6 +43,8 @@ pub struct RenderPipelineDeclaration {
     pub fragment_entry: String,
     #[serde(default)]
     pub double_sided: bool,
+    #[serde(default)]
+    pub material: bool,
 }
 
 /// A binding-free compute pass dispatched before the graph's render passes.
