@@ -1,35 +1,42 @@
 ---
 layout: home
-
 hero:
   name: Yawn
-  text: Build the graph. Share the data.
-  tagline: A worker-native WebGPU renderer where infrequent lifecycle commands use messages and hot render data lives in SIMD-aligned shared memory.
+  text: Shared render data and a render graph.
+  tagline: Two core files, one fixed arena, no built-in scene model or shader.
   actions:
     - theme: brand
-      text: Build your first scene
-      link: /guide/first-scene
-    - theme: alt
       text: Open the playground
-      link: /../playground/
-
+      link: /playground
 features:
-  - title: One graph boundary
-    details: JSO, a fluent builder, and FXNode all export the same immutable DAG AST and S-expression wire format.
-  - title: Shared render data
-    details: Meshes, instances, camera state, materials, and user columns use aligned SOA rows backed by shared WASM memory.
-  - title: External programs
-    details: WGSL, render pipelines, and compute passes travel with a graph loadout; core ships no scene shader.
-  - title: Worker-native
-    details: The same core client runs on the browser main thread or another worker through a Worker-like endpoint.
+  - title: Shared rows
+    details: Allocate an SOA row array once by message, then mutate its SAB views directly from any thread.
+  - title: External graphs
+    details: JSO and FXNode addons serialize DAGs to the S-expression AST consumed by the worker.
   - title: Up-front loadouts
-    details: Graph compilation culls dead work, aliases compatible transients, coalesces passes, and prepares resources before activation.
-  - title: Optional conveniences
-    details: glTF import, mesh handles, material properties, camera controls, and picking stay in focused addons.
+    details: Pipelines, GPU resources, pass order, and compatible transient aliases are prepared before activation.
 ---
 
-<Playground
-  id="first-scene"
-  title="Your first Yawn scene"
-  description="The preview imports procedural glTF through a worker, activates a graph, and renders shared instance data."
-/>
+## The entire boundary
+
+```js
+const color = await core.allocateRows({
+  name: "triangle.color",
+  rows: 1,
+  stride: 16,
+  format: "f32",
+});
+
+color.write(0, [0.2, 0.65, 1, 1]);
+color.row(0)[0] = 0.8; // direct SharedArrayBuffer write
+await loadGraph(core, graph); // infrequent message
+```
+
+`@yawn/core` contains only the public shared-row client and its worker. The worker owns the fixed 64-byte-aligned arena, S-expression graph compiler, WebGPU loadout, and transient texture aliasing. Every scene convention and every byte of WGSL comes from an addon or application.
+
+```text
+JSO / FXNode ──▶ AST ──▶ S-expression ──▶ core worker ──▶ WebGPU
+any JS thread ───────────── direct SAB row writes ────────────┘
+```
+
+The addon packages provide graph serialization, optional WGSL, glTF import directly into shared rows, and conventional camera/material/mesh handles. None of them add semantics to core.

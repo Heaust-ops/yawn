@@ -1,6 +1,6 @@
 services:
-  yawn-examples:
-    command: npm run examples
+  yawn-docs:
+    command: npm start
     portal:
-      title: Yawn docs and playgrounds
-      description: VitePress package tutorials and isolated WebGPU playgrounds with hot reload.
+      title: Yawn
+      description: Documentation and minimal WebGPU playground.

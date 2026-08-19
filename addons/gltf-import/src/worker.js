@@ -1,4 +1,3 @@
-import { writeSharedUpload } from "./shared-upload.js";
 import { gltfToRenderDataPacket } from "./gltf.js";
 
 const downloads = new Map();
@@ -19,12 +18,16 @@ addEventListener("message", async ({ data: message }) => {
     if (message?.type === "storage") {
       const packet = downloads.get(request);
       if (!packet) throw new Error("GLTF_REQUEST_UNKNOWN");
-      writeSharedUpload(message.buffer, message.descriptor, packet);
+      const { buffer, descriptor } = message;
+      if (!(buffer instanceof SharedArrayBuffer) || descriptor?.format !== "u32" ||
+          descriptor.stride !== 16 || descriptor.offset % 64 || packet.byteLength > descriptor.rows * descriptor.stride)
+        throw new Error("GLTF_STORAGE_INVALID");
+      new Uint8Array(buffer, descriptor.offset, packet.byteLength).set(packet);
       downloads.delete(request);
       postMessage({ type: "ready", request, byteLength: packet.byteLength });
     }
   } catch (error) {
     downloads.delete(request);
-    postMessage({ type: "error", request, code: error?.message || "GLTF_IMPORT_FAILED" });
+    postMessage({ type: "error", request, error: error?.message || "GLTF_IMPORT_FAILED" });
   }
 });

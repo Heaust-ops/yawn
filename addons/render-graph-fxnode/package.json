@@ -3,10 +3,7 @@
   "version": "0.1.0",
   "description": "FXNode frontend for Yawn render graphs",
   "type": "module",
-  "exports": {
-    ".": "./src/index.js",
-    "./catalog": "./src/catalog.js"
-  },
+  "exports": "./src/index.js",
   "dependencies": {
     "@yawn/render-graph-ast": "0.1.0"
   }

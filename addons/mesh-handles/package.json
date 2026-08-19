@@ -3,8 +3,5 @@
   "version": "0.1.0",
   "description": "Conventional mesh, instance, camera, and material handles over Yawn render data",
   "type": "module",
-  "exports": "./src/index.js",
-  "dependencies": {
-    "@yawn/core": "0.1.0"
-  }
+  "exports": "./src/index.js"
 }
