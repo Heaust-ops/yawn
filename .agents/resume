@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-command -v npm >/dev/null
+
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+for command in npm cargo wasm-pack; do command -v "$command" >/dev/null; done
 amp orb services ensure

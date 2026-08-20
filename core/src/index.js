@@ -1,4 +1,4 @@
-const TYPES = { f32: Float32Array, u32: Uint32Array, i32: Int32Array };
+const types = { f32: Float32Array, u32: Uint32Array, i32: Int32Array };
 
 export class SharedRows {
   constructor(buffer, descriptor) {
@@ -11,7 +11,7 @@ export class SharedRows {
   get stride() { return this.descriptor.stride; }
   get format() { return this.descriptor.format; }
   get view() {
-    return new TYPES[this.format](this.buffer, this.descriptor.offset, this.rows * this.stride / 4);
+    return new types[this.format](this.buffer, this.descriptor.offset, this.rows * this.stride / 4);
   }
 
   row(index) {

@@ -3,7 +3,7 @@ layout: home
 hero:
   name: Yawn
   text: Shared render data and a render graph.
-  tagline: Two core files, one fixed arena, no built-in scene model or shader.
+  tagline: One Rust/WASM core, one fixed arena, no built-in scene model or shader.
   actions:
     - theme: brand
       text: Open the playground
@@ -32,11 +32,11 @@ color.row(0)[0] = 0.8; // direct SharedArrayBuffer write
 await loadGraph(core, graph); // infrequent message
 ```
 
-`@yawn/core` contains only the public shared-row client and its worker. The worker owns the fixed 64-byte-aligned arena, S-expression graph compiler, WebGPU loadout, and transient texture aliasing. Every scene convention and every byte of WGSL comes from an addon or application.
+`@yawn/core` contains only the Rust/WASM render-data arena and graph compiler plus the browser worker required to execute WebGPU. Rust owns the fixed 64-byte-aligned shared arena, DAG ordering, resource culling, and transient texture planning; the worker materializes the resulting loadout. Every scene convention and every byte of WGSL comes from an addon or application.
 
 ```text
-JSO / FXNode ──▶ AST ──▶ S-expression ──▶ core worker ──▶ WebGPU
-any JS thread ───────────── direct SAB row writes ────────────┘
+JSO / FXNode ──▶ AST ──▶ S-expression ──▶ Rust/WASM ──▶ worker ──▶ WebGPU
+any JS thread ────────────── direct SAB row writes ────────────────────┘
 ```
 
 The addon packages provide graph serialization, optional WGSL, glTF import directly into shared rows, and conventional camera/material/mesh handles. None of them add semantics to core.

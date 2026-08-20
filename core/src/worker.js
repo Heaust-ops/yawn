@@ -1,66 +1,16 @@
-let canvas, context, device, surfaceFormat, memory, used = 0, loadout;
+import initWasm, { Core as WasmCore } from "../pkg/yawn_core.js";
+
+let canvas, context, device, surfaceFormat, memory, core, loadout;
 const arrays = new Map();
 const align = (value, multiple) => Math.ceil(value / multiple) * multiple;
 const fail = code => { throw new Error(code); };
 const list = value => value === undefined ? [] : Array.isArray(value) ? value : fail("GRAPH_ARRAY");
-
-function parse(source) {
-  if (typeof source !== "string") fail("GRAPH_WIRE");
-  const tokens = source.match(/\s*(\(|\)|"(?:\\.|[^"\\])*"|[^\s()]+)/gu) ?? [];
-  let at = 0;
-  const read = () => {
-    const token = tokens[at++]?.trim();
-    if (token === "(") {
-      const value = [];
-      while (tokens[at]?.trim() !== ")") {
-        if (at >= tokens.length) fail("GRAPH_WIRE");
-        value.push(read());
-      }
-      at++;
-      return value;
-    }
-    if (!token || token === ")") fail("GRAPH_WIRE");
-    if (token[0] === '"') return JSON.parse(token);
-    if (token === "true") return true;
-    if (token === "false") return false;
-    if (token === "null") return null;
-    return Number.isFinite(Number(token)) ? Number(token) : token;
-  };
-  const root = read();
-  if (at !== tokens.length || root[0] !== "yawn-graph" || root[1] !== 1) fail("GRAPH_WIRE");
-  const decode = value => {
-    if (!Array.isArray(value)) return value;
-    if (value[0] === "array") return value.slice(1).map(decode);
-    if (value[0] === "object") return Object.fromEntries(value.slice(1).map(field => {
-      if (field[0] !== "field" || field.length !== 3) fail("GRAPH_WIRE");
-      return [field[1], decode(field[2])];
-    }));
-    fail("GRAPH_WIRE");
-  };
-  return decode(root[2]);
-}
 
 function index(items, code) {
   const result = new Map();
   for (const item of list(items)) {
     if (!item || typeof item.id !== "string" || result.has(item.id)) fail(code);
     result.set(item.id, item);
-  }
-  return result;
-}
-
-function sortPasses(passes) {
-  const byId = index(passes, "GRAPH_PASS");
-  const waiting = new Map([...byId].map(([id, pass]) => [id, new Set(list(pass.after))]));
-  for (const dependencies of waiting.values())
-    for (const dependency of dependencies) if (!byId.has(dependency)) fail("GRAPH_DEPENDENCY");
-  const result = [];
-  while (waiting.size) {
-    const ready = [...waiting].find(([, dependencies]) => !dependencies.size);
-    if (!ready) fail("GRAPH_CYCLE");
-    waiting.delete(ready[0]);
-    result.push(byId.get(ready[0]));
-    for (const dependencies of waiting.values()) dependencies.delete(ready[0]);
   }
   return result;
 }
@@ -78,20 +28,12 @@ const textureUsage = names => list(names).reduce((usage, name) => usage | ({
 
 async function compile(graph) {
   if (!graph || typeof graph.id !== "string") fail("GRAPH_SHAPE");
-  const passes = sortPasses(graph.passes);
+  const passes = list(graph.passes);
   const renderDeclarations = index(graph.pipelines?.render, "GRAPH_PIPELINE");
   const computeDeclarations = index(graph.pipelines?.compute, "GRAPH_PIPELINE");
   const resources = new Map(), owned = [];
   try {
-    const usedResources = new Set(passes.flatMap(pass => [
-      ...list(pass.bindings).map(x => x.resource),
-      ...list(pass.color).map(x => x.resource),
-      ...(pass.depth ? [pass.depth.resource] : []),
-      ...list(pass.vertexBuffers).map(x => x.resource),
-      ...(pass.indexBuffer ? [pass.indexBuffer.resource] : []),
-    ]));
     for (const declaration of list(graph.resources?.buffers)) {
-      if (!usedResources.has(declaration.id)) continue;
       const source = arrays.get(declaration.array);
       if (!source) fail("GRAPH_ARRAY_UNKNOWN");
       const gpu = device.createBuffer({ size: align(source.bytes, 4), usage: bufferUsage(declaration.usage) });
@@ -99,18 +41,9 @@ async function compile(graph) {
       owned.push(gpu);
     }
 
-    const textures = index(graph.resources?.textures, "GRAPH_RESOURCE"), lifetimes = new Map(), slots = [];
-    passes.forEach((pass, frame) => {
-      for (const id of [...list(pass.bindings).map(x => x.resource), ...list(pass.color).map(x => x.resource), ...(pass.depth ? [pass.depth.resource] : [])]) {
-        if (!textures.has(id)) continue;
-        const lifetime = lifetimes.get(id) ?? [frame, frame];
-        lifetime[1] = frame;
-        lifetimes.set(id, lifetime);
-      }
-    });
-    for (const declaration of textures.values()) {
-      const lifetime = lifetimes.get(declaration.id);
-      if (!lifetime) continue;
+    const textureSlots = new Map();
+    for (const declaration of list(graph.resources?.textures)) {
+      if (!Number.isInteger(declaration.slot)) fail("GRAPH_RESOURCE");
       const size = declaration.size ?? ["canvas", "canvas"];
       if (!Array.isArray(size) || size.length < 2 || size.length > 3) fail("GRAPH_TEXTURE_SIZE");
       const descriptor = {
@@ -121,18 +54,17 @@ async function compile(graph) {
         sampleCount: declaration.sampleCount ?? 1,
         dimension: declaration.dimension ?? "2d",
       };
-      const key = JSON.stringify(descriptor);
-      let slot = declaration.transient === false ? undefined : slots.find(value => value.key === key && value.last < lifetime[0]);
+      let slot = textureSlots.get(declaration.slot);
       if (!slot) {
         const gpu = device.createTexture(descriptor);
-        slot = { key, last: lifetime[1], gpu, view: gpu.createView() };
-        slots.push(slot);
+        slot = { gpu, view: gpu.createView() };
+        textureSlots.set(declaration.slot, slot);
         owned.push(gpu);
-      } else slot.last = lifetime[1];
+      }
       resources.set(declaration.id, { kind: "texture", gpu: slot.gpu, view: slot.view });
     }
     for (const declaration of list(graph.resources?.samplers))
-      if (usedResources.has(declaration.id)) resources.set(declaration.id, {
+      resources.set(declaration.id, {
         kind: "sampler", gpu: device.createSampler(declaration.descriptor),
       });
 
@@ -256,7 +188,10 @@ addEventListener("message", async ({ data: message }) => {
     if (message.type === "init") {
       if (!(message.canvas instanceof OffscreenCanvas) || !Number.isInteger(message.arenaBytes) || message.arenaBytes < 64) fail("INIT");
       canvas = message.canvas;
-      memory = new SharedArrayBuffer(align(message.arenaBytes, 64));
+      const wasm = await initWasm();
+      core = new WasmCore(message.arenaBytes);
+      memory = wasm.memory.buffer;
+      if (!(memory instanceof SharedArrayBuffer)) fail("WASM_MEMORY_NOT_SHARED");
       const adapter = await navigator.gpu?.requestAdapter();
       if (!adapter) fail("WEBGPU_UNAVAILABLE");
       device = await adapter.requestDevice();
@@ -268,15 +203,12 @@ addEventListener("message", async ({ data: message }) => {
       tick();
     } else if (message.type === "allocate") {
       const { name, rows, stride, format } = message;
-      if (typeof name !== "string" || !name || arrays.has(name) || !Number.isInteger(rows) || rows < 1 ||
-          !Number.isInteger(stride) || stride < 16 || stride % 16 || !["f32", "u32", "i32"].includes(format)) fail("ALLOCATION");
-      const offset = align(used, 64), bytes = rows * stride;
-      if (!Number.isSafeInteger(bytes) || offset + bytes > memory.byteLength) fail("ARENA_OOM");
+      if (typeof name !== "string" || !name || arrays.has(name)) fail("ALLOCATION");
+      const offset = core.allocate(rows, stride, format), bytes = rows * stride;
       result = { name, rows, stride, format, offset };
       arrays.set(name, { ...result, bytes });
-      used = offset + bytes;
     } else if (message.type === "load-graph") {
-      const next = await compile(parse(message.serialized));
+      const next = await compile(JSON.parse(core.compile_graph(message.serialized)));
       const previous = loadout;
       loadout = next;
       previous?.owned.forEach(resource => resource.destroy?.());
