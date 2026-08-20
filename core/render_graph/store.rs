@@ -13,7 +13,7 @@ pub struct Loadout {
 #[derive(Default)]
 pub struct Store {
     graphs: HashMap<String, RenderGraph>,
-    texture_sources: HashMap<String, web_sys::ImageBitmap>,
+    texture_sources: HashMap<String, HashMap<u32, web_sys::ImageBitmap>>,
     active: Option<Loadout>,
 }
 
@@ -32,9 +32,11 @@ impl Store {
             data,
             self.active.as_ref().map(|active| &active.resources),
         )?;
-        for (name, image) in &self.texture_sources {
-            if resources.needs_upload(name) {
-                resources.upload_texture(name, image, gpu)?;
+        for (name, levels) in &self.texture_sources {
+            for (mip_level, image) in levels {
+                if resources.needs_upload(name, *mip_level) {
+                    resources.upload_texture(name, *mip_level, image, gpu)?;
+                }
             }
         }
         self.active = Some(Loadout { graph, resources });
@@ -44,23 +46,29 @@ impl Store {
     pub fn upload_texture(
         &mut self,
         name: String,
+        mip_level: u32,
         image: web_sys::ImageBitmap,
         gpu: &Wgpu,
     ) -> Result<(), String> {
         if let Some(active) = &mut self.active {
             if active.resources.texture_slots.contains_key(&name) {
-                active.resources.upload_texture(&name, &image, gpu)?;
+                active
+                    .resources
+                    .upload_texture(&name, mip_level, &image, gpu)?;
             }
         }
-        if let Some(previous) = self.texture_sources.insert(name, image) {
+        let levels = self.texture_sources.entry(name).or_default();
+        if let Some(previous) = levels.insert(mip_level, image) {
             previous.close();
         }
         Ok(())
     }
 
     pub fn delete_texture(&mut self, name: &str) {
-        if let Some(image) = self.texture_sources.remove(name) {
-            image.close();
+        if let Some(levels) = self.texture_sources.remove(name) {
+            for image in levels.into_values() {
+                image.close();
+            }
         }
     }
 
@@ -102,9 +110,11 @@ impl Store {
             data,
             self.active.as_ref().map(|active| &active.resources),
         )?;
-        for (name, image) in &self.texture_sources {
-            if resources.needs_upload(name) {
-                resources.upload_texture(name, image, gpu)?;
+        for (name, levels) in &self.texture_sources {
+            for (mip_level, image) in levels {
+                if resources.needs_upload(name, *mip_level) {
+                    resources.upload_texture(name, *mip_level, image, gpu)?;
+                }
             }
         }
         self.active = Some(Loadout { graph, resources });

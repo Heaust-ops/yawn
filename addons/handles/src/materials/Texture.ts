@@ -5,6 +5,7 @@ export type TextureOptions = {
   size?: [number | "canvas", number | "canvas", number?];
   format?: string;
   usage?: string[];
+  mipmaps?: boolean;
   transient?: boolean;
 };
 
@@ -29,6 +30,10 @@ export class Texture {
         typeof options.source === "string"
           ? await createImageBitmap(await (await fetch(options.source)).blob())
           : options.source;
+      const mipLevelCount =
+        image instanceof ImageBitmap && options.mipmaps !== false
+          ? Math.floor(Math.log2(Math.max(image.width, image.height))) + 1
+          : 1;
       const registration = scene.registerTexture({
         id: resource,
         source: image,
@@ -38,6 +43,7 @@ export class Texture {
             ? [image.width, image.height, 1]
             : [1, 1, 1]),
         format: options.format ?? "rgba8unorm",
+        mipLevelCount,
         usage: [
           ...new Set([
             ...(options.usage ?? ["copyDst"]),
@@ -49,8 +55,22 @@ export class Texture {
       });
       this.id = registration.number;
       await registration.ready;
-      if (image instanceof ImageBitmap)
-        await scene.core.uploadTexture(resource, image);
+      if (image instanceof ImageBitmap) {
+        const levels = [image];
+        for (let level = 1; level < mipLevelCount; level++)
+          levels.push(
+            await createImageBitmap(image, {
+              resizeWidth: Math.max(1, image.width >> level),
+              resizeHeight: Math.max(1, image.height >> level),
+              resizeQuality: "high",
+            }),
+          );
+        await Promise.all(
+          levels.map((level, index) =>
+            scene.core.uploadTexture(resource, level, index),
+          ),
+        );
+      }
     })();
   }
 

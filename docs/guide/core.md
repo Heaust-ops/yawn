@@ -56,7 +56,9 @@ await core.setProfiler(false);
 stop();
 ```
 
-`new YawnCore(canvas, { debug: true })` enables the same timestamp-query mode at startup. Timings describe the physical compute and render passes produced by graph compilation, so 138 compatible draws appear as one bundled forward pass. The fullscreen playground’s **Profile** button shows the stream in a toggleable sidebar.
+`new YawnCore(canvas, { debug: true })` enables the same timestamp-query mode at startup. Timings describe physical GPU passes and actual compiled draw counts; compatible indexed draws over consecutive instances collapse into one command. The sidebar also reports canvas size and wall-clock completion time.
+
+The saved **Forward benchmark** playground renders 138 logical objects and 4.5 million triangles. Add `&grid=32` to lower geometry density or `&overdraw=1` to stack the objects while diagnosing depth and fragment cost.
 
 <Playground example="core" />
 

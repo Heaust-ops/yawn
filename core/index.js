@@ -119,11 +119,20 @@ export class YawnCore {
     return this.#request("switch-loadout", { id });
   }
 
-  async uploadTexture(name, image) {
+  async uploadTexture(name, image, mipLevel = 0) {
     await this.ready;
-    if (typeof name !== "string" || !(image instanceof ImageBitmap))
+    if (
+      typeof name !== "string" ||
+      !(image instanceof ImageBitmap) ||
+      !Number.isInteger(mipLevel) ||
+      mipLevel < 0
+    )
       throw new TypeError("TEXTURE_SOURCE");
-    return this.#request("upload-texture", { name, image }, [image]);
+    return this.#request(
+      "upload-texture",
+      { name, image, mipLevel },
+      [image],
+    );
   }
 
   async deleteTexture(name) {

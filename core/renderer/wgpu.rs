@@ -8,6 +8,7 @@ pub struct Wgpu {
     pub width: u32,
     pub height: u32,
     pub timestamp_queries: bool,
+    pub adapter: String,
 }
 
 impl Wgpu {
@@ -27,11 +28,21 @@ impl Wgpu {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
-                ..Default::default()
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
             })
             .await
             .map_err(|_| "WEBGPU_UNAVAILABLE")?;
         let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let info = adapter.get_info();
+        let adapter_name = if info.name.is_empty() {
+            format!("{:?} · {:?}", info.device_type, info.backend)
+        } else {
+            format!(
+                "{} · {:?} · {:?}",
+                info.name, info.device_type, info.backend
+            )
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features,
@@ -54,6 +65,7 @@ impl Wgpu {
             width,
             height,
             timestamp_queries: required_features.contains(wgpu::Features::TIMESTAMP_QUERY),
+            adapter: adapter_name,
         })
     }
 }

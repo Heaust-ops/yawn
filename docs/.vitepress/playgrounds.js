@@ -365,6 +365,99 @@ return {
   },
 };`;
 
+const benchmark = `import { ArcRotateCamera, Mesh, PBRMaterial, Scene, Texture } from "@yawn/handles";
+
+const parameters = new URL(location.href).searchParams;
+const draws = Math.max(1, Math.min(512, Number(parameters.get("draws")) || 138));
+const grid = Math.max(1, Math.min(256, Number(parameters.get("grid")) || 128));
+const overdraw = parameters.has("overdraw");
+const columns = 12;
+const positions = [];
+const normals = [];
+const uvs = [];
+const indices = [];
+for (let y = 0; y <= grid; y++) {
+  for (let x = 0; x <= grid; x++) {
+    positions.push(x / grid * 2 - 1, y / grid * 2 - 1, 0);
+    normals.push(0, 0, 1);
+    uvs.push(x / grid * 32, y / grid * 32);
+  }
+}
+for (let y = 0; y < grid; y++) {
+  for (let x = 0; x < grid; x++) {
+    const first = y * (grid + 1) + x;
+    indices.push(
+      first, first + 1, first + grid + 2,
+      first, first + grid + 2, first + grid + 1,
+    );
+  }
+}
+
+const pixels = new OffscreenCanvas(1024, 1024);
+const context = pixels.getContext("2d");
+for (let y = 0; y < 64; y++) {
+  for (let x = 0; x < 64; x++) {
+    context.fillStyle = (x + y) % 2 ? "#e2e8f0" : "#172554";
+    context.fillRect(x * 16, y * 16, 16, 16);
+  }
+}
+
+const scene = new Scene(canvas, { fps: 1000, hdr: true });
+await scene.ready;
+log("Benchmark core ready; preparing geometry…");
+const camera = new ArcRotateCamera(scene, {
+  targetPosition: [0, 0, 0],
+  alpha: 0,
+  beta: Math.PI / 2,
+  radius: 3,
+  aspect: canvas.width / canvas.height,
+});
+await camera.ready;
+log("Benchmark camera ready; compiling graph…");
+let material;
+let source;
+const meshes = [];
+await scene.batchGraphUpdates(async () => {
+  const texture = new Texture(scene, {
+    source: pixels.transferToImageBitmap(),
+    format: "rgba8unorm-srgb",
+  });
+  await texture.ready;
+  material = new PBRMaterial(scene, {
+    baseColorTexture: texture,
+    roughness: 0.45,
+  });
+  await material.ready;
+  source = new Mesh(scene, {
+    material,
+    vertexData: { positions, normals, uvs, indices },
+  });
+  await source.ready;
+  meshes.push(source);
+  for (let index = 1; index < draws; index++) meshes.push(source.clone());
+  await Promise.all(meshes.slice(1).map((mesh) => mesh.ready));
+  for (let index = 0; index < meshes.length; index++) {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    meshes[index].position = overdraw
+      ? [0, 0, index * 0.01]
+      : [
+          -1 + (column + 0.5) * 2 / columns,
+          1 - (row + 0.5) * 2 / columns,
+          0,
+        ];
+    meshes[index].scale = overdraw
+      ? [0.9, 0.9, 1]
+      : [0.9 / columns, 0.9 / columns, 1];
+  }
+});
+
+const triangles = draws * grid * grid * 2;
+log(\`Deterministic \${overdraw ? "overdraw" : "geometry"} benchmark: \${draws} draws, \${triangles.toLocaleString()} triangles, 1024² minified texture.\`);
+log("Open Profile and compare Forward GPU time, not page load time.");
+
+return { scene, meshes, material, camera, dispose: () => scene.dispose() };`;
+
 const core = `import { YawnCore } from "@yawn/core";
 
 const encode = (value) => {
@@ -403,5 +496,6 @@ export const playgrounds = {
   compute: { title: "Compute pass", code: compute },
   post: { title: "HDR post processing", code: post },
   importing: { title: "glTF import and BVH picking", code: importing },
+  benchmark: { title: "Forward benchmark", code: benchmark },
   core: { title: "Direct core graph", code: core },
 };

@@ -41,7 +41,7 @@ addEventListener("message", async ({ data: message }) => {
           core.switch_loadout(message.id);
           break;
         case "upload-texture":
-          core.upload_texture(message.name, message.image);
+          core.upload_texture(message.name, message.mipLevel, message.image);
           break;
         case "delete-texture":
           core.delete_texture(message.name);

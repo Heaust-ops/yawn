@@ -38,6 +38,7 @@ const rows = [
   ["meshInfo", 16, "u32"],
   ["bounds", 32, "f32"],
   ["cameras", 80, "f32"],
+  ["cameraMatrices", 80, "f32"],
   ["materials", 48, "f32"],
   ["materialTextures", 32, "u32"],
   ["pointLights", 32, "f32"],
@@ -94,7 +95,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 const basicForwardShader = /* wgsl */ `
 struct Accent { color: vec4<f32> }
 struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
+  @invariant @builtin(position) position: vec4<f32>,
   @location(0) normal: vec3<f32>,
   @location(1) @interpolate(flat) mesh: u32,
   @location(2) @interpolate(flat) material: u32,
@@ -107,7 +108,7 @@ struct VertexOutput {
 @group(0) @binding(4) var<storage, read> scales: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> meshInfo: array<u32>;
 @group(0) @binding(6) var<storage, read> materials: array<vec4<f32>>;
-@group(0) @binding(7) var<storage, read> cameras: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> cameraMatrices: array<vec4<f32>>;
 
 fn rotate(q: vec4<f32>, value: vec3<f32>) -> vec3<f32> {
   return value + 2.0 * cross(q.xyz, cross(q.xyz, value) + q.w * value);
@@ -119,18 +120,14 @@ fn vertex(@location(0) point: vec3<f32>, @builtin(instance_index) packed: u32) -
   let visible = meshInfo[instance * 4u + 2u];
   let transformed = rotate(quaternions[instance], point * scales[instance].xyz) + positions[instance].xyz;
   var clip = vec4<f32>(transformed, 1.0);
-  if (cameras[2].w != 0.0) {
-    let cameraNode = u32(cameras[1].x);
-    let inverse = vec4<f32>(-quaternions[cameraNode].xyz, quaternions[cameraNode].w);
-    let view = rotate(inverse, transformed - positions[cameraNode].xyz);
-    if (cameras[1].y == 1.0) {
-      let size = max(cameras[1].z, 0.0001);
-      clip = vec4<f32>(view.x / (size * cameras[0].y * 0.5), view.y / (size * 0.5), -view.z / cameras[0].w, 1.0);
-    } else {
-      let focal = 1.0 / tan(cameras[0].x * 0.5);
-      let depth = (-view.z * cameras[0].w - cameras[0].z * cameras[0].w) / (cameras[0].w - cameras[0].z);
-      clip = vec4<f32>(view.x * focal / cameras[0].y, view.y * focal, depth, -view.z);
-    }
+  if (cameraMatrices[4].w != 0.0) {
+    let world = vec4(transformed, 1.0);
+    clip = vec4(
+      dot(cameraMatrices[0], world),
+      dot(cameraMatrices[1], world),
+      dot(cameraMatrices[2], world),
+      dot(cameraMatrices[3], world),
+    );
   }
   var output: VertexOutput;
   output.position = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), clip, visible != 0u);
@@ -159,7 +156,7 @@ function pbrShader(mask: number) {
   const normalTexture = mask & 4;
   return /* wgsl */ `
 struct VertexOutput {
-  @builtin(position) position: vec4<f32>,
+  @invariant @builtin(position) position: vec4<f32>,
   @location(0) world: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
@@ -175,7 +172,7 @@ struct VertexOutput {
 @group(0) @binding(4) var<storage, read> scales: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> meshInfo: array<u32>;
 @group(0) @binding(6) var<storage, read> materials: array<vec4<f32>>;
-@group(0) @binding(7) var<storage, read> cameras: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> cameraMatrices: array<vec4<f32>>;
 ${mask ? "@group(1) @binding(0) var materialSampler: sampler;" : ""}
 ${baseTexture ? "@group(1) @binding(1) var baseTexture: texture_2d<f32>;" : ""}
 ${materialTexture ? "@group(1) @binding(2) var materialTexture: texture_2d<f32>;" : ""}
@@ -197,18 +194,14 @@ fn vertex(
   let scale = scales[instance].xyz;
   let world = rotate(quaternions[instance], point * scale) + positions[instance].xyz;
   var clip = vec4<f32>(world, 1.0);
-  if (cameras[2].w != 0.0) {
-    let cameraNode = u32(cameras[1].x);
-    let inverse = vec4<f32>(-quaternions[cameraNode].xyz, quaternions[cameraNode].w);
-    let view = rotate(inverse, world - positions[cameraNode].xyz);
-    if (cameras[1].y == 1.0) {
-      let size = max(cameras[1].z, 0.0001);
-      clip = vec4<f32>(view.x / (size * cameras[0].y * 0.5), view.y / (size * 0.5), -view.z / cameras[0].w, 1.0);
-    } else {
-      let focal = 1.0 / tan(cameras[0].x * 0.5);
-      let depth = (-view.z * cameras[0].w - cameras[0].z * cameras[0].w) / (cameras[0].w - cameras[0].z);
-      clip = vec4<f32>(view.x * focal / cameras[0].y, view.y * focal, depth, -view.z);
-    }
+  if (cameraMatrices[4].w != 0.0) {
+    let homogeneous = vec4(world, 1.0);
+    clip = vec4(
+      dot(cameraMatrices[0], homogeneous),
+      dot(cameraMatrices[1], homogeneous),
+      dot(cameraMatrices[2], homogeneous),
+      dot(cameraMatrices[3], homogeneous),
+    );
   }
   var output: VertexOutput;
   output.position = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), clip, meshInfo[instance * 4u + 2u] != 0u);
@@ -234,8 +227,7 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
   let roughness = clamp(properties.y * ${materialTexture ? "packedMaterial.g" : "1.0"}, 0.04, 1.0);
   var normal = normalize(input.normal);
   ${normalTexture ? "let tangent = normalize(input.tangent.xyz); let bitangent = normalize(cross(normal, tangent)) * input.tangent.w; let mapped = textureSample(normalTexture, materialSampler, input.uv).xyz * 2.0 - 1.0; normal = normalize(mat3x3<f32>(tangent, bitangent, normal) * vec3(mapped.xy * extra.y, mapped.z));" : ""}
-  let cameraNode = u32(cameras[1].x);
-  let view = normalize(positions[cameraNode].xyz - input.world);
+  let view = normalize(cameraMatrices[4].xyz - input.world);
   let lightDirection = normalize(vec3<f32>(0.4, 0.7, 0.6));
   let halfVector = normalize(lightDirection + view);
   let nDotL = max(dot(normal, lightDirection), 0.0);
@@ -683,7 +675,6 @@ export class Scene {
     ])
       addBuffer({ id, array, usage: ["storage"] });
     addBuffer({ id: "accent", array: "sceneAccent", usage: ["uniform"] });
-
     computePipelines.push({
       id: "cluster-lights",
       code: clusterShader,
@@ -747,6 +738,7 @@ export class Scene {
       id: "material-linear",
       magFilter: "linear",
       minFilter: "linear",
+      mipmapFilter: "linear",
       addressModeU: "repeat",
       addressModeV: "repeat",
     });
@@ -778,7 +770,7 @@ export class Scene {
         ["node-scales", "nodeScales"],
         ["mesh-info", "meshInfo"],
         ["materials", "materials"],
-        ["cameras", "cameras"],
+        ["camera-matrices", "cameraMatrices"],
       ])
         addBuffer({ id, array, usage: ["storage"] });
       const forwardPipelines = new Set<string>();
@@ -841,7 +833,9 @@ export class Scene {
           const material =
             draw.material ?? Number(this.array("meshInfo").row(mesh.id)[1]);
           if (mesh.id > 65535 || material > 65534)
-            throw new RangeError("Scene handle limit");
+            throw new RangeError(
+              `Scene handle limit: mesh ${mesh.id}, material ${material}`,
+            );
           const pointers = this.array("materialTextures").row(material);
           const texture = (lane: number) =>
             pointers[lane]
@@ -955,7 +949,7 @@ export class Scene {
                 "node-scales",
                 "mesh-info",
                 "materials",
-                "cameras",
+                "camera-matrices",
               ].map((resource, binding) => ({
                 group: 0,
                 binding,

@@ -12,6 +12,7 @@ export type GraphTexture = {
   format?: string;
   size?: [number | "canvas", number | "canvas", number?];
   usage?: string[];
+  mipLevelCount?: number;
   transient?: boolean;
 };
 
@@ -19,6 +20,7 @@ export type GraphSampler = {
   id: string;
   magFilter?: "nearest" | "linear";
   minFilter?: "nearest" | "linear";
+  mipmapFilter?: "nearest" | "linear";
   addressModeU?: "clamp-to-edge" | "repeat" | "mirror-repeat";
   addressModeV?: "clamp-to-edge" | "repeat" | "mirror-repeat";
 };

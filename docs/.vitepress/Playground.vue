@@ -28,6 +28,7 @@ const fps = ref(0);
 const profilerOpen = ref(false);
 const profilerSupported = ref(null);
 const profile = ref(null);
+const adapterInfo = ref("");
 let generation = 0;
 let current;
 let stopProfile;
@@ -88,6 +89,20 @@ async function attachProfiler(runId = generation) {
   profile.value = null;
   profilerSupported.value = null;
   if (!profilerOpen.value) return;
+  if (!adapterInfo.value) {
+    const adapter = await navigator.gpu?.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    const info = adapter?.info;
+    adapterInfo.value = [
+      info?.vendor,
+      info?.architecture,
+      info?.device,
+      info?.description,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
   const core = current?.scene?.core ?? current?.core;
   if (!core?.onProfile || !core?.setProfiler) {
     profilerSupported.value = false;
@@ -272,6 +287,13 @@ onUnmounted(() => {
           <div class="profiler-title">
             <strong>GPU passes</strong>
             <span v-if="profile">{{ profile.milliseconds.toFixed(2) }} ms</span>
+          </div>
+          <div v-if="profile" class="profiler-meta">
+            <span>{{ adapterInfo || profile.adapter }}</span>
+            <span>
+              {{ profile.canvas.width }}×{{ profile.canvas.height }} ·
+              {{ profile.wallMilliseconds.toFixed(2) }} ms wall
+            </span>
           </div>
           <p v-if="profilerSupported === false">
             Timestamp queries are unavailable on this GPU.
@@ -521,6 +543,13 @@ canvas {
 .profiler-title span {
   color: #60a5fa;
   font-weight: 700;
+}
+.profiler-meta {
+  display: grid;
+  gap: 3px;
+  margin: -5px 0 12px;
+  color: #64748b;
+  font-size: 10px;
 }
 .profiler p {
   color: #94a3b8;

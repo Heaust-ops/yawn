@@ -174,14 +174,19 @@ impl Core {
             .map_err(|error| JsError::new(&error))
     }
 
-    pub fn upload_texture(&self, name: String, image: web_sys::ImageBitmap) -> Result<(), JsError> {
+    pub fn upload_texture(
+        &self,
+        name: String,
+        mip_level: u32,
+        image: web_sys::ImageBitmap,
+    ) -> Result<(), JsError> {
         let gpu = self.gpu.borrow();
         let gpu = gpu
             .as_ref()
             .ok_or_else(|| JsError::new("WEBGPU_UNINITIALIZED"))?;
         self.store
             .borrow_mut()
-            .upload_texture(name, image, gpu)
+            .upload_texture(name, mip_level, image, gpu)
             .map_err(|error| JsError::new(&error))
     }
 

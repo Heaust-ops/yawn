@@ -91,6 +91,7 @@ export class FreeCamera extends Camera {
     this.position[0] += (x * Math.cos(yaw) + z * Math.sin(yaw)) * speed;
     this.position[1] += y * speed;
     this.position[2] += (x * -Math.sin(yaw) + z * Math.cos(yaw)) * speed;
+    this.refreshMatrix();
     this.#frame = requestAnimationFrame(this.#update);
   };
 

@@ -110,6 +110,7 @@ impl RenderLoop {
                         while !submission.completed.load(Ordering::Acquire) {
                             TimeoutFuture::new(0).await;
                         }
+                        let wall_milliseconds = js_sys::Date::now() - started;
                         if let Some(profile) = submission.profile {
                             while profile.state() == 0 {
                                 TimeoutFuture::new(0).await;
@@ -129,10 +130,15 @@ impl RenderLoop {
                                     .iter()
                                     .filter_map(|pass| pass["milliseconds"].as_f64())
                                     .sum::<f64>();
+                                let gpu = gpu.borrow();
+                                let gpu = gpu.as_ref().unwrap();
                                 *control.profile.borrow_mut() = Some(
                                     serde_json::json!({
                                         "frame": frame,
                                         "milliseconds": milliseconds,
+                                        "wallMilliseconds": wall_milliseconds,
+                                        "adapter": gpu.adapter,
+                                        "canvas": { "width": gpu.width, "height": gpu.height },
                                         "passes": passes,
                                     })
                                     .to_string(),

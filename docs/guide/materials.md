@@ -30,7 +30,7 @@ await albedo.ready;
 const textured = new PBRMaterial(scene, { baseColorTexture: albedo });
 ```
 
-Creating or removing a `Texture` rebuilds the single graph loadout so the GPU resource is allocated up front. The addon decodes URLs outside core, then transfers an `ImageBitmap` to the render worker; compatible loadout rebuilds reuse the allocated GPU texture instead of uploading it again.
+Creating or removing a `Texture` rebuilds the single graph loadout so the GPU resource is allocated up front. The addon generates and transfers a complete mip chain by default; pass `mipmaps: false` only for data that must remain single-level. Compatible loadout rebuilds reuse the allocated GPU texture without uploading it again.
 
 ## Custom WGSL
 

@@ -229,7 +229,7 @@ pub struct DepthAttachment {
     pub store: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 pub struct VertexBinding {
     #[serde(default)]
     pub slot: u32,
@@ -238,7 +238,7 @@ pub struct VertexBinding {
     pub offset: u64,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 pub struct IndexBinding {
     pub resource: String,
     #[serde(default = "index_format")]
@@ -247,7 +247,7 @@ pub struct IndexBinding {
     pub offset: u64,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Draw {
     #[serde(default = "three")]

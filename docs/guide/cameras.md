@@ -1,6 +1,6 @@
 # Cameras and controls
 
-Every camera allocates a generic `cameras` slot and a transform node. Projection, lens, controller state, and transforms are direct SAB rows after construction.
+Every camera allocates generic `cameras`, `cameraMatrices`, and transform rows. Camera handles precompute the view-projection matrix when lens or transform values change, so the forward vertex shader performs four dot products instead of rebuilding the camera projection for every vertex.
 
 ## Shared lens and projection controls
 
@@ -72,7 +72,7 @@ follow.stop();
 follow.start();
 ```
 
-The input and follow loops never post camera updates to core: they read and mutate the same camera, position, and quaternion rows that any other worker can use.
+The input and follow loops never post camera updates to core: they mutate the position, quaternion, camera, and derived matrix rows directly in shared memory.
 
 <Playground example="cameras" />
 
