@@ -1,0 +1,56 @@
+import initWasm, { Core } from "./pkg/yawn_core.js";
+
+let core;
+
+const fail = code => { throw new Error(code); };
+
+addEventListener("message", async ({ data: message }) => {
+  try {
+    let result;
+    if (message?.type === "init") {
+      if (core || !(message.canvas instanceof OffscreenCanvas)) fail("INIT");
+      const wasm = await initWasm();
+      core = new Core(message.arenaBytes);
+      await core.initialize(message.canvas);
+      const buffer = wasm.memory.buffer;
+      if (!(buffer instanceof SharedArrayBuffer)) fail("WASM_MEMORY_NOT_SHARED");
+      result = { buffer, rows: JSON.parse(core.rows()) };
+    } else {
+      if (!core) fail("UNINITIALIZED");
+      switch (message?.type) {
+        case "create-rows":
+          result = JSON.parse(core.create_rows(message.name, message.rows, message.stride, message.format));
+          break;
+        case "delete-rows":
+          core.delete_rows(message.name);
+          break;
+        case "allocate-object":
+          result = JSON.parse(core.allocate_object(message.name));
+          break;
+        case "delete-object":
+          core.delete_object(message.name, message.id);
+          break;
+        case "compile-graph":
+          result = core.compile_graph(message.serialized);
+          break;
+        case "switch-loadout":
+          core.switch_loadout(message.id);
+          break;
+        case "play":
+          core.play();
+          break;
+        case "pause":
+          core.pause();
+          break;
+        case "set-fps":
+          core.set_fps(message.fps);
+          break;
+        default:
+          fail("MESSAGE");
+      }
+    }
+    postMessage({ request: message.request, result });
+  } catch (error) {
+    postMessage({ request: message?.request, error: error?.message ?? "CORE_ERROR" });
+  }
+});

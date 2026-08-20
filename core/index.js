@@ -1,9 +1,17 @@
-const types = { f32: Float32Array, u32: Uint32Array, i32: Int32Array };
+const views = Object.freeze({ f32: Float32Array, u32: Uint32Array, i32: Int32Array });
 
 export class SharedRows {
   constructor(buffer, descriptor) {
+    if (!(buffer instanceof SharedArrayBuffer)) throw new TypeError("ROWS_DESCRIPTOR");
     this.buffer = buffer;
+    this.update(descriptor);
+  }
+
+  update(descriptor) {
+    if (!views[descriptor.format] || descriptor.name !== (this.descriptor?.name ?? descriptor.name))
+      throw new TypeError("ROWS_DESCRIPTOR");
     this.descriptor = Object.freeze(descriptor);
+    return this;
   }
 
   get name() { return this.descriptor.name; }
@@ -11,16 +19,18 @@ export class SharedRows {
   get stride() { return this.descriptor.stride; }
   get format() { return this.descriptor.format; }
   get view() {
-    return new types[this.format](this.buffer, this.descriptor.offset, this.rows * this.stride / 4);
+    const View = views[this.format];
+    return new View(this.buffer, this.descriptor.offset, this.descriptor.bytes / View.BYTES_PER_ELEMENT);
   }
 
   row(index) {
     if (!Number.isInteger(index) || index < 0 || index >= this.rows) throw new RangeError("ROW_RANGE");
-    const width = this.stride / 4;
+    const width = this.stride / views[this.format].BYTES_PER_ELEMENT;
     return this.view.subarray(index * width, (index + 1) * width);
   }
 
   read(index) { return Array.from(this.row(index)); }
+
   write(index, values) {
     const row = this.row(index);
     if (!values || values.length !== row.length) throw new RangeError("ROW_WIDTH");
@@ -49,16 +59,65 @@ export class YawnCore {
     this.#worker.addEventListener("messageerror", () => this.#fail("WORKER_ERROR"));
     this.#worker.start?.();
     const offscreen = canvas.transferControlToOffscreen?.() ?? canvas;
-    this.ready = this.#request("init", { canvas: offscreen, arenaBytes }, [offscreen])
-      .then(({ buffer }) => { this.#buffer = buffer; });
+    this.ready = this.#request("init", { canvas: offscreen, arenaBytes }, [offscreen]).then(result => {
+      this.#buffer = result.buffer;
+      for (const descriptor of result.rows) this.#arrays.set(
+        descriptor.name,
+        new SharedRows(this.#buffer, descriptor),
+      );
+    });
   }
 
-  async allocateRows({ name, rows, stride, format }) {
+  async createRows({ name, rows, stride, format }) {
     await this.ready;
-    const descriptor = await this.#request("allocate", { name, rows, stride, format });
-    const array = new SharedRows(this.#buffer, descriptor);
+    const descriptor = await this.#request("create-rows", { name, rows, stride, format });
+    const array = this.#arrays.get(name)?.update(descriptor)
+      ?? new SharedRows(this.#buffer, descriptor);
     this.#arrays.set(name, array);
     return array;
+  }
+
+  async deleteRows(name) {
+    await this.ready;
+    await this.#request("delete-rows", { name });
+    this.#arrays.delete(name);
+  }
+
+  async allocateObject(name) {
+    await this.ready;
+    const { id, rows } = await this.#request("allocate-object", { name });
+    this.#arrays.get(name).update(rows);
+    return id;
+  }
+
+  async deleteObject(name, id) {
+    await this.ready;
+    return this.#request("delete-object", { name, id });
+  }
+
+  async compileGraph(serialized) {
+    await this.ready;
+    return this.#request("compile-graph", { serialized });
+  }
+
+  async switchLoadout(id) {
+    await this.ready;
+    return this.#request("switch-loadout", { id });
+  }
+
+  async play() {
+    await this.ready;
+    return this.#request("play");
+  }
+
+  async pause() {
+    await this.ready;
+    return this.#request("pause");
+  }
+
+  async setFps(fps) {
+    await this.ready;
+    return this.#request("set-fps", { fps });
   }
 
   array(name) {
@@ -67,12 +126,7 @@ export class YawnCore {
     return array;
   }
 
-  async loadGraph(serialized) {
-    await this.ready;
-    return this.#request("load-graph", { serialized });
-  }
-
-  #request(type, payload, transfer = []) {
+  #request(type, payload = {}, transfer = []) {
     const request = this.#next++;
     return new Promise((resolve, reject) => {
       this.#pending.set(request, { resolve, reject });

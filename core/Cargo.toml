@@ -6,7 +6,14 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
+path = "lib.rs"
 
 [dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["OffscreenCanvas"] }
+wgpu = { version = "26", default-features = false, features = ["serde", "webgpu", "wgsl"] }

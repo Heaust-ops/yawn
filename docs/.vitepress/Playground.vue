@@ -25,7 +25,7 @@ onMounted(async () => {
     canvas.value.height = 540;
     core = new YawnCore(canvas.value);
     await core.ready;
-    color = await core.allocateRows({
+    color = await core.createRows({
       name: "triangle.color",
       rows: 1,
       stride: 16,

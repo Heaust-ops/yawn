@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "description": "Rust/WASM render data and render graph core",
   "type": "module",
-  "exports": "./src/index.js",
-  "files": ["src", "pkg"]
+  "exports": "./index.js",
+  "files": ["index.js", "worker.js", "pkg"]
 }
