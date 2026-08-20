@@ -7,7 +7,7 @@ The shared importer worker fetches and parses glTF/GLB, then the response hydrat
 ```ts
 import { importGltf } from "@yawn/handles";
 
-const meshes = await importGltf(scene, "/models/helmet.glb");
+const meshes = await importGltf(scene, "/models/sponza.glb");
 meshes[0].position[1] = 0.5;
 ```
 
@@ -33,3 +33,11 @@ If row allocations relocated since `Picking` was created, refresh its shared des
 ```ts
 await picking.refresh();
 ```
+
+The playground below imports the repository's full LFS-backed `sponza.glb` in the importer worker, hydrates all 138 primitives, frames them with an arc camera, and sends a real ray to the BVH worker. Click the preview to pick again.
+
+<Playground example="importing" />
+
+<script setup>
+import Playground from "../.vitepress/Playground.vue";
+</script>

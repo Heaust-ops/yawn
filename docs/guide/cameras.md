@@ -73,3 +73,9 @@ follow.start();
 ```
 
 The input and follow loops never post camera updates to core: they read and mutate the same camera, position, and quaternion rows that any other worker can use.
+
+<Playground example="cameras" />
+
+<script setup>
+import Playground from "../.vitepress/Playground.vue";
+</script>

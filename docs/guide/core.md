@@ -42,3 +42,9 @@ values.row(id).set([1, 2, 3, 4]);
 Graph frontends serialize plain data to `(yawn-graph 1 ...)`. Named `after` edges preserve DAG fan-out; Rust sorts passes, detects cycles, culls unused declarations, plans compatible transient lifetimes, and allocates the active loadout.
 
 The `Scene` addon is one such frontend. It is replaceable and has no privileged core API.
+
+<Playground example="core" />
+
+<script setup>
+import Playground from "../.vitepress/Playground.vue";
+</script>

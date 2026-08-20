@@ -20,8 +20,15 @@ type ShaderLike = {
   vertexEntry: string;
   fragmentEntry: string;
 };
-type PostProcessState = { id: string; kind: string; options: Record<string, unknown> };
-type TextureState = GraphTexture & { number: number; source?: string | ImageBitmap };
+type PostProcessState = {
+  id: string;
+  kind: string;
+  options: Record<string, unknown>;
+};
+type TextureState = GraphTexture & {
+  number: number;
+  source?: string | ImageBitmap;
+};
 
 const rows = [
   ["nodes", 16, "u32"],
@@ -193,11 +200,12 @@ function effectFragment(kind: string, options: Record<string, unknown>) {
 }
 
 function presentShader(toneMap: string) {
-  const tone = toneMap === "reinhard"
-    ? "color / (color + vec3(1.0))"
-    : toneMap === "linear"
-      ? "clamp(color, vec3(0.0), vec3(1.0))"
-      : "clamp((color * (2.51 * color + vec3(0.03))) / (color * (2.43 * color + vec3(0.59)) + vec3(0.14)), vec3(0.0), vec3(1.0))";
+  const tone =
+    toneMap === "reinhard"
+      ? "color / (color + vec3(1.0))"
+      : toneMap === "linear"
+        ? "clamp(color, vec3(0.0), vec3(1.0))"
+        : "clamp((color * (2.51 * color + vec3(0.03))) / (color * (2.43 * color + vec3(0.59)) + vec3(0.14)), vec3(0.0), vec3(1.0))";
   return `${fullscreenVertex}
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var sourceSampler: sampler;
@@ -209,11 +217,19 @@ function presentShader(toneMap: string) {
 }
 
 function encode(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "number") return String(value);
+  if (value === null || typeof value === "boolean" || typeof value === "number")
+    return String(value);
   if (typeof value === "string") return JSON.stringify(value);
-  if (Array.isArray(value)) return `(array${value.map((item) => ` ${encode(item)}`).join("")})`;
-  if (value && value.constructor === Object) return `(object${Object.keys(value as object).sort().map((key) =>
-    ` (field ${JSON.stringify(key)} ${encode((value as Record<string, unknown>)[key])})`).join("")})`;
+  if (Array.isArray(value))
+    return `(array${value.map((item) => ` ${encode(item)}`).join("")})`;
+  if (value && value.constructor === Object)
+    return `(object${Object.keys(value as object)
+      .sort()
+      .map(
+        (key) =>
+          ` (field ${JSON.stringify(key)} ${encode((value as Record<string, unknown>)[key])})`,
+      )
+      .join("")})`;
   throw new TypeError("Render graph values must be plain data");
 }
 
@@ -236,8 +252,13 @@ export class Scene {
   #geometryRefs = new Map<number, number>();
   #nextGeometry = 1;
   #nextTexture = 0;
+  #graphBatchDepth = 0;
+  #graphBatchDirty = false;
 
-  constructor(canvas: HTMLCanvasElement, options: { arenaBytes?: number; fps?: number; hdr?: boolean } = {}) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    options: { arenaBytes?: number; fps?: number; hdr?: boolean } = {},
+  ) {
     this.hdr = options.hdr ?? true;
     this.core = new YawnCore(canvas, { arenaBytes: options.arenaBytes });
     this.ready = this.#initialize(options.fps ?? 60);
@@ -247,12 +268,19 @@ export class Scene {
     await this.core.ready;
     for (const [name, stride, format] of rows)
       await this.core.createRows({ name, rows: 1, stride, format });
-    await this.core.createRows({ name: "clusters", rows: 256, stride: 16, format: "u32" });
+    await this.core.createRows({
+      name: "clusters",
+      rows: 256,
+      stride: 16,
+      format: "u32",
+    });
     this.core.array("nodeQuaternions").write(0, [0, 0, 0, 1]);
     this.core.array("nodeScales").write(0, [1, 1, 1, 0]);
     this.core.array("sceneAccent").write(0, [0.28, 0.72, 1, 1]);
     const material = await this.core.allocateObject("materials");
-    this.core.array("materials").write(material, [1, 1, 1, 1, 0, 0.7, 0, 0, 0, 0, 1, 0.5]);
+    this.core
+      .array("materials")
+      .write(material, [1, 1, 1, 1, 0, 0.7, 0, 0, 0, 0, 1, 0.5]);
     await this.core.setFps(fps);
     await this.#compileRenderGraph();
     return this;
@@ -262,16 +290,80 @@ export class Scene {
     return this.core.array(name);
   }
 
-  async ensureRows(name: string, rowCount: number, stride: number, format: RowFormat) {
+  async ensureRows(
+    name: string,
+    rowCount: number,
+    stride: number,
+    format: RowFormat,
+  ) {
     await this.core.ready;
     try {
       const current = this.core.array(name);
-      if (current.stride !== stride || current.format !== format) throw new Error(`ROW_LAYOUT: ${name}`);
+      if (current.stride !== stride || current.format !== format)
+        throw new Error(`ROW_LAYOUT: ${name}`);
       if (current.rows >= rowCount) return current;
     } catch (error) {
-      if (!(error instanceof Error) || !error.message.startsWith("UNKNOWN_ARRAY")) throw error;
+      if (
+        !(error instanceof Error) ||
+        !error.message.startsWith("UNKNOWN_ARRAY")
+      )
+        throw error;
     }
-    return this.core.createRows({ name, rows: Math.max(1, rowCount), stride, format });
+    return this.core.createRows({
+      name,
+      rows: Math.max(1, rowCount),
+      stride,
+      format,
+    });
+  }
+
+  async reserve(additional: { nodes?: number; materials?: number }) {
+    await this.ready;
+    const nodes = additional.nodes ?? 0;
+    const materials = additional.materials ?? 0;
+    if (
+      ![nodes, materials].every(
+        (value) => Number.isInteger(value) && value >= 0,
+      )
+    )
+      throw new RangeError("additional");
+    const nodeCapacity = this.array("nodes").rows + nodes;
+    const materialCapacity = this.array("materials").rows + materials;
+    const growth = [
+      ...rows.slice(0, 6).map(([name, stride, format]) => ({
+        name,
+        rows: nodeCapacity,
+        stride,
+        format,
+      })),
+      {
+        name: "materials",
+        rows: materialCapacity,
+        stride: 48,
+        format: "f32" as const,
+      },
+      {
+        name: "materialTextures",
+        rows: materialCapacity,
+        stride: 32,
+        format: "u32" as const,
+      },
+    ].filter((request) => this.array(request.name).rows < request.rows);
+    if (growth.length) await this.core.createRowsBatch(growth);
+  }
+
+  async batchGraphUpdates<T>(operation: () => T | Promise<T>) {
+    await this.ready;
+    this.#graphBatchDepth++;
+    try {
+      return await operation();
+    } finally {
+      this.#graphBatchDepth--;
+      if (!this.#graphBatchDepth && this.#graphBatchDirty) {
+        this.#graphBatchDirty = false;
+        await this.updateRenderGraph();
+      }
+    }
   }
 
   async allocateNode() {
@@ -279,7 +371,9 @@ export class Scene {
     const id = await this.core.allocateObject("nodes");
     const growth = rows.slice(1, 6).flatMap(([name, stride, format]) => {
       const current = this.array(name);
-      return current.rows < id + 1 ? [{ name, rows: id + 1, stride, format }] : [];
+      return current.rows < id + 1
+        ? [{ name, rows: id + 1, stride, format }]
+        : [];
     });
     if (growth.length) await this.core.createRowsBatch(growth);
     this.array("nodeQuaternions").write(id, [0, 0, 0, 1]);
@@ -289,7 +383,14 @@ export class Scene {
   }
 
   async releaseNode(id: number) {
-    for (const name of ["nodes", "nodePositions", "nodeQuaternions", "nodeScales", "meshInfo", "bounds"])
+    for (const name of [
+      "nodes",
+      "nodePositions",
+      "nodeQuaternions",
+      "nodeScales",
+      "meshInfo",
+      "bounds",
+    ])
       this.array(name).row(id).fill(0);
     await this.core.deleteObject("nodes", id);
   }
@@ -302,7 +403,8 @@ export class Scene {
   }
 
   addComputePass(pass: ComputePass) {
-    if (this.#computePasses.has(pass.id)) throw new Error(`COMPUTE_PASS_EXISTS: ${pass.id}`);
+    if (this.#computePasses.has(pass.id))
+      throw new Error(`COMPUTE_PASS_EXISTS: ${pass.id}`);
     this.#computePasses.set(pass.id, pass);
     pass.attach(this);
     return this.updateRenderGraph();
@@ -318,13 +420,19 @@ export class Scene {
 
   registerMesh(mesh: MeshLike) {
     this.#meshes.set(mesh.id, mesh);
-    this.#geometryRefs.set(mesh.geometryId, (this.#geometryRefs.get(mesh.geometryId) ?? 0) + 1);
+    this.#geometryRefs.set(
+      mesh.geometryId,
+      (this.#geometryRefs.get(mesh.geometryId) ?? 0) + 1,
+    );
     return this.updateRenderGraph();
   }
 
   async unregisterMesh(mesh: MeshLike) {
     this.#meshes.delete(mesh.id);
-    const references = Math.max(0, (this.#geometryRefs.get(mesh.geometryId) ?? 1) - 1);
+    const references = Math.max(
+      0,
+      (this.#geometryRefs.get(mesh.geometryId) ?? 1) - 1,
+    );
     this.#geometryRefs.set(mesh.geometryId, references);
     await this.updateRenderGraph();
     if (!references) {
@@ -351,31 +459,62 @@ export class Scene {
   }
 
   releaseGeometry(id: number) {
-    this.#geometryRefs.set(id, Math.max(0, (this.#geometryRefs.get(id) ?? 1) - 1));
+    this.#geometryRefs.set(
+      id,
+      Math.max(0, (this.#geometryRefs.get(id) ?? 1) - 1),
+    );
   }
 
   async cloneGeometry(id: number) {
     const clone = this.createGeometry();
     for (const [kind, data] of this.#geometry.get(id) ?? [])
-      await this.setVertexData(clone, kind, data.slice() as Float32Array | Uint32Array, false);
+      await this.setVertexData(
+        clone,
+        kind,
+        data.slice() as Float32Array | Uint32Array,
+        false,
+      );
     return clone;
   }
 
-  async setVertexData(geometry: number, kind: string, source: ArrayLike<number>, updateGraph = true) {
-    const components: Record<string, number> = { positions: 3, normals: 3, tangents: 4, uvs: 2, colors: 4, indices: 1 };
+  async setVertexData(
+    geometry: number,
+    kind: string,
+    source: ArrayLike<number>,
+    updateGraph = true,
+  ) {
+    const components: Record<string, number> = {
+      positions: 3,
+      normals: 3,
+      tangents: 4,
+      uvs: 2,
+      colors: 4,
+      indices: 1,
+    };
     const width = components[kind];
-    if (!width || source.length % width) throw new RangeError(`VERTEX_DATA: ${kind}`);
+    if (!width || source.length % width)
+      throw new RangeError(`VERTEX_DATA: ${kind}`);
     const integer = kind === "indices";
     const data = integer ? Uint32Array.from(source) : Float32Array.from(source);
     const name = `geometry.${geometry}.${kind}`;
     const rowCount = integer ? Math.ceil(data.length / 4) : data.length / width;
-    const target = await this.ensureRows(name, rowCount, 16, integer ? "u32" : "f32");
-    target.view.fill(0);
-    if (integer) target.view.set(data);
-    else for (let row = 0; row < rowCount; row++)
-      target.row(row).set(data.subarray(row * width, (row + 1) * width));
-    (this.#geometry.get(geometry) ?? this.#geometry.set(geometry, new Map()).get(geometry)!)
-      .set(kind, data);
+    const target = await this.ensureRows(
+      name,
+      rowCount,
+      16,
+      integer ? "u32" : "f32",
+    );
+    const view = target.view;
+    view.fill(0);
+    if (integer || width === 4) view.set(data);
+    else
+      for (let row = 0; row < rowCount; row++)
+        for (let lane = 0; lane < width; lane++)
+          view[row * 4 + lane] = data[row * width + lane];
+    (
+      this.#geometry.get(geometry) ??
+      this.#geometry.set(geometry, new Map()).get(geometry)!
+    ).set(kind, data);
     if (updateGraph) await this.updateRenderGraph();
   }
 
@@ -411,6 +550,10 @@ export class Scene {
   }
 
   updateRenderGraph() {
+    if (this.#graphBatchDepth) {
+      this.#graphBatchDirty = true;
+      return Promise.resolve();
+    }
     const update = this.#graphUpdates.then(async () => {
       await this.ready;
       await this.#compileRenderGraph();
@@ -431,24 +574,45 @@ export class Scene {
     const addSampler = (value: GraphSampler) => samplers.set(value.id, value);
 
     for (const [id, array] of [
-      ["point-lights", "pointLights"], ["rect-lights", "rectAreaLights"],
-      ["spot-lights", "spotLights"], ["directional-lights", "directionalLights"],
-      ["ambient-lights", "ambientLights"], ["clusters", "clusters"],
-    ]) addBuffer({ id, array, usage: ["storage"] });
+      ["point-lights", "pointLights"],
+      ["rect-lights", "rectAreaLights"],
+      ["spot-lights", "spotLights"],
+      ["directional-lights", "directionalLights"],
+      ["ambient-lights", "ambientLights"],
+      ["clusters", "clusters"],
+    ])
+      addBuffer({ id, array, usage: ["storage"] });
     addBuffer({ id: "accent", array: "sceneAccent", usage: ["uniform"] });
 
-    computePipelines.push({ id: "cluster-lights", code: clusterShader, entry: "main" });
+    computePipelines.push({
+      id: "cluster-lights",
+      code: clusterShader,
+      entry: "main",
+    });
     passes.push({
-      id: "cluster-lights", type: "compute", pipeline: "cluster-lights", dispatch: [4, 1, 1],
-      bindings: ["point-lights", "rect-lights", "spot-lights", "directional-lights", "ambient-lights", "clusters"]
-        .map((resource, binding) => ({ group: 0, binding, resource })),
+      id: "cluster-lights",
+      type: "compute",
+      pipeline: "cluster-lights",
+      dispatch: [4, 1, 1],
+      bindings: [
+        "point-lights",
+        "rect-lights",
+        "spot-lights",
+        "directional-lights",
+        "ambient-lights",
+        "clusters",
+      ].map((resource, binding) => ({ group: 0, binding, resource })),
     });
 
     for (const pass of this.#computePasses.values()) {
       pass.buffers.forEach(addBuffer);
       pass.textures.forEach(addTexture);
       pass.samplers.forEach(addSampler);
-      computePipelines.push({ id: pass.id, code: pass.code, entry: pass.entry });
+      computePipelines.push({
+        id: pass.id,
+        code: pass.code,
+        entry: pass.entry,
+      });
       passes.push({
         id: pass.id,
         type: "compute",
@@ -460,57 +624,146 @@ export class Scene {
     }
 
     const computeIds = [...this.#computePasses.keys()];
-    const renderedMeshes = [...this.#meshes.values()].filter((mesh) => mesh.vertexCount > 0);
+    const renderedMeshes = [...this.#meshes.values()].filter(
+      (mesh) => mesh.vertexCount > 0,
+    );
     const hdrFormat = this.hdr ? "rgba16float" : "rgba8unorm";
-    addTexture({ id: "hdr", format: hdrFormat, size: ["canvas", "canvas", 1], usage: ["render", "sampled"], transient: false });
+    addTexture({
+      id: "hdr",
+      format: hdrFormat,
+      size: ["canvas", "canvas", 1],
+      usage: ["render", "sampled"],
+      transient: false,
+    });
     addSampler({ id: "linear", magFilter: "linear", minFilter: "linear" });
 
     let previous = computeIds.length ? computeIds : ["cluster-lights"];
     if (!renderedMeshes.length) {
-      renderPipelines.push({ id: "empty-forward", code: emptyForwardShader, vertex: { entry: "vertex" }, fragment: { entry: "fragment", targets: [{ format: hdrFormat }] } });
+      renderPipelines.push({
+        id: "empty-forward",
+        code: emptyForwardShader,
+        vertex: { entry: "vertex" },
+        fragment: { entry: "fragment", targets: [{ format: hdrFormat }] },
+      });
       passes.push({
-        id: "forward-empty", type: "render", pipeline: "empty-forward", after: previous,
+        id: "forward-empty",
+        type: "render",
+        pipeline: "empty-forward",
+        after: previous,
         bindings: [{ group: 0, binding: 0, resource: "accent" }],
-        color: [{ resource: "hdr", clear: [0.015, 0.025, 0.05, 1] }], draw: { vertices: 3 },
+        color: [{ resource: "hdr", clear: [0.015, 0.025, 0.05, 1] }],
+        draw: { vertices: 3 },
       });
       previous = ["forward-empty"];
     } else {
       for (const [id, array] of [
-        ["node-positions", "nodePositions"], ["node-quaternions", "nodeQuaternions"],
-        ["node-scales", "nodeScales"], ["mesh-info", "meshInfo"], ["materials", "materials"], ["cameras", "cameras"],
-      ]) addBuffer({ id, array, usage: ["storage"] });
+        ["node-positions", "nodePositions"],
+        ["node-quaternions", "nodeQuaternions"],
+        ["node-scales", "nodeScales"],
+        ["mesh-info", "meshInfo"],
+        ["materials", "materials"],
+        ["cameras", "cameras"],
+      ])
+        addBuffer({ id, array, usage: ["storage"] });
       renderPipelines.push({
-        id: "forward-pbr", code: forwardShader,
-        vertex: { entry: "vertex", buffers: [{ arrayStride: 16, attributes: [{ format: "float32x3", offset: 0, shaderLocation: 0 }] }] },
+        id: "forward-pbr",
+        code: forwardShader,
+        vertex: {
+          entry: "vertex",
+          buffers: [
+            {
+              arrayStride: 16,
+              attributes: [
+                { format: "float32x3", offset: 0, shaderLocation: 0 },
+              ],
+            },
+          ],
+        },
         fragment: { entry: "fragment", targets: [{ format: hdrFormat }] },
       });
       let firstRender = true;
       for (const mesh of renderedMeshes) {
         const vertex = `geometry-${mesh.geometryId}-positions`;
-        addBuffer({ id: vertex, array: `geometry.${mesh.geometryId}.positions`, usage: ["vertex"] });
+        addBuffer({
+          id: vertex,
+          array: `geometry.${mesh.geometryId}.positions`,
+          usage: ["vertex"],
+        });
         const indexed = mesh.indexCount > 0;
-        if (indexed) addBuffer({ id: `geometry-${mesh.geometryId}-indices`, array: `geometry.${mesh.geometryId}.indices`, usage: ["index"] });
-        const draws = indexed && mesh.faceMaterials.size
-          ? Array.from({ length: Math.floor(mesh.indexCount / 3) }, (_, face) => ({
-              face,
-              count: 3,
-              firstIndex: face * 3,
-              material: mesh.faceMaterials.get(face),
-            }))
-          : [{ face: -1, count: indexed ? mesh.indexCount : mesh.vertexCount, firstIndex: 0, material: undefined }];
+        if (indexed)
+          addBuffer({
+            id: `geometry-${mesh.geometryId}-indices`,
+            array: `geometry.${mesh.geometryId}.indices`,
+            usage: ["index"],
+          });
+        const draws =
+          indexed && mesh.faceMaterials.size
+            ? Array.from(
+                { length: Math.floor(mesh.indexCount / 3) },
+                (_, face) => ({
+                  face,
+                  count: 3,
+                  firstIndex: face * 3,
+                  material: mesh.faceMaterials.get(face),
+                }),
+              )
+            : [
+                {
+                  face: -1,
+                  count: indexed ? mesh.indexCount : mesh.vertexCount,
+                  firstIndex: 0,
+                  material: undefined,
+                },
+              ];
         for (const draw of draws) {
           const id = `forward-${mesh.id}-${draw.face}`;
-          if (mesh.id > 65535 || (draw.material ?? 0) > 65534) throw new RangeError("Scene handle limit");
-          const instance = (mesh.id + (draw.material === undefined ? 0 : (draw.material + 1) * 65536)) >>> 0;
+          if (mesh.id > 65535 || (draw.material ?? 0) > 65534)
+            throw new RangeError("Scene handle limit");
+          const instance =
+            (mesh.id +
+              (draw.material === undefined
+                ? 0
+                : (draw.material + 1) * 65536)) >>>
+            0;
           passes.push({
-            id, type: "render", pipeline: "forward-pbr", after: previous,
-            bindings: ["clusters", "accent", "node-positions", "node-quaternions", "node-scales", "mesh-info", "materials", "cameras"]
-              .map((resource, binding) => ({ group: 0, binding, resource })),
-            color: [{ resource: "hdr", ...(firstRender ? { clear: [0.015, 0.025, 0.05, 1] } : { load: "load" }) }],
+            id,
+            type: "render",
+            pipeline: "forward-pbr",
+            after: previous,
+            bindings: [
+              "clusters",
+              "accent",
+              "node-positions",
+              "node-quaternions",
+              "node-scales",
+              "mesh-info",
+              "materials",
+              "cameras",
+            ].map((resource, binding) => ({ group: 0, binding, resource })),
+            color: [
+              {
+                resource: "hdr",
+                ...(firstRender
+                  ? { clear: [0.015, 0.025, 0.05, 1] }
+                  : { load: "load" }),
+              },
+            ],
             vertexBuffers: [{ slot: 0, resource: vertex }],
-            ...(indexed ? { indexBuffer: { resource: `geometry-${mesh.geometryId}-indices`, format: "uint32" } } : {}),
+            ...(indexed
+              ? {
+                  indexBuffer: {
+                    resource: `geometry-${mesh.geometryId}-indices`,
+                    format: "uint32",
+                  },
+                }
+              : {}),
             draw: indexed
-              ? { indices: draw.count, firstIndex: draw.firstIndex, instances: 1, firstInstance: instance }
+              ? {
+                  indices: draw.count,
+                  firstIndex: draw.firstIndex,
+                  instances: 1,
+                  firstInstance: instance,
+                }
               : { vertices: draw.count, instances: 1, firstInstance: instance },
           });
           firstRender = false;
@@ -522,11 +775,22 @@ export class Scene {
     for (const material of this.#shaders.values()) {
       const id = `shader-${material.id}`;
       renderPipelines.push({
-        id, code: material.code,
+        id,
+        code: material.code,
         vertex: { entry: material.vertexEntry },
-        fragment: { entry: material.fragmentEntry, targets: [{ format: hdrFormat }] },
+        fragment: {
+          entry: material.fragmentEntry,
+          targets: [{ format: hdrFormat }],
+        },
       });
-      passes.push({ id, type: "render", pipeline: id, after: previous, color: [{ resource: "hdr", load: "load" }], draw: { vertices: 3 } });
+      passes.push({
+        id,
+        type: "render",
+        pipeline: id,
+        after: previous,
+        color: [{ resource: "hdr", load: "load" }],
+        draw: { vertices: 3 },
+      });
       previous = [id];
     }
 
@@ -534,12 +798,30 @@ export class Scene {
     for (const [index, effect] of [...this.#effects.values()].entries()) {
       const output = `post-${index}`;
       const pipeline = `post-${effect.id}`;
-      addTexture({ id: output, format: hdrFormat, size: ["canvas", "canvas", 1], usage: ["render", "sampled"], transient: true });
-      renderPipelines.push({ id: pipeline, code: effectFragment(effect.kind, effect.options), vertex: { entry: "vertex" }, fragment: { entry: "fragment", targets: [{ format: hdrFormat }] } });
+      addTexture({
+        id: output,
+        format: hdrFormat,
+        size: ["canvas", "canvas", 1],
+        usage: ["render", "sampled"],
+        transient: true,
+      });
+      renderPipelines.push({
+        id: pipeline,
+        code: effectFragment(effect.kind, effect.options),
+        vertex: { entry: "vertex" },
+        fragment: { entry: "fragment", targets: [{ format: hdrFormat }] },
+      });
       passes.push({
-        id: pipeline, type: "render", pipeline, after: previous,
-        bindings: [{ group: 0, binding: 0, resource: input }, { group: 0, binding: 1, resource: "linear" }],
-        color: [{ resource: output, clear: [0, 0, 0, 1] }], draw: { vertices: 3 },
+        id: pipeline,
+        type: "render",
+        pipeline,
+        after: previous,
+        bindings: [
+          { group: 0, binding: 0, resource: input },
+          { group: 0, binding: 1, resource: "linear" },
+        ],
+        color: [{ resource: output, clear: [0, 0, 0, 1] }],
+        draw: { vertices: 3 },
       });
       input = output;
       previous = [pipeline];
@@ -554,16 +836,39 @@ export class Scene {
         entry: "main",
       });
       passes.push({
-        id, type: "compute", pipeline: id, after: ["cluster-lights"], dispatch: [1, 1, 1],
-        bindings: [{ group: 0, binding: 0, resource: texture.id }, { group: 0, binding: 1, resource: "clusters" }],
+        id,
+        type: "compute",
+        pipeline: id,
+        after: ["cluster-lights"],
+        dispatch: [1, 1, 1],
+        bindings: [
+          { group: 0, binding: 0, resource: texture.id },
+          { group: 0, binding: 1, resource: "clusters" },
+        ],
       });
     }
-    const toneMap = String([...this.#effects.values()].find((effect) => effect.kind === "colorGrading")?.options.toneMap ?? "aces");
-    renderPipelines.push({ id: "present", code: presentShader(toneMap), vertex: { entry: "vertex" }, fragment: { entry: "fragment", targets: [{ format: "canvas" }] } });
+    const toneMap = String(
+      [...this.#effects.values()].find(
+        (effect) => effect.kind === "colorGrading",
+      )?.options.toneMap ?? "aces",
+    );
+    renderPipelines.push({
+      id: "present",
+      code: presentShader(toneMap),
+      vertex: { entry: "vertex" },
+      fragment: { entry: "fragment", targets: [{ format: "canvas" }] },
+    });
     passes.push({
-      id: "present", type: "render", pipeline: "present", after: previous,
-      bindings: [{ group: 0, binding: 0, resource: input }, { group: 0, binding: 1, resource: "linear" }],
-      color: [{ resource: "canvas", clear: [0, 0, 0, 1] }], draw: { vertices: 3 },
+      id: "present",
+      type: "render",
+      pipeline: "present",
+      after: previous,
+      bindings: [
+        { group: 0, binding: 0, resource: input },
+        { group: 0, binding: 1, resource: "linear" },
+      ],
+      color: [{ resource: "canvas", clear: [0, 0, 0, 1] }],
+      draw: { vertices: 3 },
     });
 
     const graph = {
@@ -571,7 +876,10 @@ export class Scene {
       resources: {
         buffers: [...buffers.values()],
         textures: [...textures.values()],
-        samplers: [...samplers.values()].map(({ id, ...descriptor }) => ({ id, descriptor })),
+        samplers: [...samplers.values()].map(({ id, ...descriptor }) => ({
+          id,
+          descriptor,
+        })),
       },
       pipelines: { render: renderPipelines, compute: computePipelines },
       passes,

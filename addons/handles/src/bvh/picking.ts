@@ -8,32 +8,56 @@ export class Picking {
   readonly ready: Promise<void>;
   #worker: Worker;
   #next = 1;
-  #pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+  #pending = new Map<
+    number,
+    { resolve: (value: any) => void; reject: (error: Error) => void }
+  >();
 
   constructor(scene: Scene) {
     this.scene = scene;
-    this.#worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module", name: "yawn-bvh" });
+    this.#worker = new Worker(new URL("./worker.ts", import.meta.url), {
+      type: "module",
+      name: "yawn-bvh",
+    });
     this.#worker.addEventListener("message", ({ data }) => {
       const pending = this.#pending.get(data.request);
       if (!pending) return;
       this.#pending.delete(data.request);
       pending.resolve(data.hits);
     });
-    this.#worker.addEventListener("error", () => this.#fail(new Error("BVH_WORKER_ERROR")));
+    this.#worker.addEventListener("error", () =>
+      this.#fail(new Error("BVH_WORKER_ERROR")),
+    );
     this.ready = scene.ready.then(() => this.refresh());
   }
 
   refresh() {
     return this.#request("sync", {
-      shares: Object.fromEntries(["info", "nodes", "nodePositions", "meshInfo", "bounds"]
-        .map((name) => [name, this.scene.array(name).share()])),
+      shares: Object.fromEntries(
+        [
+          "info",
+          "nodes",
+          "nodePositions",
+          "nodeQuaternions",
+          "nodeScales",
+          "meshInfo",
+          "bounds",
+        ].map((name) => [name, this.scene.array(name).share()]),
+      ),
     }).then(() => undefined);
   }
 
-  async pick(origin: ArrayLike<number>, direction: ArrayLike<number>): Promise<PickHit[]> {
+  async pick(
+    origin: ArrayLike<number>,
+    direction: ArrayLike<number>,
+  ): Promise<PickHit[]> {
     await this.ready;
-    if (origin.length !== 3 || direction.length !== 3) throw new TypeError("Pick rays have three lanes");
-    return this.#request("pick", { origin: Array.from(origin), direction: Array.from(direction) });
+    if (origin.length !== 3 || direction.length !== 3)
+      throw new TypeError("Pick rays have three lanes");
+    return this.#request("pick", {
+      origin: Array.from(origin),
+      direction: Array.from(direction),
+    });
   }
 
   #request(type: string, payload: object) {

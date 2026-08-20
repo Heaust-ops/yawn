@@ -10,5 +10,11 @@ rustup toolchain install "$toolchain" --profile minimal --component rust-src,rus
 if ! command -v wasm-pack >/dev/null; then
     cargo install wasm-pack --version 0.15.0 --locked
 fi
+if ! command -v git-lfs >/dev/null; then
+    sudo apt-get update -qq
+    sudo apt-get install -y git-lfs
+fi
+git lfs install --local
+git lfs pull --include="docs/public/models/sponza.glb"
 npm ci
 amp orb services ensure

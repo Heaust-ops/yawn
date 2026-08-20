@@ -18,6 +18,8 @@ canvas.addEventListener("pointermove", (event) => {
 
 The pointer handler sends no messages. The typed-array view points directly into the arena shared with the render worker. The camera helpers use this same pattern; see [Cameras and controls](/guide/cameras).
 
+<Playground example="sab" />
+
 ## Add an application-specific row
 
 ```ts
@@ -42,3 +44,7 @@ info[4] = 0; // resume rendering
 ```
 
 Use messages for rare control changes (`setFps`, graph updates, allocation); use SAB writes for existing hot state.
+
+<script setup>
+import Playground from "../.vitepress/Playground.vue";
+</script>
