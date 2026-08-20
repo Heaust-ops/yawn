@@ -56,7 +56,7 @@ await core.setProfiler(false);
 stop();
 ```
 
-`new YawnCore(canvas, { debug: true })` enables the same timestamp-query mode at startup. Timings describe physical GPU passes and actual compiled draw counts; compatible indexed draws over consecutive instances collapse into one command. The sidebar also reports canvas size and wall-clock completion time.
+`new YawnCore(canvas, { debug: true })` enables the same timestamp-query mode at startup. Samples are read back asynchronously, so profiling does not serialize the GPU queue. Timings describe physical GPU passes and actual compiled draw counts; compatible indexed draws over consecutive instances collapse into one command. The sidebar also reports canvas size and wall-clock readback latency.
 
 The saved **Forward benchmark** playground renders 138 logical objects and 4.5 million triangles. Add `&grid=32` to lower geometry density or `&overdraw=1` to stack the objects while diagnosing depth and fragment cost.
 

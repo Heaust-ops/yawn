@@ -353,10 +353,10 @@ export class Scene {
       arenaBytes: options.arenaBytes,
       debug: options.debug,
     });
-    this.ready = this.#initialize(options.fps ?? 60);
+    this.ready = this.#initialize(options.fps);
   }
 
-  async #initialize(fps: number) {
+  async #initialize(fps?: number) {
     await this.core.ready;
     for (const [name, stride, format] of rows)
       await this.core.createRows({ name, rows: 1, stride, format });
@@ -373,7 +373,7 @@ export class Scene {
     this.core
       .array("materials")
       .write(material, [1, 1, 1, 1, 0, 0.7, 0, 0, 0, 0, 1, 0.5]);
-    await this.core.setFps(fps);
+    if (fps !== undefined) await this.core.setFps(fps);
     await this.#compileRenderGraph();
     return this;
   }

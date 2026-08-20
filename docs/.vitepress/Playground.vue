@@ -292,7 +292,7 @@ onUnmounted(() => {
             <span>{{ adapterInfo || profile.adapter }}</span>
             <span>
               {{ profile.canvas.width }}×{{ profile.canvas.height }} ·
-              {{ profile.wallMilliseconds.toFixed(2) }} ms wall
+              {{ profile.readbackMilliseconds.toFixed(2) }} ms readback latency
             </span>
           </div>
           <p v-if="profilerSupported === false">

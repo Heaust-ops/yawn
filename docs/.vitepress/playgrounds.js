@@ -402,7 +402,7 @@ for (let y = 0; y < 64; y++) {
   }
 }
 
-const scene = new Scene(canvas, { fps: 1000, hdr: true });
+const scene = new Scene(canvas, { hdr: true });
 await scene.ready;
 log("Benchmark core ready; preparing geometry…");
 const camera = new ArcRotateCamera(scene, {

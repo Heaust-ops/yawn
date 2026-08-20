@@ -1,15 +1,36 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
-use gloo_timers::future::TimeoutFuture;
+use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::gpu::Wgpu;
 use crate::gpu_resource::{GpuPass, ProfileMap};
 use crate::graph::{ColorAttachment, DepthAttachment};
 use crate::render_data::RenderData;
 use crate::store::{Loadout, Store};
+
+#[wasm_bindgen(inline_js = r#"
+const channel = new MessageChannel();
+const ready = [];
+channel.port1.onmessage = () => ready.shift()?.();
+
+export function nextFrame() {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+export function yieldTask() {
+    return new Promise(resolve => {
+        ready.push(resolve);
+        channel.port2.postMessage(0);
+    });
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = nextFrame)]
+    async fn next_frame();
+    #[wasm_bindgen(js_name = yieldTask)]
+    async fn yield_task();
+}
 
 pub struct RenderLoop {
     playing: Cell<bool>,
@@ -19,24 +40,23 @@ pub struct RenderLoop {
     elapsed: Cell<f64>,
     last: Cell<f64>,
     profiling: Cell<bool>,
+    profile_pending: Cell<bool>,
+    profile_after: Cell<f64>,
     profile: RefCell<Option<String>>,
-}
-
-struct Submission {
-    completed: Arc<AtomicBool>,
-    profile: Option<ProfileMap>,
 }
 
 impl RenderLoop {
     pub fn new() -> Self {
         Self {
             playing: Cell::new(true),
-            fps: Cell::new(60),
+            fps: Cell::new(0),
             started: Cell::new(false),
             frame: Cell::new(0),
             elapsed: Cell::new(0.0),
             last: Cell::new(js_sys::Date::now()),
             profiling: Cell::new(false),
+            profile_pending: Cell::new(false),
+            profile_after: Cell::new(0.0),
             profile: RefCell::new(None),
         }
     }
@@ -51,7 +71,7 @@ impl RenderLoop {
     }
 
     pub fn set_fps(&self, fps: u32) -> Result<(), &'static str> {
-        if !(1..=1000).contains(&fps) {
+        if fps > 1000 {
             return Err("FPS");
         }
         self.fps.set(fps);
@@ -60,6 +80,7 @@ impl RenderLoop {
 
     pub fn set_profiling(&self, enabled: bool) {
         self.profiling.set(enabled);
+        self.profile_after.set(0.0);
         if !enabled {
             self.profile.borrow_mut().take();
         }
@@ -81,75 +102,82 @@ impl RenderLoop {
         let control = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             loop {
+                next_frame().await;
+                if !control.playing.get() {
+                    continue;
+                }
                 let started = js_sys::Date::now();
-                if control.playing.get() {
-                    let delta = (started - control.last.replace(started)) / 1000.0;
-                    let elapsed = control.elapsed.get() + delta;
-                    control.elapsed.set(elapsed);
-                    let frame = control.frame.get().wrapping_add(1);
-                    control.frame.set(frame);
-                    let skip = {
-                        let mut data = data.borrow_mut();
-                        data.update_info(delta as f32, frame, elapsed as f32, control.fps.get());
-                        data.skip_render()
-                    };
-                    let submission = if !skip {
-                        if let (Some(gpu), Some(loadout)) =
-                            (gpu.borrow_mut().as_mut(), store.borrow_mut().active_mut())
-                        {
-                            gpu.render(loadout, &data.borrow(), control.profiling.get())
-                                .ok()
-                                .flatten()
-                        } else {
-                            None
-                        }
+                let fps = control.fps.get();
+                if fps != 0 && started - control.last.get() < 900.0 / f64::from(fps) {
+                    continue;
+                }
+                let delta = (started - control.last.replace(started)) / 1000.0;
+                let elapsed = control.elapsed.get() + delta;
+                control.elapsed.set(elapsed);
+                let frame = control.frame.get().wrapping_add(1);
+                control.frame.set(frame);
+                let skip = {
+                    let mut data = data.borrow_mut();
+                    data.update_info(delta as f32, frame, elapsed as f32, control.fps.get());
+                    data.skip_render()
+                };
+                let submission = if !skip {
+                    if let (Some(gpu), Some(loadout)) =
+                        (gpu.borrow_mut().as_mut(), store.borrow_mut().active_mut())
+                    {
+                        let profile = control.profiling.get()
+                            && !control.profile_pending.get()
+                            && started >= control.profile_after.get();
+                        gpu.render(loadout, &data.borrow(), profile)
+                            .ok()
+                            .flatten()
+                            .map(|profile| (profile, gpu.adapter.clone(), gpu.width, gpu.height))
                     } else {
                         None
-                    };
-                    if let Some(submission) = submission {
-                        while !submission.completed.load(Ordering::Acquire) {
-                            TimeoutFuture::new(0).await;
+                    }
+                } else {
+                    None
+                };
+                if let Some((profile, adapter, width, height)) = submission {
+                    control.profile_pending.set(true);
+                    control.profile_after.set(started + 250.0);
+                    let control = control.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        while profile.state() == 0 {
+                            yield_task().await;
                         }
-                        let wall_milliseconds = js_sys::Date::now() - started;
-                        if let Some(profile) = submission.profile {
-                            while profile.state() == 0 {
-                                TimeoutFuture::new(0).await;
-                            }
-                            if profile.state() == 1 {
-                                let passes = profile
-                                    .read()
-                                    .into_iter()
-                                    .map(|(name, milliseconds)| {
-                                        serde_json::json!({
-                                            "name": name,
-                                            "milliseconds": milliseconds,
-                                        })
+                        if profile.state() == 1 {
+                            let passes = profile
+                                .read()
+                                .into_iter()
+                                .map(|(name, milliseconds)| {
+                                    serde_json::json!({
+                                        "name": name,
+                                        "milliseconds": milliseconds,
                                     })
-                                    .collect::<Vec<_>>();
-                                let milliseconds = passes
-                                    .iter()
-                                    .filter_map(|pass| pass["milliseconds"].as_f64())
-                                    .sum::<f64>();
-                                let gpu = gpu.borrow();
-                                let gpu = gpu.as_ref().unwrap();
+                                })
+                                .collect::<Vec<_>>();
+                            let milliseconds = passes
+                                .iter()
+                                .filter_map(|pass| pass["milliseconds"].as_f64())
+                                .sum::<f64>();
+                            if control.profiling.get() {
                                 *control.profile.borrow_mut() = Some(
                                     serde_json::json!({
                                         "frame": frame,
                                         "milliseconds": milliseconds,
-                                        "wallMilliseconds": wall_milliseconds,
-                                        "adapter": gpu.adapter,
-                                        "canvas": { "width": gpu.width, "height": gpu.height },
+                                        "readbackMilliseconds": js_sys::Date::now() - started,
+                                        "adapter": adapter,
+                                        "canvas": { "width": width, "height": height },
                                         "passes": passes,
                                     })
                                     .to_string(),
                                 );
                             }
                         }
-                    }
+                        control.profile_pending.set(false);
+                    });
                 }
-                let target = 1000.0 / f64::from(control.fps.get());
-                let wait = (target - (js_sys::Date::now() - started)).max(0.0) as u32;
-                TimeoutFuture::new(if control.playing.get() { wait } else { 50 }).await;
             }
         });
     }
@@ -161,7 +189,7 @@ impl Wgpu {
         loadout: &mut Loadout,
         data: &RenderData,
         profile: bool,
-    ) -> Result<Option<Submission>, String> {
+    ) -> Result<Option<ProfileMap>, String> {
         for buffer in loadout.resources.buffers.values() {
             if !buffer.sync_each_frame {
                 continue;
@@ -282,11 +310,7 @@ impl Wgpu {
             })
             .flatten();
         output.present();
-        let completed = Arc::new(AtomicBool::new(false));
-        let callback = completed.clone();
-        self.queue
-            .on_submitted_work_done(move || callback.store(true, Ordering::Release));
-        Ok(Some(Submission { completed, profile }))
+        Ok(profile)
     }
 }
 
