@@ -137,12 +137,25 @@ log(\`Two mesh handles share geometry #\${source.geometryId}.\`);
 
 return { scene, source, instance, dispose: () => scene.dispose() };`;
 
-const materials = `import { Mesh, PBRMaterial, Scene } from "@yawn/handles";
+const materials = `import { Mesh, PBRMaterial, Scene, Texture } from "@yawn/handles";
 
 const scene = new Scene(canvas, { hdr: true });
 await scene.ready;
+const pixels = new OffscreenCanvas(64, 64);
+const context = pixels.getContext("2d");
+context.fillStyle = "#ff3018";
+context.fillRect(0, 0, 64, 64);
+context.fillStyle = "#ffd166";
+context.fillRect(0, 0, 32, 32);
+context.fillRect(32, 32, 32, 32);
+const albedo = new Texture(scene, {
+  source: pixels.transferToImageBitmap(),
+  format: "rgba8unorm-srgb",
+});
+await albedo.ready;
 const paint = new PBRMaterial(scene, {
-  baseColor: [0.85, 0.08, 0.18, 1],
+  baseColor: [1, 1, 1, 1],
+  baseColorTexture: albedo,
   metallic: 0.75,
   roughness: 0.18,
 });
@@ -151,6 +164,8 @@ const mesh = new Mesh(scene, {
   material: paint,
   vertexData: {
     positions: [-0.7, -0.6, 0, 0.7, -0.6, 0, 0, 0.72, 0],
+    normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
+    uvs: [0, 0, 2, 0, 1, 2],
     indices: [0, 1, 2],
   },
 });
@@ -167,6 +182,7 @@ return {
   scene,
   mesh,
   paint,
+  albedo,
   dispose() {
     canvas.removeEventListener("pointermove", move);
     scene.dispose();
@@ -256,7 +272,7 @@ return { scene, mesh, exposure, grade, fxaa, dispose: () => scene.dispose() };`;
 
 const importing = `import { AmbientLight, ArcRotateCamera, Picking, Scene, importGltf } from "@yawn/handles";
 
-const scene = new Scene(canvas, { hdr: true, fps: 1, arenaBytes: 384 * 1024 * 1024 });
+const scene = new Scene(canvas, { hdr: true, arenaBytes: 384 * 1024 * 1024 });
 await scene.ready;
 await scene.core.pause();
 log("Importing /models/sponza.glb in the importer worker…");
@@ -307,9 +323,12 @@ for (const mesh of meshes) {
 }
 
 const camera = new ArcRotateCamera(scene, {
-  alpha: 0.7,
-  beta: 1.1,
-  radius: 2.7,
+  targetPosition: [-0.3, 0, 0],
+  alpha: Math.PI / 2,
+  beta: Math.PI / 2,
+  radius: 0.3,
+  near: 0.01,
+  far: 10,
   aspect: canvas.width / canvas.height,
   controls: { element: canvas, pointer: true },
 });

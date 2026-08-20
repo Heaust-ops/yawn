@@ -144,6 +144,26 @@ async function load(url: string) {
       return new Uint8Array(await result.arrayBuffer());
     }),
   );
+  const imageBlobs = await Promise.all(
+    (document.images ?? []).map(async (image: any) => {
+      if (image.bufferView !== undefined) {
+        const view = document.bufferViews[image.bufferView];
+        const bytes = buffers[view.buffer];
+        const start = view.byteOffset ?? 0;
+        return new Blob([bytes.slice(start, start + view.byteLength)], {
+          type: image.mimeType,
+        });
+      }
+      const result = await fetch(new URL(image.uri, url));
+      if (!result.ok) throw new Error(`HTTP_${result.status}`);
+      return result.blob();
+    }),
+  );
+  const textures = await Promise.all(
+    (document.textures ?? []).map(async (texture: any) => ({
+      image: await createImageBitmap(imageBlobs[texture.source]),
+    })),
+  );
 
   const accessor = (id: number, integer = false) => {
     const source = document.accessors[id];
@@ -199,6 +219,10 @@ async function load(url: string) {
       roughness: pbr.roughnessFactor ?? 0.7,
       emissive: material.emissiveFactor ?? [0, 0, 0],
       alphaCutoff: material.alphaCutoff ?? 0.5,
+      baseColorTexture: pbr.baseColorTexture?.index ?? -1,
+      metallicRoughnessTexture: pbr.metallicRoughnessTexture?.index ?? -1,
+      normalTexture: material.normalTexture?.index ?? -1,
+      emissiveTexture: material.emissiveTexture?.index ?? -1,
     };
   });
   const primitives: any[] = [];
@@ -264,7 +288,7 @@ async function load(url: string) {
   if (!nodes.length)
     for (let id = 0; id < (document.meshes ?? []).length; id++)
       emitMesh(id, {});
-  return { materials, primitives };
+  return { materials, primitives, textures };
 }
 
 addEventListener("message", async ({ data }) => {
@@ -275,6 +299,7 @@ addEventListener("message", async ({ data }) => {
         .map((name) => primitive[name]?.buffer)
         .filter(Boolean),
     );
+    transfers.push(...result.textures.map((texture: any) => texture.image));
     (postMessage as any)({ request: data.request, result }, transfers);
   } catch (error) {
     postMessage({

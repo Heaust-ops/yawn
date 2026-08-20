@@ -91,7 +91,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   clusters[3] = bitcast<u32>(light.b);
 }`;
 
-const forwardShader = /* wgsl */ `
+const basicForwardShader = /* wgsl */ `
 struct Accent { color: vec4<f32> }
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -152,6 +152,103 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
   let color = base.rgb * (light + clustered) * accent.color.rgb * mix(1.0, 1.1, properties.x);
   return vec4<f32>(color, base.a);
 }`;
+
+function pbrShader(mask: number) {
+  const baseTexture = mask & 1;
+  const materialTexture = mask & 2;
+  const normalTexture = mask & 4;
+  return /* wgsl */ `
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) world: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) tangent: vec4<f32>,
+  @location(4) @interpolate(flat) mesh: u32,
+  @location(5) @interpolate(flat) material: u32,
+}
+
+@group(0) @binding(0) var<storage, read> clusters: array<u32>;
+@group(0) @binding(1) var<uniform> accent: vec4<f32>;
+@group(0) @binding(2) var<storage, read> positions: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> quaternions: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> scales: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> meshInfo: array<u32>;
+@group(0) @binding(6) var<storage, read> materials: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> cameras: array<vec4<f32>>;
+${mask ? "@group(1) @binding(0) var materialSampler: sampler;" : ""}
+${baseTexture ? "@group(1) @binding(1) var baseTexture: texture_2d<f32>;" : ""}
+${materialTexture ? "@group(1) @binding(2) var materialTexture: texture_2d<f32>;" : ""}
+${normalTexture ? "@group(1) @binding(3) var normalTexture: texture_2d<f32>;" : ""}
+
+fn rotate(q: vec4<f32>, value: vec3<f32>) -> vec3<f32> {
+  return value + 2.0 * cross(q.xyz, cross(q.xyz, value) + q.w * value);
+}
+
+@vertex
+fn vertex(
+  @location(0) point: vec3<f32>,
+  @location(1) localNormal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  ${normalTexture ? "@location(3) localTangent: vec4<f32>," : ""}
+  @builtin(instance_index) packed: u32,
+) -> VertexOutput {
+  let instance = packed & 65535u;
+  let scale = scales[instance].xyz;
+  let world = rotate(quaternions[instance], point * scale) + positions[instance].xyz;
+  var clip = vec4<f32>(world, 1.0);
+  if (cameras[2].w != 0.0) {
+    let cameraNode = u32(cameras[1].x);
+    let inverse = vec4<f32>(-quaternions[cameraNode].xyz, quaternions[cameraNode].w);
+    let view = rotate(inverse, world - positions[cameraNode].xyz);
+    if (cameras[1].y == 1.0) {
+      let size = max(cameras[1].z, 0.0001);
+      clip = vec4<f32>(view.x / (size * cameras[0].y * 0.5), view.y / (size * 0.5), -view.z / cameras[0].w, 1.0);
+    } else {
+      let focal = 1.0 / tan(cameras[0].x * 0.5);
+      let depth = (-view.z * cameras[0].w - cameras[0].z * cameras[0].w) / (cameras[0].w - cameras[0].z);
+      clip = vec4<f32>(view.x * focal / cameras[0].y, view.y * focal, depth, -view.z);
+    }
+  }
+  var output: VertexOutput;
+  output.position = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), clip, meshInfo[instance * 4u + 2u] != 0u);
+  output.world = world;
+  output.normal = normalize(rotate(quaternions[instance], localNormal / scale));
+  output.uv = uv;
+  output.tangent = ${normalTexture ? "vec4(normalize(rotate(quaternions[instance], localTangent.xyz * scale)), localTangent.w)" : "vec4(1.0, 0.0, 0.0, 1.0)"};
+  output.mesh = instance;
+  output.material = packed >> 16u;
+  return output;
+}
+
+@fragment
+fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+  let fallback = meshInfo[input.mesh * 4u + 1u];
+  let material = select(fallback, input.material - 1u, input.material != 0u);
+  let factor = materials[material * 3u];
+  let properties = materials[material * 3u + 1u];
+  let extra = materials[material * 3u + 2u];
+  let base = factor * ${baseTexture ? "textureSample(baseTexture, materialSampler, input.uv)" : "vec4(1.0)"};
+  let packedMaterial = ${materialTexture ? "textureSample(materialTexture, materialSampler, input.uv)" : "vec4(1.0)"};
+  let metallic = clamp(properties.x * ${materialTexture ? "packedMaterial.b" : "1.0"}, 0.0, 1.0);
+  let roughness = clamp(properties.y * ${materialTexture ? "packedMaterial.g" : "1.0"}, 0.04, 1.0);
+  var normal = normalize(input.normal);
+  ${normalTexture ? "let tangent = normalize(input.tangent.xyz); let bitangent = normalize(cross(normal, tangent)) * input.tangent.w; let mapped = textureSample(normalTexture, materialSampler, input.uv).xyz * 2.0 - 1.0; normal = normalize(mat3x3<f32>(tangent, bitangent, normal) * vec3(mapped.xy * extra.y, mapped.z));" : ""}
+  let cameraNode = u32(cameras[1].x);
+  let view = normalize(positions[cameraNode].xyz - input.world);
+  let lightDirection = normalize(vec3<f32>(0.4, 0.7, 0.6));
+  let halfVector = normalize(lightDirection + view);
+  let nDotL = max(dot(normal, lightDirection), 0.0);
+  let nDotH = max(dot(normal, halfVector), 0.0);
+  let f0 = mix(vec3(0.04), base.rgb, metallic);
+  let specular = f0 * pow(nDotH, max(2.0, 2.0 / (roughness * roughness) - 2.0));
+  let clusterLight = vec3<f32>(bitcast<f32>(clusters[1]), bitcast<f32>(clusters[2]), bitcast<f32>(clusters[3]));
+  let ambient = vec3(0.08) + clusterLight;
+  let diffuse = base.rgb * (1.0 - metallic) * nDotL;
+  let emissive = vec3(properties.z, properties.w, extra.x);
+  return vec4((base.rgb * ambient + diffuse + specular * nDotL + emissive) * accent.a, base.a);
+}`;
+}
 
 const emptyForwardShader = /* wgsl */ `
 struct Accent { color: vec4<f32> }
@@ -257,10 +354,13 @@ export class Scene {
 
   constructor(
     canvas: HTMLCanvasElement,
-    options: { arenaBytes?: number; fps?: number; hdr?: boolean } = {},
+    options: { arenaBytes?: number; debug?: boolean; fps?: number; hdr?: boolean } = {},
   ) {
     this.hdr = options.hdr ?? true;
-    this.core = new YawnCore(canvas, { arenaBytes: options.arenaBytes });
+    this.core = new YawnCore(canvas, {
+      arenaBytes: options.arenaBytes,
+      debug: options.debug,
+    });
     this.ready = this.#initialize(options.fps ?? 60);
   }
 
@@ -635,7 +735,23 @@ export class Scene {
       usage: ["render", "sampled"],
       transient: false,
     });
+    addTexture({
+      id: "depth",
+      format: "depth24plus",
+      size: ["canvas", "canvas", 1],
+      usage: ["render"],
+      transient: true,
+    });
     addSampler({ id: "linear", magFilter: "linear", minFilter: "linear" });
+    addSampler({
+      id: "material-linear",
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "repeat",
+      addressModeV: "repeat",
+    });
+    for (const { number: _, source: __, ...texture } of this.#textures.values())
+      addTexture(texture);
 
     let previous = computeIds.length ? computeIds : ["cluster-lights"];
     if (!renderedMeshes.length) {
@@ -665,22 +781,7 @@ export class Scene {
         ["cameras", "cameras"],
       ])
         addBuffer({ id, array, usage: ["storage"] });
-      renderPipelines.push({
-        id: "forward-pbr",
-        code: forwardShader,
-        vertex: {
-          entry: "vertex",
-          buffers: [
-            {
-              arrayStride: 16,
-              attributes: [
-                { format: "float32x3", offset: 0, shaderLocation: 0 },
-              ],
-            },
-          ],
-        },
-        fragment: { entry: "fragment", targets: [{ format: hdrFormat }] },
-      });
+      const forwardPipelines = new Set<string>();
       let firstRender = true;
       for (const mesh of renderedMeshes) {
         const vertex = `geometry-${mesh.geometryId}-positions`;
@@ -688,13 +789,33 @@ export class Scene {
           id: vertex,
           array: `geometry.${mesh.geometryId}.positions`,
           usage: ["vertex"],
+          sync: "loadout",
         });
+        const normal = `geometry-${mesh.geometryId}-normals`;
+        const uv = `geometry-${mesh.geometryId}-uvs`;
+        const tangent = `geometry-${mesh.geometryId}-tangents`;
+        const hasNormals = !!this.geometryData(mesh.geometryId, "normals");
+        const hasUvs = !!this.geometryData(mesh.geometryId, "uvs");
+        const hasTangents = !!this.geometryData(mesh.geometryId, "tangents");
+        for (const [present, id, kind] of [
+          [hasNormals, normal, "normals"],
+          [hasUvs, uv, "uvs"],
+          [hasTangents, tangent, "tangents"],
+        ] as const)
+          if (present)
+            addBuffer({
+              id,
+              array: `geometry.${mesh.geometryId}.${kind}`,
+              usage: ["vertex"],
+              sync: "loadout",
+            });
         const indexed = mesh.indexCount > 0;
         if (indexed)
           addBuffer({
             id: `geometry-${mesh.geometryId}-indices`,
             array: `geometry.${mesh.geometryId}.indices`,
             usage: ["index"],
+            sync: "loadout",
           });
         const draws =
           indexed && mesh.faceMaterials.size
@@ -717,8 +838,103 @@ export class Scene {
               ];
         for (const draw of draws) {
           const id = `forward-${mesh.id}-${draw.face}`;
-          if (mesh.id > 65535 || (draw.material ?? 0) > 65534)
+          const material =
+            draw.material ?? Number(this.array("meshInfo").row(mesh.id)[1]);
+          if (mesh.id > 65535 || material > 65534)
             throw new RangeError("Scene handle limit");
+          const pointers = this.array("materialTextures").row(material);
+          const texture = (lane: number) =>
+            pointers[lane]
+              ? this.#textures.get(Number(pointers[lane]) - 1)
+              : undefined;
+          const baseTexture = texture(0);
+          const materialTexture = texture(1);
+          const normalTexture = hasTangents ? texture(2) : undefined;
+          const detailed = hasNormals && hasUvs;
+          const mask = detailed
+            ? (baseTexture ? 1 : 0) |
+              (materialTexture ? 2 : 0) |
+              (normalTexture ? 4 : 0)
+            : 0;
+          const pipeline = detailed ? `forward-pbr-${mask}` : "forward-basic";
+          if (!forwardPipelines.has(pipeline)) {
+            forwardPipelines.add(pipeline);
+            renderPipelines.push({
+              id: pipeline,
+              code: detailed ? pbrShader(mask) : basicForwardShader,
+              vertex: {
+                entry: "vertex",
+                buffers: detailed
+                  ? [
+                      {
+                        arrayStride: 16,
+                        attributes: [
+                          {
+                            format: "float32x3",
+                            offset: 0,
+                            shaderLocation: 0,
+                          },
+                        ],
+                      },
+                      {
+                        arrayStride: 16,
+                        attributes: [
+                          {
+                            format: "float32x3",
+                            offset: 0,
+                            shaderLocation: 1,
+                          },
+                        ],
+                      },
+                      {
+                        arrayStride: 16,
+                        attributes: [
+                          {
+                            format: "float32x2",
+                            offset: 0,
+                            shaderLocation: 2,
+                          },
+                        ],
+                      },
+                      ...(normalTexture
+                        ? [
+                            {
+                              arrayStride: 16,
+                              attributes: [
+                                {
+                                  format: "float32x4",
+                                  offset: 0,
+                                  shaderLocation: 3,
+                                },
+                              ],
+                            },
+                          ]
+                        : []),
+                    ]
+                  : [
+                      {
+                        arrayStride: 16,
+                        attributes: [
+                          {
+                            format: "float32x3",
+                            offset: 0,
+                            shaderLocation: 0,
+                          },
+                        ],
+                      },
+                    ],
+              },
+              fragment: {
+                entry: "fragment",
+                targets: [{ format: hdrFormat }],
+              },
+              depthStencil: {
+                format: "depth24plus",
+                depth_write_enabled: true,
+                depth_compare: "less",
+              },
+            });
+          }
           const instance =
             (mesh.id +
               (draw.material === undefined
@@ -728,18 +944,56 @@ export class Scene {
           passes.push({
             id,
             type: "render",
-            pipeline: "forward-pbr",
+            pipeline,
             after: previous,
             bindings: [
-              "clusters",
-              "accent",
-              "node-positions",
-              "node-quaternions",
-              "node-scales",
-              "mesh-info",
-              "materials",
-              "cameras",
-            ].map((resource, binding) => ({ group: 0, binding, resource })),
+              ...[
+                "clusters",
+                "accent",
+                "node-positions",
+                "node-quaternions",
+                "node-scales",
+                "mesh-info",
+                "materials",
+                "cameras",
+              ].map((resource, binding) => ({
+                group: 0,
+                binding,
+                resource,
+              })),
+              ...(detailed && mask
+                ? [
+                    { group: 1, binding: 0, resource: "material-linear" },
+                    ...(baseTexture
+                      ? [
+                          {
+                            group: 1,
+                            binding: 1,
+                            resource: baseTexture.id,
+                          },
+                        ]
+                      : []),
+                    ...(materialTexture
+                      ? [
+                          {
+                            group: 1,
+                            binding: 2,
+                            resource: materialTexture.id,
+                          },
+                        ]
+                      : []),
+                    ...(normalTexture
+                      ? [
+                          {
+                            group: 1,
+                            binding: 3,
+                            resource: normalTexture.id,
+                          },
+                        ]
+                      : []),
+                  ]
+                : []),
+            ],
             color: [
               {
                 resource: "hdr",
@@ -748,7 +1002,20 @@ export class Scene {
                   : { load: "load" }),
               },
             ],
-            vertexBuffers: [{ slot: 0, resource: vertex }],
+            depth: {
+              resource: "depth",
+              ...(firstRender ? { clear: 1 } : { load: "load" }),
+            },
+            vertexBuffers: [
+              { slot: 0, resource: vertex },
+              ...(detailed
+                ? [
+                    { slot: 1, resource: normal },
+                    { slot: 2, resource: uv },
+                    ...(normalTexture ? [{ slot: 3, resource: tangent }] : []),
+                  ]
+                : []),
+            ],
             ...(indexed
               ? {
                   indexBuffer: {
@@ -827,26 +1094,6 @@ export class Scene {
       previous = [pipeline];
     }
 
-    for (const { number, source: _, ...texture } of this.#textures.values()) {
-      addTexture(texture);
-      const id = `retain-texture-${number}`;
-      computePipelines.push({
-        id,
-        code: "@group(0) @binding(0) var source: texture_2d<f32>; @group(0) @binding(1) var<storage, read_write> output: array<u32>; @compute @workgroup_size(1) fn main() { output[1] = textureDimensions(source).x; }",
-        entry: "main",
-      });
-      passes.push({
-        id,
-        type: "compute",
-        pipeline: id,
-        after: ["cluster-lights"],
-        dispatch: [1, 1, 1],
-        bindings: [
-          { group: 0, binding: 0, resource: texture.id },
-          { group: 0, binding: 1, resource: "clusters" },
-        ],
-      });
-    }
     const toneMap = String(
       [...this.#effects.values()].find(
         (effect) => effect.kind === "colorGrading",

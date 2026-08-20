@@ -4,6 +4,7 @@ export type GraphBuffer = {
   id: string;
   array: string;
   usage?: string[];
+  sync?: "frame" | "loadout";
 };
 
 export type GraphTexture = {
@@ -18,6 +19,8 @@ export type GraphSampler = {
   id: string;
   magFilter?: "nearest" | "linear";
   minFilter?: "nearest" | "linear";
+  addressModeU?: "clamp-to-edge" | "repeat" | "mirror-repeat";
+  addressModeV?: "clamp-to-edge" | "repeat" | "mirror-repeat";
 };
 
 export type GraphBinding = {

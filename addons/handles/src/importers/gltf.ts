@@ -1,6 +1,7 @@
 import { Mesh } from "../Mesh";
 import type { Scene } from "../Scene";
 import { PBRMaterial } from "../materials/PBRMaterial";
+import { Texture } from "../materials/Texture";
 
 let worker: Worker | undefined;
 let nextRequest = 1;
@@ -42,9 +43,31 @@ export async function importGltf(scene: Scene, url: string | URL) {
     nodes: result.primitives.length,
     materials: result.materials.length,
   });
-  return scene.batchGraphUpdates(async () => {
+  let textures: Texture[] = [];
+  const imported = await scene.batchGraphUpdates(async () => {
+    const srgb = new Set<number>();
+    for (const material of result.materials) {
+      if (material.baseColorTexture >= 0) srgb.add(material.baseColorTexture);
+      if (material.emissiveTexture >= 0) srgb.add(material.emissiveTexture);
+    }
+    textures = result.textures.map(
+      ({ image }: { image: ImageBitmap }, index: number) =>
+        new Texture(scene, {
+          source: image,
+          format: srgb.has(index) ? "rgba8unorm-srgb" : "rgba8unorm",
+        }),
+    );
+    await Promise.all(textures.map((texture: Texture) => texture.ready));
     const materials = result.materials.map(
-      (options: any) => new PBRMaterial(scene, options),
+      (options: any) =>
+        new PBRMaterial(scene, {
+          ...options,
+          baseColorTexture: textures[options.baseColorTexture],
+          metallicRoughnessTexture:
+            textures[options.metallicRoughnessTexture],
+          normalTexture: textures[options.normalTexture],
+          emissiveTexture: textures[options.emissiveTexture],
+        }),
     );
     await Promise.all(materials.map((material: PBRMaterial) => material.ready));
     const meshes: Mesh[] = result.primitives.map(
@@ -67,4 +90,10 @@ export async function importGltf(scene: Scene, url: string | URL) {
     await Promise.all(meshes.map((mesh) => mesh.ready));
     return meshes;
   });
+  await Promise.all(
+    result.textures.map((_: unknown, index: number) =>
+      scene.core.deleteTexture(textures[index].resource),
+    ),
+  );
+  return imported;
 }

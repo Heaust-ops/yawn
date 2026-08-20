@@ -12,6 +12,14 @@ pub struct RenderGraph {
     #[serde(default)]
     pub pipelines: PipelineDeclarations,
     pub passes: Vec<Pass>,
+    #[serde(skip)]
+    pub executions: Vec<Execution>,
+}
+
+#[derive(Clone)]
+pub enum Execution {
+    Compute(usize),
+    Render(Vec<usize>),
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -30,6 +38,8 @@ pub struct Buffer {
     pub array: String,
     #[serde(default)]
     pub usage: Vec<String>,
+    #[serde(default = "frame_sync")]
+    pub sync: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -186,7 +196,7 @@ pub struct Pass {
     pub dispatch: [u32; 3],
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 pub struct Binding {
     #[serde(default)]
     pub group: u32,
@@ -318,7 +328,9 @@ impl RenderGraph {
         for pass in &mut self.passes {
             pass.dependencies = pass.after.iter().map(|id| sorted_ids[id]).collect();
         }
-        self.plan_resources()
+        self.plan_resources()?;
+        self.plan_execution();
+        Ok(())
     }
 
     fn plan_resources(&mut self) -> Result<(), &'static str> {
@@ -391,6 +403,80 @@ impl RenderGraph {
         self.validate_ids()
     }
 
+    fn plan_execution(&mut self) {
+        let mut executions = Vec::new();
+        for index in 0..self.passes.len() {
+            let merge = executions.last().is_some_and(|execution| match execution {
+                Execution::Render(passes) => self.can_merge_render(*passes.last().unwrap(), index),
+                Execution::Compute(_) => false,
+            });
+            if merge {
+                let Some(Execution::Render(passes)) = executions.last_mut() else {
+                    unreachable!()
+                };
+                passes.push(index);
+            } else if self.passes[index].kind == "render" {
+                executions.push(Execution::Render(vec![index]));
+            } else {
+                executions.push(Execution::Compute(index));
+            }
+        }
+        self.executions = executions;
+    }
+
+    fn can_merge_render(&self, previous: usize, next: usize) -> bool {
+        let previous = &self.passes[previous];
+        let next = &self.passes[next];
+        if next.kind != "render"
+            || previous.color.len() != next.color.len()
+            || self.sample_count(&previous.pipeline) != self.sample_count(&next.pipeline)
+            || previous
+                .color
+                .iter()
+                .zip(&next.color)
+                .any(|(previous, next)| {
+                    previous.resource != next.resource
+                        || previous.store != "store"
+                        || next.load != "load"
+                })
+        {
+            return false;
+        }
+        let same_depth = match (&previous.depth, &next.depth) {
+            (None, None) => true,
+            (Some(previous), Some(next)) => {
+                previous.resource == next.resource
+                    && previous.store == "store"
+                    && next.load == "load"
+            }
+            _ => false,
+        };
+        same_depth
+            && !next.bindings.iter().any(|binding| {
+                next.color
+                    .iter()
+                    .any(|attachment| attachment.resource == binding.resource)
+                    || next
+                        .depth
+                        .as_ref()
+                        .is_some_and(|attachment| attachment.resource == binding.resource)
+            })
+    }
+
+    fn sample_count(&self, pipeline: &str) -> Option<u64> {
+        self.pipelines
+            .render
+            .iter()
+            .find(|value| value.id == pipeline)
+            .map(|value| {
+                value
+                    .multisample
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+            })
+    }
+
     fn validate_ids(&self) -> Result<(), &'static str> {
         let mut resources = HashSet::new();
         for id in self
@@ -404,6 +490,14 @@ impl RenderGraph {
             if id.is_empty() || !resources.insert(id) {
                 return Err("GRAPH_RESOURCE");
             }
+        }
+        if self
+            .resources
+            .buffers
+            .iter()
+            .any(|buffer| !matches!(buffer.sync.as_str(), "frame" | "loadout"))
+        {
+            return Err("GRAPH_BUFFER_SYNC");
         }
         let mut pipelines = HashSet::new();
         for id in self
@@ -443,7 +537,7 @@ impl Pass {
 }
 
 impl Texture {
-    fn key(&self) -> Result<String, &'static str> {
+    pub(crate) fn key(&self) -> Result<String, &'static str> {
         let mut usage = self.usage.clone();
         usage.sort_unstable();
         usage.dedup();
@@ -497,4 +591,7 @@ fn index_format() -> String {
 }
 fn dispatch() -> [u32; 3] {
     [1, 1, 1]
+}
+fn frame_sync() -> String {
+    "frame".into()
 }

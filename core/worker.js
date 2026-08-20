@@ -1,6 +1,7 @@
 import initWasm, { Core } from "./pkg/yawn_core.js";
 
 let core;
+let profileTimer;
 
 const fail = code => { throw new Error(code); };
 
@@ -39,6 +40,12 @@ addEventListener("message", async ({ data: message }) => {
         case "switch-loadout":
           core.switch_loadout(message.id);
           break;
+        case "upload-texture":
+          core.upload_texture(message.name, message.image);
+          break;
+        case "delete-texture":
+          core.delete_texture(message.name);
+          break;
         case "play":
           core.play();
           break;
@@ -47,6 +54,14 @@ addEventListener("message", async ({ data: message }) => {
           break;
         case "set-fps":
           core.set_fps(message.fps);
+          break;
+        case "set-profiler":
+          result = core.set_profiler(Boolean(message.enabled));
+          clearInterval(profileTimer);
+          profileTimer = result && message.enabled ? setInterval(() => {
+            const stats = core.take_profile();
+            if (stats) postMessage({ type: "profile", stats: JSON.parse(stats) });
+          }, 250) : undefined;
           break;
         default:
           fail("MESSAGE");

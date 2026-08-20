@@ -13,7 +13,7 @@ let nextTextureName = 1;
 /** A graph texture resource handle; image decoding/upload policy remains outside core. */
 export class Texture {
   readonly scene: Scene;
-  readonly id: number;
+  id = -1;
   readonly resource: string;
   readonly source?: string | ImageBitmap;
   readonly ready: Promise<void>;
@@ -21,24 +21,44 @@ export class Texture {
 
   constructor(scene: Scene, options: TextureOptions = {}) {
     this.scene = scene;
-    this.resource = `texture-${nextTextureName++}`;
+    const resource = `texture-${nextTextureName++}`;
+    this.resource = resource;
     this.source = options.source;
-    const registration = scene.registerTexture({
-      id: this.resource,
-      source: options.source,
-      size: options.size ?? [1, 1, 1],
-      format: options.format ?? "rgba8unorm",
-      usage: [...new Set([...(options.usage ?? ["copyDst"]), "sampled"])],
-      transient: options.transient ?? false,
-    });
-    this.id = registration.number;
-    this.ready = registration.ready;
+    this.ready = (async () => {
+      const image =
+        typeof options.source === "string"
+          ? await createImageBitmap(await (await fetch(options.source)).blob())
+          : options.source;
+      const registration = scene.registerTexture({
+        id: resource,
+        source: image,
+        size:
+          options.size ??
+          (image instanceof ImageBitmap
+            ? [image.width, image.height, 1]
+            : [1, 1, 1]),
+        format: options.format ?? "rgba8unorm",
+        usage: [
+          ...new Set([
+            ...(options.usage ?? ["copyDst"]),
+            "sampled",
+            ...(image instanceof ImageBitmap ? ["render"] : []),
+          ]),
+        ],
+        transient: options.transient ?? false,
+      });
+      this.id = registration.number;
+      await registration.ready;
+      if (image instanceof ImageBitmap)
+        await scene.core.uploadTexture(resource, image);
+    })();
   }
 
   async dispose() {
     await this.ready;
     if (this.#disposed) return;
     this.#disposed = true;
+    await this.scene.core.deleteTexture(this.resource);
     await this.scene.unregisterTexture(this.id);
   }
 }

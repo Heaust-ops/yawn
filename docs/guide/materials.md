@@ -22,17 +22,15 @@ mesh.material = paint;
 
 ```ts
 const albedo = new Texture(scene, {
-  source: "/textures/paint.ktx2",
-  size: [2048, 2048, 1],
+  source: "/textures/paint.png",
   format: "rgba8unorm-srgb",
-  usage: ["sampled", "copyDst"],
 });
 await albedo.ready;
 
 const textured = new PBRMaterial(scene, { baseColorTexture: albedo });
 ```
 
-Creating or removing a `Texture` rebuilds the single graph loadout so the GPU resource is allocated up front. The source pointer stays on the handle for an importer or application uploader; core never owns image-loading policy.
+Creating or removing a `Texture` rebuilds the single graph loadout so the GPU resource is allocated up front. The addon decodes URLs outside core, then transfers an `ImageBitmap` to the render worker; compatible loadout rebuilds reuse the allocated GPU texture instead of uploading it again.
 
 ## Custom WGSL
 

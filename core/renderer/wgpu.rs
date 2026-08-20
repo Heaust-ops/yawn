@@ -7,6 +7,7 @@ pub struct Wgpu {
     pub format: wgpu::TextureFormat,
     pub width: u32,
     pub height: u32,
+    pub timestamp_queries: bool,
 }
 
 impl Wgpu {
@@ -30,8 +31,12 @@ impl Wgpu {
             })
             .await
             .map_err(|_| "WEBGPU_UNAVAILABLE")?;
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features,
+                ..Default::default()
+            })
             .await
             .map_err(|_| "DEVICE")?;
         let config = surface
@@ -48,6 +53,7 @@ impl Wgpu {
             format,
             width,
             height,
+            timestamp_queries: required_features.contains(wgpu::Features::TIMESTAMP_QUERY),
         })
     }
 }

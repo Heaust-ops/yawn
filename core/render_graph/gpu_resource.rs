@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::gpu::Wgpu;
-use crate::graph::{Binding, Extent, Pass, RenderGraph, RenderPipeline, Texture};
+use crate::graph::{Binding, Execution, Extent, Pass, RenderGraph, RenderPipeline, Texture};
 use crate::render_data::RenderData;
 
 pub struct GpuResources {
@@ -16,28 +18,59 @@ pub struct GpuResources {
     pub render_pipelines: HashMap<String, wgpu::RenderPipeline>,
     pub compute_pipelines: HashMap<String, wgpu::ComputePipeline>,
     pub passes: Vec<GpuPass>,
+    pub profiler: Option<GpuProfiler>,
+}
+
+pub struct GpuProfiler {
+    query_set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: Arc<wgpu::Buffer>,
+    query_count: u32,
+}
+
+pub struct ProfileMap {
+    readback: Arc<wgpu::Buffer>,
+    state: Arc<AtomicU8>,
+    labels: Vec<String>,
+    timestamp_period: f32,
 }
 
 pub struct GpuBuffer {
     pub buffer: wgpu::Buffer,
     pub source: String,
+    pub sync_each_frame: bool,
 }
 
+#[derive(Clone)]
 pub struct GpuTexture {
-    pub _texture: wgpu::Texture,
+    pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+    key: String,
+    uploaded: bool,
 }
 
 pub enum GpuPass {
-    Render(wgpu::RenderBundle),
+    Render {
+        label: String,
+        first: usize,
+        last: usize,
+        bundle: wgpu::RenderBundle,
+    },
     Compute {
+        label: String,
+        pass: usize,
         pipeline: wgpu::ComputePipeline,
         bind_groups: Vec<(u32, wgpu::BindGroup)>,
     },
 }
 
 impl GpuResources {
-    pub fn activate(graph: &RenderGraph, gpu: &Wgpu, data: &RenderData) -> Result<Self, String> {
+    pub fn activate(
+        graph: &RenderGraph,
+        gpu: &Wgpu,
+        data: &RenderData,
+        previous: Option<&Self>,
+    ) -> Result<Self, String> {
         let mut buffers = HashMap::new();
         for source in &graph.resources.buffers {
             let rows = data.rows(&source.array).ok_or("GRAPH_ARRAY_UNKNOWN")?;
@@ -54,6 +87,7 @@ impl GpuResources {
                 GpuBuffer {
                     buffer,
                     source: source.array.clone(),
+                    sync_each_frame: source.sync == "frame",
                 },
             );
         }
@@ -65,12 +99,32 @@ impl GpuResources {
             let physical = match physical_slots.get(&source.slot) {
                 Some(&physical) => physical,
                 None => {
+                    let key = source.key()?;
+                    if !source.transient {
+                        if let Some(texture) = previous
+                            .and_then(|resources| {
+                                resources
+                                    .texture_slots
+                                    .get(&source.id)
+                                    .map(|slot| &resources.textures[*slot])
+                            })
+                            .filter(|texture| texture.key == key)
+                        {
+                            let physical = textures.len();
+                            textures.push(texture.clone());
+                            physical_slots.insert(source.slot, physical);
+                            texture_slots.insert(source.id.clone(), physical);
+                            continue;
+                        }
+                    }
                     let descriptor = texture_descriptor(source, gpu.width, gpu.height)?;
                     let texture = gpu.device.create_texture(&descriptor);
                     let physical = textures.len();
                     textures.push(GpuTexture {
                         view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                        _texture: texture,
+                        texture,
+                        key,
+                        uploaded: false,
                     });
                     physical_slots.insert(source.slot, physical);
                     physical
@@ -121,6 +175,30 @@ impl GpuResources {
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
 
+        let profiler = (gpu.timestamp_queries && !graph.executions.is_empty()).then(|| {
+            let query_count = graph.executions.len() as u32 * 2;
+            let bytes = u64::from(query_count) * 8;
+            GpuProfiler {
+                query_set: gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("frame-profile"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: query_count,
+                }),
+                resolve: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frame-profile-resolve"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                readback: Arc::new(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frame-profile-readback"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                })),
+                query_count,
+            }
+        });
         let mut resources = Self {
             buffers,
             textures,
@@ -129,11 +207,27 @@ impl GpuResources {
             render_pipelines,
             compute_pipelines,
             passes: Vec::new(),
+            profiler,
         };
-        for pass in &graph.passes {
-            let compiled = match pass.kind.as_str() {
-                "render" => GpuPass::Render(resources.render_bundle(graph, pass, gpu)?),
-                "compute" => {
+        for execution in &graph.executions {
+            let compiled = match execution {
+                Execution::Render(passes) => GpuPass::Render {
+                    label: if passes.len() == 1 {
+                        graph.passes[passes[0]].id.clone()
+                    } else if passes
+                        .iter()
+                        .all(|index| graph.passes[*index].id.starts_with("forward-"))
+                    {
+                        format!("Forward ({} draws)", passes.len())
+                    } else {
+                        format!("Render ({} draws)", passes.len())
+                    },
+                    first: passes[0],
+                    last: *passes.last().unwrap(),
+                    bundle: resources.render_bundle(graph, passes, gpu)?,
+                },
+                Execution::Compute(index) => {
+                    let pass = &graph.passes[*index];
                     let pipeline = resources
                         .compute_pipelines
                         .get(&pass.pipeline)
@@ -145,11 +239,12 @@ impl GpuResources {
                         gpu,
                     )?;
                     GpuPass::Compute {
+                        label: pass.id.clone(),
+                        pass: *index,
                         pipeline,
                         bind_groups,
                     }
                 }
-                _ => return Err("GRAPH_PASS".into()),
             };
             resources.passes.push(compiled);
         }
@@ -163,16 +258,146 @@ impl GpuResources {
             .map(|texture| &texture.view)
     }
 
+    pub fn upload_texture(
+        &mut self,
+        id: &str,
+        image: &web_sys::ImageBitmap,
+        gpu: &Wgpu,
+    ) -> Result<(), String> {
+        let texture = self
+            .texture_slots
+            .get(id)
+            .and_then(|slot| self.textures.get_mut(*slot))
+            .ok_or("GRAPH_TEXTURE_UNKNOWN")?;
+        gpu.queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                source: wgpu::ExternalImageSource::ImageBitmap(image.clone()),
+                origin: wgpu::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            }
+            .to_tagged(wgpu::PredefinedColorSpace::Srgb, false),
+            wgpu::Extent3d {
+                width: image.width(),
+                height: image.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+        texture.uploaded = true;
+        Ok(())
+    }
+
+    pub fn needs_upload(&self, id: &str) -> bool {
+        self.texture_slots
+            .get(id)
+            .and_then(|slot| self.textures.get(*slot))
+            .is_some_and(|texture| !texture.uploaded)
+    }
+
+    pub fn render_timestamps(&self, pass: usize) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        self.profiler
+            .as_ref()
+            .map(|profiler| wgpu::RenderPassTimestampWrites {
+                query_set: &profiler.query_set,
+                beginning_of_pass_write_index: Some(pass as u32 * 2),
+                end_of_pass_write_index: Some(pass as u32 * 2 + 1),
+            })
+    }
+
+    pub fn compute_timestamps(&self, pass: usize) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        self.profiler
+            .as_ref()
+            .map(|profiler| wgpu::ComputePassTimestampWrites {
+                query_set: &profiler.query_set,
+                beginning_of_pass_write_index: Some(pass as u32 * 2),
+                end_of_pass_write_index: Some(pass as u32 * 2 + 1),
+            })
+    }
+
+    pub fn resolve_profile(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(profiler) = &self.profiler else {
+            return;
+        };
+        encoder.resolve_query_set(
+            &profiler.query_set,
+            0..profiler.query_count,
+            &profiler.resolve,
+            0,
+        );
+        encoder.copy_buffer_to_buffer(
+            &profiler.resolve,
+            0,
+            &profiler.readback,
+            0,
+            u64::from(profiler.query_count) * 8,
+        );
+    }
+
+    pub fn map_profile(&self, timestamp_period: f32) -> Option<ProfileMap> {
+        let profiler = self.profiler.as_ref()?;
+        let state = Arc::new(AtomicU8::new(0));
+        let callback = state.clone();
+        profiler
+            .readback
+            .map_async(wgpu::MapMode::Read, .., move |result| {
+                callback.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
+            });
+        Some(ProfileMap {
+            readback: profiler.readback.clone(),
+            state,
+            labels: self
+                .passes
+                .iter()
+                .map(|pass| pass.label().to_owned())
+                .collect(),
+            timestamp_period,
+        })
+    }
+}
+
+impl ProfileMap {
+    pub fn state(&self) -> u8 {
+        self.state.load(Ordering::Acquire)
+    }
+
+    pub fn read(self) -> Vec<(String, f64)> {
+        let bytes = self.readback.get_mapped_range(..);
+        let values = bytes
+            .chunks_exact(8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let profile = self
+            .labels
+            .into_iter()
+            .zip(values.chunks_exact(2))
+            .map(|(label, timestamps)| {
+                (
+                    label,
+                    timestamps[1].saturating_sub(timestamps[0]) as f64
+                        * f64::from(self.timestamp_period)
+                        / 1_000_000.0,
+                )
+            })
+            .collect();
+        drop(bytes);
+        self.readback.unmap();
+        profile
+    }
+}
+
+impl GpuResources {
     fn render_bundle(
         &self,
         graph: &RenderGraph,
-        pass: &Pass,
+        passes: &[usize],
         gpu: &Wgpu,
     ) -> Result<wgpu::RenderBundle, String> {
-        let pipeline = self
-            .render_pipelines
-            .get(&pass.pipeline)
-            .ok_or("GRAPH_PIPELINE")?;
+        let pass = &graph.passes[passes[0]];
         let declaration = graph
             .pipelines
             .render
@@ -204,40 +429,56 @@ impl GpuResources {
                     sample_count: multisample(&declaration.multisample)?.count,
                     multiview: None,
                 });
-        encoder.set_pipeline(pipeline);
-        for (group, bind_group) in
-            self.bind_groups(pass, |group| pipeline.get_bind_group_layout(group), gpu)?
-        {
-            encoder.set_bind_group(group, &bind_group, &[]);
-        }
-        for binding in &pass.vertex_buffers {
-            let buffer = &self
-                .buffers
-                .get(&binding.resource)
-                .ok_or("GRAPH_RESOURCE_UNKNOWN")?
-                .buffer;
-            encoder.set_vertex_buffer(binding.slot, buffer.slice(binding.offset..));
-        }
-        if let Some(binding) = &pass.index_buffer {
-            let buffer = &self
-                .buffers
-                .get(&binding.resource)
-                .ok_or("GRAPH_RESOURCE_UNKNOWN")?
-                .buffer;
-            encoder.set_index_buffer(
-                buffer.slice(binding.offset..),
-                parse(&binding.format, "GRAPH_INDEX_FORMAT")?,
-            );
-            encoder.draw_indexed(
-                pass.draw.first_index..pass.draw.first_index + pass.draw.indices,
-                pass.draw.base_vertex,
-                pass.draw.first_instance..pass.draw.first_instance + pass.draw.instances,
-            );
-        } else {
-            encoder.draw(
-                pass.draw.first_vertex..pass.draw.first_vertex + pass.draw.vertices,
-                pass.draw.first_instance..pass.draw.first_instance + pass.draw.instances,
-            );
+        let mut previous_pipeline = None;
+        let mut previous_bindings: Option<&[Binding]> = None;
+        for index in passes {
+            let pass = &graph.passes[*index];
+            let pipeline = self
+                .render_pipelines
+                .get(&pass.pipeline)
+                .ok_or("GRAPH_PIPELINE")?;
+            let pipeline_changed = previous_pipeline != Some(pass.pipeline.as_str());
+            if pipeline_changed {
+                encoder.set_pipeline(pipeline);
+                previous_pipeline = Some(pass.pipeline.as_str());
+            }
+            if pipeline_changed || previous_bindings != Some(pass.bindings.as_slice()) {
+                for (group, bind_group) in
+                    self.bind_groups(pass, |group| pipeline.get_bind_group_layout(group), gpu)?
+                {
+                    encoder.set_bind_group(group, &bind_group, &[]);
+                }
+                previous_bindings = Some(&pass.bindings);
+            }
+            for binding in &pass.vertex_buffers {
+                let buffer = &self
+                    .buffers
+                    .get(&binding.resource)
+                    .ok_or("GRAPH_RESOURCE_UNKNOWN")?
+                    .buffer;
+                encoder.set_vertex_buffer(binding.slot, buffer.slice(binding.offset..));
+            }
+            if let Some(binding) = &pass.index_buffer {
+                let buffer = &self
+                    .buffers
+                    .get(&binding.resource)
+                    .ok_or("GRAPH_RESOURCE_UNKNOWN")?
+                    .buffer;
+                encoder.set_index_buffer(
+                    buffer.slice(binding.offset..),
+                    parse(&binding.format, "GRAPH_INDEX_FORMAT")?,
+                );
+                encoder.draw_indexed(
+                    pass.draw.first_index..pass.draw.first_index + pass.draw.indices,
+                    pass.draw.base_vertex,
+                    pass.draw.first_instance..pass.draw.first_instance + pass.draw.instances,
+                );
+            } else {
+                encoder.draw(
+                    pass.draw.first_vertex..pass.draw.first_vertex + pass.draw.vertices,
+                    pass.draw.first_instance..pass.draw.first_instance + pass.draw.instances,
+                );
+            }
         }
         Ok(encoder.finish(&wgpu::RenderBundleDescriptor {
             label: Some(&pass.id),
@@ -287,6 +528,14 @@ impl GpuResources {
                 Ok((group, bind_group))
             })
             .collect()
+    }
+}
+
+impl GpuPass {
+    fn label(&self) -> &str {
+        match self {
+            Self::Render { label, .. } | Self::Compute { label, .. } => label,
+        }
     }
 }
 

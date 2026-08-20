@@ -174,6 +174,21 @@ impl Core {
             .map_err(|error| JsError::new(&error))
     }
 
+    pub fn upload_texture(&self, name: String, image: web_sys::ImageBitmap) -> Result<(), JsError> {
+        let gpu = self.gpu.borrow();
+        let gpu = gpu
+            .as_ref()
+            .ok_or_else(|| JsError::new("WEBGPU_UNINITIALIZED"))?;
+        self.store
+            .borrow_mut()
+            .upload_texture(name, image, gpu)
+            .map_err(|error| JsError::new(&error))
+    }
+
+    pub fn delete_texture(&self, name: &str) {
+        self.store.borrow_mut().delete_texture(name);
+    }
+
     pub fn play(&self) {
         self.render.play();
     }
@@ -184,5 +199,19 @@ impl Core {
 
     pub fn set_fps(&self, fps: u32) -> Result<(), JsError> {
         self.render.set_fps(fps).map_err(JsError::new)
+    }
+
+    pub fn set_profiler(&self, enabled: bool) -> bool {
+        let supported = self
+            .gpu
+            .borrow()
+            .as_ref()
+            .is_some_and(|gpu| gpu.timestamp_queries);
+        self.render.set_profiling(enabled && supported);
+        supported
+    }
+
+    pub fn take_profile(&self) -> Option<String> {
+        self.render.take_profile()
     }
 }

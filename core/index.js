@@ -46,9 +46,10 @@ export class YawnCore {
   #buffer;
   #arrays = new Map();
   #pending = new Map();
+  #profileListeners = new Set();
   #next = 1;
 
-  constructor(canvas, { arenaBytes = 64 * 1024 * 1024, workerFactory } = {}) {
+  constructor(canvas, { arenaBytes = 64 * 1024 * 1024, debug = false, workerFactory } = {}) {
     if (!canvas) throw new TypeError("canvas is required");
     this.#worker = workerFactory?.() ?? new Worker(new URL("./worker.js", import.meta.url), {
       type: "module",
@@ -59,12 +60,13 @@ export class YawnCore {
     this.#worker.addEventListener("messageerror", () => this.#fail("WORKER_ERROR"));
     this.#worker.start?.();
     const offscreen = canvas.transferControlToOffscreen?.() ?? canvas;
-    this.ready = this.#request("init", { canvas: offscreen, arenaBytes }, [offscreen]).then(result => {
+    this.ready = this.#request("init", { canvas: offscreen, arenaBytes }, [offscreen]).then(async result => {
       this.#buffer = result.buffer;
       for (const descriptor of result.rows) this.#arrays.set(
         descriptor.name,
         new SharedRows(this.#buffer, descriptor),
       );
+      if (debug) await this.#request("set-profiler", { enabled: true });
     });
   }
 
@@ -117,6 +119,18 @@ export class YawnCore {
     return this.#request("switch-loadout", { id });
   }
 
+  async uploadTexture(name, image) {
+    await this.ready;
+    if (typeof name !== "string" || !(image instanceof ImageBitmap))
+      throw new TypeError("TEXTURE_SOURCE");
+    return this.#request("upload-texture", { name, image }, [image]);
+  }
+
+  async deleteTexture(name) {
+    await this.ready;
+    return this.#request("delete-texture", { name });
+  }
+
   async play() {
     await this.ready;
     return this.#request("play");
@@ -130,6 +144,17 @@ export class YawnCore {
   async setFps(fps) {
     await this.ready;
     return this.#request("set-fps", { fps });
+  }
+
+  async setProfiler(enabled) {
+    await this.ready;
+    return this.#request("set-profiler", { enabled: Boolean(enabled) });
+  }
+
+  onProfile(listener) {
+    if (typeof listener !== "function") throw new TypeError("PROFILE_LISTENER");
+    this.#profileListeners.add(listener);
+    return () => this.#profileListeners.delete(listener);
   }
 
   array(name) {
@@ -147,6 +172,10 @@ export class YawnCore {
   }
 
   #message(message) {
+    if (message?.type === "profile") {
+      for (const listener of this.#profileListeners) listener(message.stats);
+      return;
+    }
     const pending = this.#pending.get(message?.request);
     if (!pending) return;
     this.#pending.delete(message.request);
@@ -161,6 +190,7 @@ export class YawnCore {
 
   dispose() {
     this.#fail("DISPOSED");
+    this.#profileListeners.clear();
     this.#worker.terminate();
   }
 }

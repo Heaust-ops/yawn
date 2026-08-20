@@ -23,7 +23,14 @@ export class PBRMaterial {
 
   constructor(scene: Scene, options: PBRMaterialOptions = {}) {
     this.scene = scene;
-    this.ready = scene.allocateMaterial().then((id) => {
+    const textures = [
+      options.baseColorTexture,
+      options.metallicRoughnessTexture,
+      options.normalTexture,
+      options.emissiveTexture,
+    ].filter((texture): texture is Texture => texture !== undefined);
+    this.ready = Promise.all(textures.map((texture) => texture.ready)).then(async () => {
+      const id = await scene.allocateMaterial();
       this.id = id;
       const color = Array.from(options.baseColor ?? [1, 1, 1, 1]);
       const emissive = Array.from(options.emissive ?? [0, 0, 0]);

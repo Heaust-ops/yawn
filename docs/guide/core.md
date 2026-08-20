@@ -39,9 +39,24 @@ const id = await core.allocateObject("application.values");
 values.row(id).set([1, 2, 3, 4]);
 ```
 
-Graph frontends serialize plain data to `(yawn-graph 1 ...)`. Named `after` edges preserve DAG fan-out; Rust sorts passes, detects cycles, culls unused declarations, plans compatible transient lifetimes, and allocates the active loadout.
+Graph frontends serialize plain data to `(yawn-graph 1 ...)`. Named `after` edges preserve DAG fan-out; Rust sorts passes, detects cycles, culls unused declarations, aliases compatible transient lifetimes, merges compatible render passes into bundles, and allocates the active loadout. Unchanged persistent textures survive loadout rebuilds.
 
 The `Scene` addon is one such frontend. It is replaceable and has no privileged core API.
+
+## Profile physical GPU passes
+
+```ts
+const stop = core.onProfile((frame) => {
+  console.table(frame.passes); // name + GPU milliseconds
+});
+const supported = await core.setProfiler(true);
+
+// Later:
+await core.setProfiler(false);
+stop();
+```
+
+`new YawnCore(canvas, { debug: true })` enables the same timestamp-query mode at startup. Timings describe the physical compute and render passes produced by graph compilation, so 138 compatible draws appear as one bundled forward pass. The fullscreen playground’s **Profile** button shows the stream in a toggleable sidebar.
 
 <Playground example="core" />
 

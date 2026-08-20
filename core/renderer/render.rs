@@ -1,10 +1,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use gloo_timers::future::TimeoutFuture;
 
 use crate::gpu::Wgpu;
-use crate::gpu_resource::GpuPass;
+use crate::gpu_resource::{GpuPass, ProfileMap};
 use crate::graph::{ColorAttachment, DepthAttachment};
 use crate::render_data::RenderData;
 use crate::store::{Loadout, Store};
@@ -16,6 +18,13 @@ pub struct RenderLoop {
     frame: Cell<u32>,
     elapsed: Cell<f64>,
     last: Cell<f64>,
+    profiling: Cell<bool>,
+    profile: RefCell<Option<String>>,
+}
+
+struct Submission {
+    completed: Arc<AtomicBool>,
+    profile: Option<ProfileMap>,
 }
 
 impl RenderLoop {
@@ -27,6 +36,8 @@ impl RenderLoop {
             frame: Cell::new(0),
             elapsed: Cell::new(0.0),
             last: Cell::new(js_sys::Date::now()),
+            profiling: Cell::new(false),
+            profile: RefCell::new(None),
         }
     }
 
@@ -45,6 +56,17 @@ impl RenderLoop {
         }
         self.fps.set(fps);
         Ok(())
+    }
+
+    pub fn set_profiling(&self, enabled: bool) {
+        self.profiling.set(enabled);
+        if !enabled {
+            self.profile.borrow_mut().take();
+        }
+    }
+
+    pub fn take_profile(&self) -> Option<String> {
+        self.profile.borrow_mut().take()
     }
 
     pub fn start(
@@ -71,11 +93,51 @@ impl RenderLoop {
                         data.update_info(delta as f32, frame, elapsed as f32, control.fps.get());
                         data.skip_render()
                     };
-                    if !skip {
+                    let submission = if !skip {
                         if let (Some(gpu), Some(loadout)) =
                             (gpu.borrow_mut().as_mut(), store.borrow_mut().active_mut())
                         {
-                            let _ = gpu.render(loadout, &data.borrow());
+                            gpu.render(loadout, &data.borrow(), control.profiling.get())
+                                .ok()
+                                .flatten()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(submission) = submission {
+                        while !submission.completed.load(Ordering::Acquire) {
+                            TimeoutFuture::new(0).await;
+                        }
+                        if let Some(profile) = submission.profile {
+                            while profile.state() == 0 {
+                                TimeoutFuture::new(0).await;
+                            }
+                            if profile.state() == 1 {
+                                let passes = profile
+                                    .read()
+                                    .into_iter()
+                                    .map(|(name, milliseconds)| {
+                                        serde_json::json!({
+                                            "name": name,
+                                            "milliseconds": milliseconds,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                let milliseconds = passes
+                                    .iter()
+                                    .filter_map(|pass| pass["milliseconds"].as_f64())
+                                    .sum::<f64>();
+                                *control.profile.borrow_mut() = Some(
+                                    serde_json::json!({
+                                        "frame": frame,
+                                        "milliseconds": milliseconds,
+                                        "passes": passes,
+                                    })
+                                    .to_string(),
+                                );
+                            }
                         }
                     }
                 }
@@ -88,8 +150,16 @@ impl RenderLoop {
 }
 
 impl Wgpu {
-    fn render(&mut self, loadout: &mut Loadout, data: &RenderData) -> Result<(), String> {
+    fn render(
+        &mut self,
+        loadout: &mut Loadout,
+        data: &RenderData,
+        profile: bool,
+    ) -> Result<Option<Submission>, String> {
         for buffer in loadout.resources.buffers.values() {
+            if !buffer.sync_each_frame {
+                continue;
+            }
             self.queue.write_buffer(
                 &buffer.buffer,
                 0,
@@ -102,7 +172,7 @@ impl Wgpu {
                 self.surface.configure(&self.device, &self.config);
                 self.surface.get_current_texture().map_err(|_| "SURFACE")?
             }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(wgpu::SurfaceError::Timeout) => return Ok(None),
             Err(_) => return Err("SURFACE".into()),
         };
         let surface_view = output
@@ -113,15 +183,21 @@ impl Wgpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
-        for (pass, compiled) in loadout.graph.passes.iter().zip(&loadout.resources.passes) {
+        for (pass_index, compiled) in loadout.resources.passes.iter().enumerate() {
             match compiled {
                 GpuPass::Compute {
+                    pass,
                     pipeline,
                     bind_groups,
+                    ..
                 } => {
+                    let pass = &loadout.graph.passes[*pass];
+                    let timestamp_writes = profile
+                        .then(|| loadout.resources.compute_timestamps(pass_index))
+                        .flatten();
                     let mut command = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some(&pass.id),
-                        timestamp_writes: None,
+                        timestamp_writes,
                     });
                     command.set_pipeline(pipeline);
                     for (group, bind_group) in bind_groups {
@@ -133,11 +209,19 @@ impl Wgpu {
                         pass.dispatch[2],
                     );
                 }
-                GpuPass::Render(bundle) => {
+                GpuPass::Render {
+                    first,
+                    last,
+                    bundle,
+                    ..
+                } => {
+                    let pass = &loadout.graph.passes[*first];
+                    let last = &loadout.graph.passes[*last];
                     let colors = pass
                         .color
                         .iter()
-                        .map(|attachment| {
+                        .zip(&last.color)
+                        .map(|(attachment, final_attachment)| {
                             Ok(Some(wgpu::RenderPassColorAttachment {
                                 view: view(
                                     &loadout.resources,
@@ -146,39 +230,57 @@ impl Wgpu {
                                 )?,
                                 depth_slice: None,
                                 resolve_target: None,
-                                ops: color_ops(attachment)?,
+                                ops: color_ops(attachment, final_attachment)?,
                             }))
                         })
                         .collect::<Result<Vec<_>, String>>()?;
                     let depth = pass
                         .depth
                         .as_ref()
-                        .map(|attachment| {
+                        .zip(last.depth.as_ref())
+                        .map(|(attachment, final_attachment)| {
                             Ok::<_, String>(wgpu::RenderPassDepthStencilAttachment {
                                 view: view(
                                     &loadout.resources,
                                     &surface_view,
                                     &attachment.resource,
                                 )?,
-                                depth_ops: Some(depth_ops(attachment)?),
+                                depth_ops: Some(depth_ops(attachment, final_attachment)?),
                                 stencil_ops: None,
                             })
                         })
                         .transpose()?;
+                    let timestamp_writes = profile
+                        .then(|| loadout.resources.render_timestamps(pass_index))
+                        .flatten();
                     let mut command = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some(&pass.id),
                         color_attachments: &colors,
                         depth_stencil_attachment: depth,
-                        timestamp_writes: None,
+                        timestamp_writes,
                         occlusion_query_set: None,
                     });
                     command.execute_bundles([bundle]);
                 }
             }
         }
+        if profile {
+            loadout.resources.resolve_profile(&mut encoder);
+        }
         self.queue.submit([encoder.finish()]);
+        let profile = profile
+            .then(|| {
+                loadout
+                    .resources
+                    .map_profile(self.queue.get_timestamp_period())
+            })
+            .flatten();
         output.present();
-        Ok(())
+        let completed = Arc::new(AtomicBool::new(false));
+        let callback = completed.clone();
+        self.queue
+            .on_submitted_work_done(move || callback.store(true, Ordering::Release));
+        Ok(Some(Submission { completed, profile }))
     }
 }
 
@@ -196,7 +298,10 @@ fn view<'a>(
     }
 }
 
-fn color_ops(attachment: &ColorAttachment) -> Result<wgpu::Operations<wgpu::Color>, String> {
+fn color_ops(
+    attachment: &ColorAttachment,
+    final_attachment: &ColorAttachment,
+) -> Result<wgpu::Operations<wgpu::Color>, String> {
     let clear = attachment.clear.as_slice();
     Ok(wgpu::Operations {
         load: match attachment.load.as_str() {
@@ -209,18 +314,21 @@ fn color_ops(attachment: &ColorAttachment) -> Result<wgpu::Operations<wgpu::Colo
             }),
             _ => return Err("GRAPH_LOAD_OP".into()),
         },
-        store: store_op(&attachment.store)?,
+        store: store_op(&final_attachment.store)?,
     })
 }
 
-fn depth_ops(attachment: &DepthAttachment) -> Result<wgpu::Operations<f32>, String> {
+fn depth_ops(
+    attachment: &DepthAttachment,
+    final_attachment: &DepthAttachment,
+) -> Result<wgpu::Operations<f32>, String> {
     Ok(wgpu::Operations {
         load: match attachment.load.as_str() {
             "load" => wgpu::LoadOp::Load,
             "clear" => wgpu::LoadOp::Clear(attachment.clear),
             _ => return Err("GRAPH_LOAD_OP".into()),
         },
-        store: store_op(&attachment.store)?,
+        store: store_op(&final_attachment.store)?,
     })
 }
 
