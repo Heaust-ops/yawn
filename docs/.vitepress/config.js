@@ -23,9 +23,29 @@ export default defineConfig({
   cleanUrls: true,
   themeConfig: {
     nav: [
-      { text: "Architecture", link: "/" },
+      { text: "Guide", link: "/guide/getting-started" },
+      { text: "Core", link: "/guide/core" },
       { text: "Playground", link: "/playground" },
     ],
+    sidebar: {
+      "/guide/": [
+        {
+          text: "Learn Yawn",
+          items: [
+            { text: "Getting started", link: "/guide/getting-started" },
+            { text: "Scene and shared data", link: "/guide/scene-and-sab" },
+            { text: "Cameras and controls", link: "/guide/cameras" },
+            { text: "Meshes and instances", link: "/guide/meshes-and-instances" },
+            { text: "Materials and textures", link: "/guide/materials" },
+            { text: "Clustered lights", link: "/guide/lights" },
+            { text: "Compute passes", link: "/guide/compute" },
+            { text: "Post processing", link: "/guide/post-processing" },
+            { text: "glTF and picking", link: "/guide/importing-and-picking" },
+            { text: "Core boundary", link: "/guide/core" },
+          ],
+        },
+      ],
+    },
   },
   vite: {
     plugins: [isolation],

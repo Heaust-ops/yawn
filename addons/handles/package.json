@@ -1,0 +1,10 @@
+{
+  "name": "@yawn/handles",
+  "version": "0.1.0",
+  "description": "Conventional scene handles over Yawn's worker and shared render data",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@yawn/core": "0.1.0"
+  }
+}

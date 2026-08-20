@@ -2,41 +2,49 @@
 layout: home
 hero:
   name: Yawn
-  text: Shared render data and a render graph.
-  tagline: One Rust/WASM core, one fixed arena, no built-in scene model or shader.
+  text: Render graphs over shared data.
+  tagline: A small Rust/WASM core with optional conventional TypeScript handles.
   actions:
     - theme: brand
-      text: Open the playground
+      text: Start the tutorial
+      link: /guide/getting-started
+    - theme: alt
+      text: Open playground
       link: /playground
 features:
-  - title: Shared rows
-    details: Allocate an SOA row array once by message, then mutate its SAB views directly from any thread.
-  - title: External graphs
-    details: JSO and FXNode addons serialize DAGs to the S-expression AST consumed by the worker.
-  - title: Up-front loadouts
-    details: Pipelines, GPU resources, pass order, and compatible transient aliases are prepared before activation.
+  - title: Hot state stays shared
+    details: Transform, material, light, and camera changes are direct SharedArrayBuffer writes from any thread.
+  - title: Graph-authored GPU work
+    details: WGSL, pipelines, compute, HDR, and post effects live in one externally supplied DAG loadout.
+  - title: Conventional when wanted
+    details: The handles addon supplies Scene, Mesh, materials, lights, glTF import, and BVH picking without adding core semantics.
 ---
 
-## The entire boundary
+## The shortest useful scene
 
-```js
-const color = await core.allocateRows({
-  name: "triangle.color",
-  rows: 1,
-  stride: 16,
-  format: "f32",
+```ts
+import { Mesh, PBRMaterial, Scene } from "@yawn/handles";
+
+const scene = new Scene(document.querySelector("canvas"), { hdr: true });
+await scene.ready;
+
+const material = new PBRMaterial(scene, { baseColor: [0.2, 0.7, 1, 1] });
+await material.ready;
+const mesh = new Mesh(scene, {
+  material,
+  vertexData: {
+    positions: [-0.7, -0.6, 0, 0.7, -0.6, 0, 0, 0.7, 0],
+    indices: [0, 1, 2],
+  },
 });
+await mesh.ready;
 
-color.write(0, [0.2, 0.65, 1, 1]);
-color.row(0)[0] = 0.8; // direct SharedArrayBuffer write
-await loadGraph(core, graph); // infrequent message
+mesh.position[0] = 0.25; // direct SAB mutation
 ```
 
-`@yawn/core` contains only the Rust/WASM render-data arena and graph compiler plus the browser worker required to execute WebGPU. Rust owns the fixed 64-byte-aligned shared arena, DAG ordering, resource culling, and transient texture planning; the worker materializes the resulting loadout. Every scene convention and every byte of WGSL comes from an addon or application.
+`Scene` installs one HDR clustered-forward loadout. Adding compute, custom shaders, textures, or post effects rebuilds that same loadout; changing values already present in shared rows does not send a message.
 
 ```text
-JSO / FXNode ──▶ AST ──▶ S-expression ──▶ Rust/WASM ──▶ worker ──▶ WebGPU
-any JS thread ────────────── direct SAB row writes ────────────────────┘
+handles ──▶ graph AST ──▶ S-expression ──▶ core worker ──▶ Rust/WebGPU
+any JS thread ─────────────── direct SAB row writes ────────────────┘
 ```
-
-The addon packages provide graph serialization, optional WGSL, glTF import directly into shared rows, and conventional camera/material/mesh handles. None of them add semantics to core.

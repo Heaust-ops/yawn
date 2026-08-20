@@ -1,7 +1,0 @@
-{
-  "name": "@yawn/gltf-import",
-  "version": "0.1.0",
-  "description": "glTF worker that publishes generic render data directly into Yawn shared SOA memory",
-  "type": "module",
-  "exports": "./src/index.js"
-}

@@ -1,19 +1,26 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from "vue";
-import { YawnCore } from "@yawn/core";
-import { loadGraph } from "@yawn/render-graph-js";
-import { triangleGraph } from "@yawn/default-pipelines";
+import {
+  ComputePass,
+  FXAA,
+  Mesh,
+  PBRMaterial,
+  PointLight,
+  Scene,
+} from "@yawn/handles";
+
+const props = defineProps({ example: { type: String, default: "triangle" } });
 
 const canvas = ref();
 const status = ref("Starting…");
 const failed = ref(false);
-let core;
-let color;
+let scene;
+let accent;
 
 function move(event) {
-  if (!color) return;
+  if (!accent) return;
   const bounds = canvas.value.getBoundingClientRect();
-  const row = color.row(0);
+  const row = accent.row(0);
   row[0] = (event.clientX - bounds.left) / bounds.width;
   row[1] = 1 - (event.clientY - bounds.top) / bounds.height;
 }
@@ -23,18 +30,47 @@ onMounted(async () => {
     if (!crossOriginIsolated) throw new Error("Cross-origin isolation is disabled");
     canvas.value.width = 960;
     canvas.value.height = 540;
-    core = new YawnCore(canvas.value);
-    await core.ready;
-    color = await core.createRows({
-      name: "triangle.color",
-      rows: 1,
-      stride: 16,
-      format: "f32",
+    scene = new Scene(canvas.value, { hdr: true });
+    await scene.ready;
+    accent = scene.array("sceneAccent");
+
+    const material = new PBRMaterial(scene, {
+      baseColor: props.example === "lights" ? [1, 0.55, 0.18, 1] : [0.75, 0.9, 1, 1],
+      metallic: props.example === "materials" ? 0.9 : 0.1,
+      roughness: 0.38,
     });
-    color.write(0, [0.2, 0.65, 1, 1]);
-    await loadGraph(core, triangleGraph());
-    window.__yawnPlayground = { core, color };
-    status.value = "Running · move the pointer to write the shared color row";
+    await material.ready;
+    const mesh = new Mesh(scene, {
+      material,
+      vertexData: {
+        positions: [-0.7, -0.6, 0, 0.7, -0.6, 0, 0, 0.72, 0],
+        indices: [0, 1, 2],
+      },
+    });
+    await mesh.ready;
+
+    if (props.example === "instances") {
+      mesh.position = [-0.45, 0, 0];
+      mesh.scale = [0.65, 0.65, 1];
+      const clone = mesh.clone({ position: [0.45, 0, 0], scale: [0.65, 0.65, 1] });
+      await clone.ready;
+    } else if (props.example === "lights") {
+      await new PointLight(scene, { position: [0, 0.4, 0.2], color: [1, 0.4, 0.1], intensity: 8 }).ready;
+    } else if (props.example === "post") {
+      await new FXAA(scene).ready;
+    } else if (props.example === "compute") {
+      await scene.ensureRows("playgroundCompute", 1, 16, "u32");
+      const compute = new ComputePass({
+        id: "playground-compute",
+        code: "@group(0) @binding(0) var<storage, read_write> value: array<u32>; @compute @workgroup_size(1) fn main() { value[0] = value[0] + 1u; }",
+        buffers: [{ id: "playground-value", array: "playgroundCompute", usage: ["storage"] }],
+        bindings: [{ group: 0, binding: 0, resource: "playground-value" }],
+      });
+      await scene.addComputePass(compute);
+    }
+
+    window.__yawnPlayground = { scene, mesh, material, accent };
+    status.value = `${props.example} running · pointer movement writes sceneAccent in the SAB`;
   } catch (error) {
     failed.value = true;
     status.value = error.message;
@@ -43,7 +79,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   delete window.__yawnPlayground;
-  core?.dispose();
+  scene?.dispose();
 });
 </script>
 

@@ -77,6 +77,18 @@ export class YawnCore {
     return array;
   }
 
+  async createRowsBatch(rows) {
+    await this.ready;
+    if (!Array.isArray(rows) || !rows.length) throw new TypeError("ROWS");
+    const descriptors = await this.#request("create-rows-batch", { rows });
+    return descriptors.map(descriptor => {
+      const array = this.#arrays.get(descriptor.name)?.update(descriptor)
+        ?? new SharedRows(this.#buffer, descriptor);
+      this.#arrays.set(descriptor.name, array);
+      return array;
+    });
+  }
+
   async deleteRows(name) {
     await this.ready;
     await this.#request("delete-rows", { name });

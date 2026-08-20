@@ -54,7 +54,14 @@ impl Store {
         if !self.uses_rows(name) {
             return Ok(());
         }
-        let graph = self.active.as_ref().unwrap().graph.clone();
+        self.refresh(gpu, data)
+    }
+
+    pub fn refresh(&mut self, gpu: &Wgpu, data: &RenderData) -> Result<(), String> {
+        let Some(active) = self.active.as_ref() else {
+            return Ok(());
+        };
+        let graph = active.graph.clone();
         let resources = GpuResources::activate(&graph, gpu, data)?;
         self.active = Some(Loadout { graph, resources });
         Ok(())

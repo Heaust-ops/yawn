@@ -21,6 +21,9 @@ addEventListener("message", async ({ data: message }) => {
         case "create-rows":
           result = JSON.parse(core.create_rows(message.name, message.rows, message.stride, message.format));
           break;
+        case "create-rows-batch":
+          result = JSON.parse(core.create_rows_batch(JSON.stringify(message.rows)));
+          break;
         case "delete-rows":
           core.delete_rows(message.name);
           break;

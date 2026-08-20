@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 #[path = "render_graph/compiler.rs"]
@@ -21,6 +22,14 @@ use gpu::Wgpu;
 use render::RenderLoop;
 use render_data::RenderData;
 use store::Store;
+
+#[derive(Deserialize)]
+struct RowRequest {
+    name: String,
+    rows: u32,
+    stride: u32,
+    format: String,
+}
 
 #[wasm_bindgen]
 pub struct Core {
@@ -77,6 +86,36 @@ impl Core {
                 .map_err(|error| JsError::new(&error))?;
         }
         Ok(serde_json::to_string(&rows).unwrap())
+    }
+
+    pub fn create_rows_batch(&self, source: &str) -> Result<String, JsError> {
+        let requests: Vec<RowRequest> =
+            serde_json::from_str(source).map_err(|_| JsError::new("ROWS"))?;
+        if requests.is_empty() {
+            return Err(JsError::new("ROWS"));
+        }
+        let refresh = requests
+            .iter()
+            .any(|request| self.store.borrow().uses_rows(&request.name));
+        let descriptors = {
+            let mut data = self.data.borrow_mut();
+            requests
+                .into_iter()
+                .map(|request| {
+                    data.create_rows(request.name, request.rows, request.stride, request.format)
+                        .map_err(JsError::new)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if refresh {
+            if let Some(gpu) = self.gpu.borrow().as_ref() {
+                self.store
+                    .borrow_mut()
+                    .refresh(gpu, &self.data.borrow())
+                    .map_err(|error| JsError::new(&error))?;
+            }
+        }
+        Ok(serde_json::to_string(&descriptors).unwrap())
     }
 
     pub fn delete_rows(&self, name: String) -> Result<(), JsError> {
