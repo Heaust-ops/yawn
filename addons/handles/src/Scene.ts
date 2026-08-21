@@ -226,7 +226,7 @@ fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
   let metallic = clamp(properties.x * ${materialTexture ? "packedMaterial.b" : "1.0"}, 0.0, 1.0);
   let roughness = clamp(properties.y * ${materialTexture ? "packedMaterial.g" : "1.0"}, 0.04, 1.0);
   var normal = normalize(input.normal);
-  ${normalTexture ? "let tangent = normalize(input.tangent.xyz); let bitangent = normalize(cross(normal, tangent)) * input.tangent.w; let mapped = textureSample(normalTexture, materialSampler, input.uv).xyz * 2.0 - 1.0; normal = normalize(mat3x3<f32>(tangent, bitangent, normal) * vec3(mapped.xy * extra.y, mapped.z));" : ""}
+  ${normalTexture ? "let tangent = normalize(input.tangent.xyz - normal * dot(input.tangent.xyz, normal)); let bitangent = cross(normal, tangent) * input.tangent.w; let mapped = textureSample(normalTexture, materialSampler, input.uv).xyz * 2.0 - 1.0; normal = normalize(mat3x3<f32>(tangent, bitangent, normal) * vec3(mapped.xy * extra.y, mapped.z));" : ""}
   let view = normalize(cameraMatrices[4].xyz - input.world);
   let lightDirection = normalize(vec3<f32>(0.4, 0.7, 0.6));
   let halfVector = normalize(lightDirection + view);
@@ -300,7 +300,7 @@ function presentShader(toneMap: string) {
 @group(0) @binding(1) var sourceSampler: sampler;
 @fragment fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
   let value = textureSample(source, sourceSampler, input.uv);
-  let color = value.rgb;
+  let color = max(value.rgb, vec3(0.0));
   return vec4(${tone}, value.a);
 }`;
 }
@@ -834,6 +834,7 @@ export class Scene {
       mipmapFilter: "linear",
       addressModeU: "repeat",
       addressModeV: "repeat",
+      anisotropyClamp: 16,
     });
     for (const { number: _, source: __, ...texture } of this.#textures.values())
       addTexture(texture);

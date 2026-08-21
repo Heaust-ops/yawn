@@ -305,8 +305,8 @@ const camera = new ArcRotateCamera(scene, {
   alpha: Math.PI / 2,
   beta: Math.PI / 3,
   radius: 30,
-  near: 0.1,
-  far: 100,
+  near: 1,
+  far: 1000,
   aspect: canvas.width / canvas.height,
   controls: { element: canvas, pointer: true },
 });

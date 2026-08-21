@@ -23,6 +23,7 @@ export type GraphSampler = {
   mipmapFilter?: "nearest" | "linear";
   addressModeU?: "clamp-to-edge" | "repeat" | "mirror-repeat";
   addressModeV?: "clamp-to-edge" | "repeat" | "mirror-repeat";
+  anisotropyClamp?: number;
 };
 
 export type GraphBinding = {
