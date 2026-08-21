@@ -116,22 +116,34 @@ impl RenderLoop {
                 control.elapsed.set(elapsed);
                 let frame = control.frame.get().wrapping_add(1);
                 control.frame.set(frame);
-                let skip = {
+                {
                     let mut data = data.borrow_mut();
-                    data.update_info(delta as f32, frame, elapsed as f32, control.fps.get());
-                    data.skip_render()
-                };
-                let submission = if !skip {
+                    data.update_signals(delta as f32, frame, elapsed as f32, control.fps.get());
+                }
+                let submission = if data.borrow().render_pending() {
                     if let (Some(gpu), Some(loadout)) =
                         (gpu.borrow_mut().as_mut(), store.borrow_mut().active_mut())
                     {
-                        let profile = control.profiling.get()
-                            && !control.profile_pending.get()
-                            && started >= control.profile_after.get();
-                        gpu.render(loadout, &data.borrow(), profile)
-                            .ok()
-                            .flatten()
-                            .map(|profile| (profile, gpu.adapter.clone(), gpu.width, gpu.height))
+                        if data.borrow_mut().begin_render() {
+                            let profile = control.profiling.get()
+                                && !control.profile_pending.get()
+                                && started >= control.profile_after.get();
+                            let result = {
+                                let data = data.borrow();
+                                gpu.render(loadout, &data, profile)
+                            };
+                            match result {
+                                Ok(profile) => profile.map(|profile| {
+                                    (profile, gpu.adapter.clone(), gpu.width, gpu.height)
+                                }),
+                                Err(_) => {
+                                    data.borrow_mut().mark_dirty();
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -206,7 +218,7 @@ impl Wgpu {
                 self.surface.configure(&self.device, &self.config);
                 self.surface.get_current_texture().map_err(|_| "SURFACE")?
             }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(None),
+            Err(wgpu::SurfaceError::Timeout) => return Err("SURFACE".into()),
             Err(_) => return Err("SURFACE".into()),
         };
         let surface_view = output

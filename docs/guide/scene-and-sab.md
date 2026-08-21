@@ -29,21 +29,23 @@ particles.row(42).set([1, 0, 0, 0]);
 
 Rows are 16-byte-stride-aligned and arena allocations are 64-byte aligned. Formats are `f32`, `u32`, or `i32`.
 
-## Timing and render skipping
+## Timing and render signals
 
-Core always creates `info` as:
+Core always creates `signals` as:
 
 ```text
-[deltaTime, frameCount, elapsedTime, targetFps, skipRender, 0, 0, 0]
+[deltaTime, frameCount, elapsedTime, targetFps, skipRender, sabDirty, bundleDirty, 0]
 ```
 
 ```ts
-const info = scene.array("info").row(0);
-info[4] = 1; // keep timing, skip GPU work
-info[4] = 0; // resume rendering
+const signals = scene.array("signals").row(0);
+signals[4] = 1; // keep timing, skip GPU work
+signals[4] = 0; // resume and request a frame
 ```
 
-Use messages for rare control changes (`setFps`, graph updates, allocation); use SAB writes for existing hot state.
+The handles layer sets `sabDirty` for writes made through `scene.array(...)` and its node, camera, mesh, material, and light APIs. It sets `bundleDirty` before rebuilding a graph whose recorded pipeline, bindings, geometry, or draw commands changed. Core clears `sabDirty` when it starts a frame; switching to the replacement loadout clears `bundleDirty` and requests a fresh frame.
+
+Use messages for rare control changes (`setFps`, graph updates, allocation); use SAB writes for existing hot state. Code using `@yawn/core` directly must set `signals[5] = 1` after completing its own row writes.
 
 <script setup>
 import Playground from "../.vitepress/Playground.vue";

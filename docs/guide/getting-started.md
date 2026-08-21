@@ -24,7 +24,7 @@ const scene = new Scene(canvas, { hdr: true, fps: 60 });
 await scene.ready;
 ```
 
-Omit `fps` to render as fast as the browser and GPU allow. `Scene` initializes conventional SOA rows and loads one clustered-forward HDR render graph. The core itself still starts with only its eight-float `info` row.
+Omit `fps` to render as soon as shared data changes. `Scene` initializes conventional SOA rows and loads one clustered-forward HDR render graph. The core itself still starts with only its eight-float `signals` row.
 
 ## 3. Add a triangle
 

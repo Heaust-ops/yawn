@@ -326,6 +326,14 @@ function serialize(graph: object) {
   return `(yawn-graph 1 ${encode(graph)})`;
 }
 
+const typedArrayMutators = new Set([
+  "copyWithin",
+  "fill",
+  "reverse",
+  "set",
+  "sort",
+]);
+
 /** The conventional single-loadout scene layer; hot values always remain direct SAB writes. */
 export class Scene {
   readonly core: YawnCore;
@@ -343,6 +351,9 @@ export class Scene {
   #nextTexture = 0;
   #graphBatchDepth = 0;
   #graphBatchDirty = false;
+  #signals?: Float32Array;
+  #arrays = new WeakMap<object, object>();
+  #views = new WeakMap<object, object>();
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -358,6 +369,7 @@ export class Scene {
 
   async #initialize(fps?: number) {
     await this.core.ready;
+    this.#signals = this.core.array("signals").row(0);
     for (const [name, stride, format] of rows)
       await this.core.createRows({ name, rows: 1, stride, format });
     await this.core.createRows({
@@ -379,7 +391,62 @@ export class Scene {
   }
 
   array(name: string) {
-    return this.core.array(name);
+    const array = this.core.array(name);
+    const current = this.#arrays.get(array);
+    if (current) return current as typeof array;
+    let proxy: typeof array;
+    proxy = new Proxy(array, {
+      get: (target, property) => {
+        if (property === "row")
+          return (index: number) => this.#mutable(target.row(index));
+        if (property === "view") return this.#mutable(target.view);
+        if (property === "write")
+          return (index: number, values: ArrayLike<number>) => {
+            target.write(index, values);
+            this.markDirty();
+            return proxy;
+          };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    this.#arrays.set(array, proxy);
+    return proxy;
+  }
+
+  #mutable<T extends Float32Array | Uint32Array | Int32Array>(view: T): T {
+    const current = this.#views.get(view);
+    if (current) return current as T;
+    let proxy: T;
+    proxy = new Proxy(view, {
+      get: (target, property) => {
+        if (property === "subarray")
+          return (begin?: number, end?: number) =>
+            this.#mutable(target.subarray(begin, end) as T);
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        if (property === "constructor") return value;
+        if (!typedArrayMutators.has(String(property))) return value.bind(target);
+        return (...arguments_: unknown[]) => {
+          const result = Reflect.apply(value, target, arguments_);
+          this.markDirty();
+          return result === target ? proxy : result;
+        };
+      },
+      set: (target, property, value) => {
+        const written = Reflect.set(target, property, value, target);
+        if (written) this.markDirty();
+        return written;
+      },
+    });
+    this.#views.set(view, proxy);
+    return proxy;
+  }
+
+  markDirty(bundle = false) {
+    if (!this.#signals) return;
+    this.#signals[5] = 1;
+    if (bundle) this.#signals[6] = 1;
   }
 
   async ensureRows(
@@ -596,6 +663,7 @@ export class Scene {
       16,
       integer ? "u32" : "f32",
     );
+    if (updateGraph) this.markDirty(true);
     const view = target.view;
     view.fill(0);
     if (integer || width === 4) view.set(data);
@@ -642,6 +710,7 @@ export class Scene {
   }
 
   updateRenderGraph() {
+    this.markDirty(true);
     if (this.#graphBatchDepth) {
       this.#graphBatchDirty = true;
       return Promise.resolve();

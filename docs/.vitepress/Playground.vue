@@ -183,7 +183,7 @@ function sampleFps(time = performance.now()) {
   try {
     const core = current?.scene?.core ?? current?.core;
     if (!core) throw new Error();
-    const frame = Number(core.array("info").row(0)[1]);
+    const frame = Number(core.array("signals").row(0)[1]);
     if (frame < sampledFrame) sampledAt = 0;
     if (!sampledAt) {
       sampledFrame = frame;

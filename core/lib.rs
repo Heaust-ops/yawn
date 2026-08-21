@@ -155,7 +155,9 @@ impl Core {
         self.data
             .borrow_mut()
             .delete_object(name, id)
-            .map_err(JsError::new)
+            .map_err(JsError::new)?;
+        self.data.borrow_mut().mark_dirty();
+        Ok(())
     }
 
     pub fn compile_graph(&self, source: &str) -> Result<String, JsError> {
@@ -171,7 +173,9 @@ impl Core {
         self.store
             .borrow_mut()
             .switch(id, gpu, &self.data.borrow())
-            .map_err(|error| JsError::new(&error))
+            .map_err(|error| JsError::new(&error))?;
+        self.data.borrow_mut().loadout_ready();
+        Ok(())
     }
 
     pub fn upload_texture(
@@ -187,7 +191,9 @@ impl Core {
         self.store
             .borrow_mut()
             .upload_texture(name, mip_level, image, gpu)
-            .map_err(|error| JsError::new(&error))
+            .map_err(|error| JsError::new(&error))?;
+        self.data.borrow_mut().mark_dirty();
+        Ok(())
     }
 
     pub fn delete_texture(&self, name: &str) {

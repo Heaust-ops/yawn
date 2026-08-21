@@ -5,7 +5,9 @@
   "type": "module",
   "workspaces": ["core", "addons/*"],
   "scripts": {
-    "start": "wasm-pack build core --target web --out-dir pkg --release && vitepress dev docs --host 0.0.0.0 --port ${PORT:-8080}"
+    "start": "wasm-pack build core --target web --out-dir pkg --release && vitepress dev docs --host 0.0.0.0 --port ${PORT:-8080}",
+    "coredocs": "vitepress dev coredocs --host 0.0.0.0 --port ${PORT:-8080}",
+    "build:coredocs": "vitepress build coredocs"
   },
   "devDependencies": {
     "@codemirror/lang-javascript": "^6.2.5",

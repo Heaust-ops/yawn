@@ -102,7 +102,7 @@ function rebuild() {
       boxes.push({ id, min, max });
   }
   root = build(boxes);
-  builtFrame = Number(view("info")?.[1] ?? builtFrame + 1);
+  builtFrame = Number(view("signals")?.[1] ?? builtFrame + 1);
 }
 
 function intersection(
@@ -149,7 +149,7 @@ addEventListener("message", ({ data }) => {
     return;
   }
   if (data.type === "pick") {
-    const frame = Number(view("info")?.[1] ?? -1);
+    const frame = Number(view("signals")?.[1] ?? -1);
     if (frame !== builtFrame) rebuild();
     const inverse = data.direction.map((lane: number) => 1 / lane);
     const hits: { id: number; distance: number }[] = [];

@@ -270,86 +270,37 @@ log("HDR → exposure → color grading → FXAA → canvas");
 
 return { scene, mesh, exposure, grade, fxaa, dispose: () => scene.dispose() };`;
 
-const importing = `import { AmbientLight, ArcRotateCamera, Picking, Scene, importGltf } from "@yawn/handles";
+const importing = `import { ArcRotateCamera, Picking, Scene, importGltf } from "@yawn/handles";
 
 const scene = new Scene(canvas, { hdr: true, arenaBytes: 384 * 1024 * 1024 });
 await scene.ready;
-await scene.core.pause();
 log("Importing /models/sponza.glb in the importer worker…");
 const meshes = await importGltf(scene, "/models/sponza.glb");
 
-const minimum = [Infinity, Infinity, Infinity];
-const maximum = [-Infinity, -Infinity, -Infinity];
-const rotate = (q, v) => {
-  const t = [
-    2 * (q[1] * v[2] - q[2] * v[1]),
-    2 * (q[2] * v[0] - q[0] * v[2]),
-    2 * (q[0] * v[1] - q[1] * v[0]),
-  ];
-  return [
-    v[0] + q[3] * t[0] + q[1] * t[2] - q[2] * t[1],
-    v[1] + q[3] * t[1] + q[2] * t[0] - q[0] * t[2],
-    v[2] + q[3] * t[2] + q[0] * t[1] - q[1] * t[0],
-  ];
-};
-const worldBounds = (mesh) => {
-  const bounds = scene.array("bounds").row(mesh.id);
-  const low = [Infinity, Infinity, Infinity];
-  const high = [-Infinity, -Infinity, -Infinity];
-  for (let corner = 0; corner < 8; corner++) {
-    const local = [0, 1, 2].map((lane) =>
-      bounds[(corner & (1 << lane) ? 4 : 0) + lane] * mesh.scale[lane]);
-    const point = rotate(mesh.quaternion, local).map((value, lane) => value + mesh.position[lane]);
-    for (let lane = 0; lane < 3; lane++) {
-      low[lane] = Math.min(low[lane], point[lane]);
-      high[lane] = Math.max(high[lane], point[lane]);
-    }
-  }
-  return [low, high];
-};
-for (const mesh of meshes) {
-  const [low, high] = worldBounds(mesh);
-  for (let lane = 0; lane < 3; lane++) {
-    minimum[lane] = Math.min(minimum[lane], low[lane]);
-    maximum[lane] = Math.max(maximum[lane], high[lane]);
-  }
-}
-const center = minimum.map((value, lane) => (value + maximum[lane]) * 0.5);
-const extent = Math.max(...maximum.map((value, lane) => value - minimum[lane]));
-const scale = 1.5 / extent;
-for (const mesh of meshes) {
-  mesh.position = mesh.position.map((value, lane) => (value - center[lane]) * scale);
-  mesh.scale = mesh.scale.map((value) => value * scale);
-}
-
+const target = [0, 8, 0];
 const camera = new ArcRotateCamera(scene, {
-  targetPosition: [-0.3, 0, 0],
+  targetPosition: target,
   alpha: Math.PI / 2,
-  beta: Math.PI / 2,
-  radius: 0.3,
-  near: 0.01,
-  far: 10,
+  beta: Math.PI / 3,
+  radius: 30,
+  near: 0.1,
+  far: 100,
   aspect: canvas.width / canvas.height,
   controls: { element: canvas, pointer: true },
 });
 await camera.ready;
-const ambient = new AmbientLight(scene, { color: [0.7, 0.8, 1], intensity: 0.7 });
-await ambient.ready;
 
 const picking = new Picking(scene);
 await picking.ready;
-const [targetLow, targetHigh] = worldBounds(meshes[0]);
-const pickTarget = targetLow.map((value, lane) => (value + targetHigh[lane]) * 0.5);
 const pick = async () => {
   const origin = Array.from(camera.position);
-  const direction = pickTarget.map((value, lane) => value - origin[lane]);
+  const direction = target.map((value, lane) => value - origin[lane]);
   const length = Math.hypot(...direction);
   const hits = await picking.pick(origin, direction.map((value) => value / length));
   log(\`Imported \${meshes.length} primitives; BVH ray returned \${hits.length} hit(s).\`);
 };
 canvas.addEventListener("click", pick);
 await pick();
-const play = setTimeout(() => scene.core.play(), 0);
 
 return {
   scene,
@@ -357,7 +308,6 @@ return {
   camera,
   picking,
   async dispose() {
-    clearTimeout(play);
     canvas.removeEventListener("click", pick);
     picking.dispose();
     await camera.dispose();

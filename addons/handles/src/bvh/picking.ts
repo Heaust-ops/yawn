@@ -35,7 +35,7 @@ export class Picking {
     return this.#request("sync", {
       shares: Object.fromEntries(
         [
-          "info",
+          "signals",
           "nodes",
           "nodePositions",
           "nodeQuaternions",

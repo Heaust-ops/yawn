@@ -34,7 +34,7 @@ If row allocations relocated since `Picking` was created, refresh its shared des
 await picking.refresh();
 ```
 
-The playground below imports the repository's full LFS-backed `sponza.glb` in the importer worker, hydrates all 138 primitives, frames them with an arc camera, and sends a real ray to the BVH worker. Click the preview to pick again.
+The playground below imports the repository's full LFS-backed `sponza.glb` in the importer worker, preserves its authored transforms, places an arc camera in its coordinate system, and sends a real ray to the BVH worker. Click the preview to pick again.
 
 <Playground example="importing" />
 

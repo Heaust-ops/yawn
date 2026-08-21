@@ -11,7 +11,7 @@ infrequent worker messages                  hot shared mutations
 │ create/delete rows           │            │ transforms           │
 │ allocate/delete object slot  │            │ cameras/materials    │
 │ compile/switch graph         │            │ lights/app data      │
-│ play/pause/set FPS           │            │ info.skipRender      │
+│ play/pause/set FPS           │            │ signals + row data   │
 └──────────────┬───────────────┘            └──────────┬───────────┘
                └─────────────────┬─────────────────────┘
                                  ▼

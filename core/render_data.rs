@@ -46,7 +46,8 @@ impl RenderData {
             rows: HashMap::new(),
             slots: HashMap::new(),
         };
-        data.create_rows("info".into(), 1, 32, "f32".into())?;
+        data.create_rows("signals".into(), 1, 32, "f32".into())?;
+        data.write_signal(5, 1.0);
         Ok(data)
     }
 
@@ -72,7 +73,7 @@ impl RenderData {
             if rows <= current.rows {
                 return Ok(current);
             }
-            if name == "info" {
+            if name == "signals" {
                 return Err("ROWS_BUILTIN");
             }
             return self.grow_rows(current, rows);
@@ -95,7 +96,7 @@ impl RenderData {
     }
 
     pub fn delete_rows(&mut self, name: &str) -> Result<(), &'static str> {
-        if name == "info" {
+        if name == "signals" {
             return Err("ROWS_BUILTIN");
         }
         if self
@@ -128,7 +129,7 @@ impl RenderData {
     }
 
     pub fn allocate_object(&mut self, name: &str) -> Result<(u32, bool), &'static str> {
-        if name == "info" {
+        if name == "signals" {
             return Err("ROWS_BUILTIN");
         }
         let slots = self.slots.get(name).ok_or("ROWS_UNKNOWN")?;
@@ -198,8 +199,8 @@ impl RenderData {
         Ok(descriptor)
     }
 
-    pub fn update_info(&mut self, delta: f32, frame: u32, elapsed: f32, fps: u32) {
-        let start = self.arena_start + (self.rows["info"].offset - self.base) as usize;
+    pub fn update_signals(&mut self, delta: f32, frame: u32, elapsed: f32, fps: u32) {
+        let start = self.arena_start + (self.rows["signals"].offset - self.base) as usize;
         for (index, value) in [delta, frame as f32, elapsed, fps as f32]
             .iter()
             .enumerate()
@@ -209,10 +210,37 @@ impl RenderData {
         }
     }
 
-    pub fn skip_render(&self) -> bool {
-        let rows = &self.rows["info"];
-        let start = self.arena_start + (rows.offset - self.base) as usize + 16;
-        f32::from_le_bytes(self.arena[start..start + 4].try_into().unwrap()) == 1.0
+    pub fn render_pending(&self) -> bool {
+        self.signal(4) == 0.0 && self.signal(5) != 0.0 && self.signal(6) == 0.0
+    }
+
+    pub fn begin_render(&mut self) -> bool {
+        if !self.render_pending() {
+            return false;
+        }
+        self.write_signal(5, 0.0);
+        true
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.write_signal(5, 1.0);
+    }
+
+    pub fn loadout_ready(&mut self) {
+        self.write_signal(6, 0.0);
+        self.mark_dirty();
+    }
+
+    fn signal(&self, index: usize) -> f32 {
+        let rows = &self.rows["signals"];
+        let start = self.arena_start + (rows.offset - self.base) as usize + index * 4;
+        f32::from_le_bytes(self.arena[start..start + 4].try_into().unwrap())
+    }
+
+    fn write_signal(&mut self, index: usize, value: f32) {
+        let rows = &self.rows["signals"];
+        let start = self.arena_start + (rows.offset - self.base) as usize + index * 4;
+        self.arena[start..start + 4].copy_from_slice(&value.to_le_bytes());
     }
 
     fn reserve(&mut self, bytes: u32) -> Result<u32, &'static str> {
@@ -263,3 +291,7 @@ fn align(value: u32) -> Option<u32> {
         .checked_add(ALIGNMENT - 1)
         .map(|value| value & !(ALIGNMENT - 1))
 }
+
+#[cfg(test)]
+#[path = "render_data_tests.rs"]
+mod tests;

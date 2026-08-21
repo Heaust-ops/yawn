@@ -61,7 +61,9 @@ export class Mesh extends Node {
 
   set material(value: PBRMaterial) {
     if (value.scene !== this.scene || value.id < 0) throw new Error("Await a material from the same Scene");
+    this.scene.markDirty(true);
     this.scene.array("meshInfo").row(this.id)[1] = value.id;
+    void this.scene.updateRenderGraph().catch(() => undefined);
   }
 
   clone(options: Omit<MeshOptions, "geometryId" | "vertexData"> = {}) {
@@ -83,6 +85,7 @@ export class Mesh extends Node {
       this.scene.releaseGeometry(original);
       this.scene.referenceGeometry(this.geometryId);
       this.instanceOf = this.id;
+      this.scene.markDirty(true);
       this.scene.array("meshInfo").row(this.id).set([this.geometryId, this.materialId, this.isVisible ? 1 : 0, this.id]);
     }
     if (kind === "positions") this.vertexCount = data.length / 3;
@@ -97,6 +100,7 @@ export class Mesh extends Node {
     const list = Array.isArray(faces) ? faces : [faces];
     const maximum = Math.max(...list);
     const array = await this.scene.ensureRows(`mesh.${this.id}.faceMaterials`, maximum + 1, 16, "u32");
+    this.scene.markDirty(true);
     for (const face of list) {
       if (!Number.isInteger(face) || face < 0) throw new RangeError("face");
       array.row(face)[0] = material.id + 1;
