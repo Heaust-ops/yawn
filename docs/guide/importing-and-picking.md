@@ -8,7 +8,7 @@ The shared importer worker fetches and parses glTF/GLB, then the response hydrat
 import { importGltf } from "@yawn/handles";
 
 const meshes = await importGltf(scene, "/models/sponza.glb");
-meshes[0].position[1] = 0.5;
+meshes[0].position.y = 0.5;
 ```
 
 The importer handles triangle primitives, external/data buffers, standard vertex attributes, indices, node transforms, and metallic-roughness values. Application-specific extensions remain application policy.
@@ -34,7 +34,7 @@ If row allocations relocated since `Picking` was created, refresh its shared des
 await picking.refresh();
 ```
 
-The playground below imports the repository's full LFS-backed `sponza.glb` in the importer worker, preserves its authored transforms, places an arc camera in its coordinate system, and sends a real ray to the BVH worker. Click the preview to pick again.
+The playground below imports the repository's full LFS-backed `sponza.glb` in the importer worker, preserves its authored transforms, adds neutral warm lighting, places an arc camera in its coordinate system, and sends a real ray to the BVH worker. Click the preview to pick again.
 
 <Playground example="importing" />
 

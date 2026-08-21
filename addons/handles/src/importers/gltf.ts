@@ -74,7 +74,7 @@ export async function importGltf(scene: Scene, url: string | URL) {
       (primitive: any) =>
         new Mesh(scene, {
           position: primitive.position,
-          quaternion: primitive.quaternion,
+          rotor: primitive.rotor,
           scale: primitive.scale,
           material: materials[primitive.material],
           vertexData: {

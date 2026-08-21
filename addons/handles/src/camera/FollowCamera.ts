@@ -62,15 +62,18 @@ export class FollowCamera extends Camera {
 
   #snap() {
     const target = this.#target.position;
-    this.position = [target[0], target[1] + this.height, target[2] + this.distance];
+    this.setPosition([target.x, target.y + this.height, target.z + this.distance]);
     this.lookAt(target);
   }
 
   #follow = () => {
     const target = this.#target.position;
-    const desired = [target[0], target[1] + this.height, target[2] + this.distance];
     const position = this.position;
-    for (let lane = 0; lane < 3; lane++) position[lane] += (desired[lane] - position[lane]) * this.#smoothing;
+    this.setPosition([
+      position.x + (target.x - position.x) * this.#smoothing,
+      position.y + (target.y + this.height - position.y) * this.#smoothing,
+      position.z + (target.z + this.distance - position.z) * this.#smoothing,
+    ]);
     this.lookAt(target);
     this.#frame = requestAnimationFrame(this.#follow);
   };

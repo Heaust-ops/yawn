@@ -72,7 +72,7 @@ follow.stop();
 follow.start();
 ```
 
-The input and follow loops never post camera updates to core: they mutate the position, quaternion, camera, and derived matrix rows directly in shared memory.
+The input and follow loops never post camera updates to core: they mutate the position, rotor, camera, and derived matrix rows directly in shared memory.
 
 <Playground example="cameras" />
 

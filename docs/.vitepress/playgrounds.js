@@ -61,8 +61,8 @@ log("Pointer movement mutates nodePositions; no worker message is sent.");
 
 const move = (event) => {
   const bounds = canvas.getBoundingClientRect();
-  mesh.position[0] = ((event.clientX - bounds.left) / bounds.width - 0.5) * 1.4;
-  mesh.position[1] = (0.5 - (event.clientY - bounds.top) / bounds.height) * 1.2;
+  mesh.position.x = ((event.clientX - bounds.left) / bounds.width - 0.5) * 1.4;
+  mesh.position.y = (0.5 - (event.clientY - bounds.top) / bounds.height) * 1.2;
 };
 canvas.addEventListener("pointermove", move);
 
@@ -270,12 +270,34 @@ log("HDR → exposure → color grading → FXAA → canvas");
 
 return { scene, mesh, exposure, grade, fxaa, dispose: () => scene.dispose() };`;
 
-const importing = `import { ArcRotateCamera, Picking, Scene, importGltf } from "@yawn/handles";
+const importing = `import { AmbientLight, ArcRotateCamera, PointLight, Picking, Scene, importGltf } from "@yawn/handles";
 
 const scene = new Scene(canvas, { hdr: true, arenaBytes: 384 * 1024 * 1024 });
 await scene.ready;
+scene.array("sceneAccent").row(0).set([1, 1, 1, 1]);
 log("Importing /models/sponza.glb in the importer worker…");
 const meshes = await importGltf(scene, "/models/sponza.glb");
+
+// Add a warm ambient/key/fill setup without changing the authored transforms.
+const lights = [
+  new AmbientLight(scene, {
+    color: [1, 0.93, 0.82],
+    intensity: 0.18,
+  }),
+  new PointLight(scene, {
+    position: [-10, 14, -4],
+    color: [1, 0.72, 0.5],
+    intensity: 2,
+    range: 28,
+  }),
+  new PointLight(scene, {
+    position: [9, 10, 6],
+    color: [1, 0.9, 0.75],
+    intensity: 1.5,
+    range: 24,
+  }),
+];
+await Promise.all(lights.map((light) => light.ready));
 
 const target = [0, 8, 0];
 const camera = new ArcRotateCamera(scene, {
@@ -305,6 +327,7 @@ await pick();
 return {
   scene,
   meshes,
+  lights,
   camera,
   picking,
   async dispose() {

@@ -33,7 +33,7 @@ type TextureState = GraphTexture & {
 const rows = [
   ["nodes", 16, "u32"],
   ["nodePositions", 16, "f32"],
-  ["nodeQuaternions", 16, "f32"],
+  ["nodeRotors", 16, "f32"],
   ["nodeScales", 16, "f32"],
   ["meshInfo", 16, "u32"],
   ["bounds", 32, "f32"],
@@ -104,21 +104,21 @@ struct VertexOutput {
 @group(0) @binding(0) var<storage, read> clusters: array<u32>;
 @group(0) @binding(1) var<uniform> accent: Accent;
 @group(0) @binding(2) var<storage, read> positions: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> quaternions: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> rotors: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> scales: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> meshInfo: array<u32>;
 @group(0) @binding(6) var<storage, read> materials: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> cameraMatrices: array<vec4<f32>>;
 
-fn rotate(q: vec4<f32>, value: vec3<f32>) -> vec3<f32> {
-  return value + 2.0 * cross(q.xyz, cross(q.xyz, value) + q.w * value);
+fn rotate(rotor: vec4<f32>, value: vec3<f32>) -> vec3<f32> {
+  return value + 2.0 * cross(rotor.xyz, cross(rotor.xyz, value) + rotor.w * value);
 }
 
 @vertex
 fn vertex(@location(0) point: vec3<f32>, @builtin(instance_index) packed: u32) -> VertexOutput {
   let instance = packed & 65535u;
   let visible = meshInfo[instance * 4u + 2u];
-  let transformed = rotate(quaternions[instance], point * scales[instance].xyz) + positions[instance].xyz;
+  let transformed = rotate(rotors[instance], point * scales[instance].xyz) + positions[instance].xyz;
   var clip = vec4<f32>(transformed, 1.0);
   if (cameraMatrices[4].w != 0.0) {
     let world = vec4(transformed, 1.0);
@@ -131,7 +131,7 @@ fn vertex(@location(0) point: vec3<f32>, @builtin(instance_index) packed: u32) -
   }
   var output: VertexOutput;
   output.position = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), clip, visible != 0u);
-  output.normal = normalize(rotate(quaternions[instance], vec3<f32>(0.0, 0.0, 1.0)));
+  output.normal = normalize(rotate(rotors[instance], vec3<f32>(0.0, 0.0, 1.0)));
   output.mesh = instance;
   output.material = packed >> 16u;
   return output;
@@ -168,7 +168,7 @@ struct VertexOutput {
 @group(0) @binding(0) var<storage, read> clusters: array<u32>;
 @group(0) @binding(1) var<uniform> accent: vec4<f32>;
 @group(0) @binding(2) var<storage, read> positions: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> quaternions: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> rotors: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> scales: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> meshInfo: array<u32>;
 @group(0) @binding(6) var<storage, read> materials: array<vec4<f32>>;
@@ -178,8 +178,8 @@ ${baseTexture ? "@group(1) @binding(1) var baseTexture: texture_2d<f32>;" : ""}
 ${materialTexture ? "@group(1) @binding(2) var materialTexture: texture_2d<f32>;" : ""}
 ${normalTexture ? "@group(1) @binding(3) var normalTexture: texture_2d<f32>;" : ""}
 
-fn rotate(q: vec4<f32>, value: vec3<f32>) -> vec3<f32> {
-  return value + 2.0 * cross(q.xyz, cross(q.xyz, value) + q.w * value);
+fn rotate(rotor: vec4<f32>, value: vec3<f32>) -> vec3<f32> {
+  return value + 2.0 * cross(rotor.xyz, cross(rotor.xyz, value) + rotor.w * value);
 }
 
 @vertex
@@ -192,7 +192,7 @@ fn vertex(
 ) -> VertexOutput {
   let instance = packed & 65535u;
   let scale = scales[instance].xyz;
-  let world = rotate(quaternions[instance], point * scale) + positions[instance].xyz;
+  let world = rotate(rotors[instance], point * scale) + positions[instance].xyz;
   var clip = vec4<f32>(world, 1.0);
   if (cameraMatrices[4].w != 0.0) {
     let homogeneous = vec4(world, 1.0);
@@ -206,9 +206,9 @@ fn vertex(
   var output: VertexOutput;
   output.position = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), clip, meshInfo[instance * 4u + 2u] != 0u);
   output.world = world;
-  output.normal = normalize(rotate(quaternions[instance], localNormal / scale));
+  output.normal = normalize(rotate(rotors[instance], localNormal / scale));
   output.uv = uv;
-  output.tangent = ${normalTexture ? "vec4(normalize(rotate(quaternions[instance], localTangent.xyz * scale)), localTangent.w)" : "vec4(1.0, 0.0, 0.0, 1.0)"};
+  output.tangent = ${normalTexture ? "vec4(normalize(rotate(rotors[instance], localTangent.xyz * scale)), localTangent.w)" : "vec4(1.0, 0.0, 0.0, 1.0)"};
   output.mesh = instance;
   output.material = packed >> 16u;
   return output;
@@ -351,6 +351,9 @@ export class Scene {
   #nextTexture = 0;
   #graphBatchDepth = 0;
   #graphBatchDirty = false;
+  #writeBatchDepth = 0;
+  #writeBatchDirty = false;
+  #writeBatchBundleDirty = false;
   #signals?: Float32Array;
   #arrays = new WeakMap<object, object>();
   #views = new WeakMap<object, object>();
@@ -378,7 +381,7 @@ export class Scene {
       stride: 16,
       format: "u32",
     });
-    this.core.array("nodeQuaternions").write(0, [0, 0, 0, 1]);
+    this.core.array("nodeRotors").write(0, [0, 0, 0, 1]);
     this.core.array("nodeScales").write(0, [1, 1, 1, 0]);
     this.core.array("sceneAccent").write(0, [0.28, 0.72, 1, 1]);
     const material = await this.core.allocateObject("materials");
@@ -444,9 +447,30 @@ export class Scene {
   }
 
   markDirty(bundle = false) {
+    if (this.#writeBatchDepth) {
+      this.#writeBatchDirty = true;
+      this.#writeBatchBundleDirty ||= bundle;
+      return;
+    }
     if (!this.#signals) return;
     this.#signals[5] = 1;
     if (bundle) this.#signals[6] = 1;
+  }
+
+  /** Defers the dirty signal until a synchronous group of SAB writes is complete. */
+  batchWrites<T>(operation: () => T) {
+    this.#writeBatchDepth++;
+    try {
+      return operation();
+    } finally {
+      this.#writeBatchDepth--;
+      if (!this.#writeBatchDepth && this.#writeBatchDirty) {
+        const bundle = this.#writeBatchBundleDirty;
+        this.#writeBatchDirty = false;
+        this.#writeBatchBundleDirty = false;
+        this.markDirty(bundle);
+      }
+    }
   }
 
   async ensureRows(
@@ -535,7 +559,7 @@ export class Scene {
         : [];
     });
     if (growth.length) await this.core.createRowsBatch(growth);
-    this.array("nodeQuaternions").write(id, [0, 0, 0, 1]);
+    this.array("nodeRotors").write(id, [0, 0, 0, 1]);
     this.array("nodeScales").write(id, [1, 1, 1, 0]);
     this.array("nodes").write(id, [1, 0, 0, 0]);
     return id;
@@ -545,7 +569,7 @@ export class Scene {
     for (const name of [
       "nodes",
       "nodePositions",
-      "nodeQuaternions",
+      "nodeRotors",
       "nodeScales",
       "meshInfo",
       "bounds",
@@ -835,7 +859,7 @@ export class Scene {
     } else {
       for (const [id, array] of [
         ["node-positions", "nodePositions"],
-        ["node-quaternions", "nodeQuaternions"],
+        ["node-rotors", "nodeRotors"],
         ["node-scales", "nodeScales"],
         ["mesh-info", "meshInfo"],
         ["materials", "materials"],
@@ -1014,7 +1038,7 @@ export class Scene {
                 "clusters",
                 "accent",
                 "node-positions",
-                "node-quaternions",
+                "node-rotors",
                 "node-scales",
                 "mesh-info",
                 "materials",

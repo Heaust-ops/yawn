@@ -38,7 +38,7 @@ export class Picking {
           "signals",
           "nodes",
           "nodePositions",
-          "nodeQuaternions",
+          "nodeRotors",
           "nodeScales",
           "meshInfo",
           "bounds",

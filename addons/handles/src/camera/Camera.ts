@@ -1,15 +1,15 @@
 import { Node, type NodeOptions } from "../Node";
 import type { Scene } from "../Scene";
 
-function rotate(q: ArrayLike<number>, value: number[]) {
+function rotate(rotor: ArrayLike<number>, value: number[]) {
   const [x, y, z] = value;
-  const tx = 2 * (q[1] * z - q[2] * y);
-  const ty = 2 * (q[2] * x - q[0] * z);
-  const tz = 2 * (q[0] * y - q[1] * x);
+  const tx = 2 * (rotor[1] * z - rotor[2] * y);
+  const ty = 2 * (rotor[2] * x - rotor[0] * z);
+  const tz = 2 * (rotor[0] * y - rotor[1] * x);
   return [
-    x + q[3] * tx + q[1] * tz - q[2] * ty,
-    y + q[3] * ty + q[2] * tx - q[0] * tz,
-    z + q[3] * tz + q[0] * ty - q[1] * tx,
+    x + rotor[3] * tx + rotor[1] * tz - rotor[2] * ty,
+    y + rotor[3] * ty + rotor[2] * tx - rotor[0] * tz,
+    z + rotor[3] * tz + rotor[0] * ty - rotor[1] * tx,
   ];
 }
 
@@ -34,6 +34,8 @@ export type CameraOptions = NodeOptions & {
 export class Camera extends Node {
   cameraId = -1;
   #cameraDisposed = false;
+  #transformBatchDepth = 0;
+  #transformBatchDirty = false;
 
   constructor(scene: Scene, options: CameraOptions = {}) {
     super(scene, options);
@@ -90,43 +92,55 @@ export class Camera extends Node {
   get sensorWidth() { return this.cameraRow()[10]; }
   set sensorWidth(value: number) { this.cameraRow()[10] = value; }
 
-  override get position(): Float32Array { return super.position; }
-  override set position(value: ArrayLike<number>) {
-    super.position = value;
-    this.refreshMatrix();
-  }
-
-  override get quaternion(): Float32Array { return super.quaternion; }
-  override set quaternion(value: ArrayLike<number>) {
-    super.quaternion = value;
-    this.refreshMatrix();
-  }
-
   lookAt(target: ArrayLike<number>) {
     if (target.length !== 3) throw new RangeError("camera target");
     const position = this.position;
-    const x = target[0] - position[0];
-    const y = target[1] - position[1];
-    const z = target[2] - position[2];
+    const x = target[0] - position.x;
+    const y = target[1] - position.y;
+    const z = target[2] - position.z;
     const length = Math.hypot(x, y, z) || 1;
     const direction = [x / length, y / length, z / length];
-    if (direction[2] > 0.999999) this.quaternion = [0, 1, 0, 0];
+    if (direction[2] > 0.999999) this.setRotor([0, 1, 0, 0]);
     else {
-      const q = [direction[1], -direction[0], 0, 1 - direction[2]];
-      const qLength = Math.hypot(...q);
-      this.quaternion = q.map((lane) => lane / qLength);
+      const rotor = [direction[1], -direction[0], 0, 1 - direction[2]];
+      const rotorLength = Math.hypot(...rotor);
+      this.setRotor(rotor.map((lane) => lane / rotorLength));
     }
     return this;
+  }
+
+  protected override transformChanged() {
+    if (this.#transformBatchDepth) {
+      this.#transformBatchDirty = true;
+      return;
+    }
+    this.refreshMatrix();
+  }
+
+  /** Publishes one final camera matrix after a synchronous group of transform writes. */
+  protected batchTransformChanges<T>(operation: () => T) {
+    return this.scene.batchWrites(() => {
+      this.#transformBatchDepth++;
+      try {
+        return operation();
+      } finally {
+        this.#transformBatchDepth--;
+        if (!this.#transformBatchDepth && this.#transformBatchDirty) {
+          this.#transformBatchDirty = false;
+          this.refreshMatrix();
+        }
+      }
+    });
   }
 
   protected refreshMatrix() {
     if (this.id < 0 || this.cameraId < 0) return;
     const camera = this.cameraRow();
     const position = this.position;
-    const quaternion = this.quaternion;
-    const right = rotate(quaternion, [1, 0, 0]);
-    const up = rotate(quaternion, [0, 1, 0]);
-    const forward = rotate(quaternion, [0, 0, 1]);
+    const rotor = this.rotor;
+    const right = rotate(rotor, [1, 0, 0]);
+    const up = rotate(rotor, [0, 1, 0]);
+    const forward = rotate(rotor, [0, 0, 1]);
     let rows: number[][];
     if (camera[5] === 1) {
       const size = Math.max(camera[6], 0.0001);

@@ -29,16 +29,16 @@ function component(view: DataView, offset: number, type: number) {
   throw new Error("GLTF_COMPONENT");
 }
 
-function rotate(quaternion: number[], value: number[]) {
-  const [qx, qy, qz, qw] = quaternion;
+function rotate(rotor: number[], value: number[]) {
+  const [rx, ry, rz, rw] = rotor;
   const [x, y, z] = value;
-  const tx = 2 * (qy * z - qz * y);
-  const ty = 2 * (qz * x - qx * z);
-  const tz = 2 * (qx * y - qy * x);
+  const tx = 2 * (ry * z - rz * y);
+  const ty = 2 * (rz * x - rx * z);
+  const tz = 2 * (rx * y - ry * x);
   return [
-    x + qw * tx + qy * tz - qz * ty,
-    y + qw * ty + qz * tx - qx * tz,
-    z + qw * tz + qx * ty - qy * tx,
+    x + rw * tx + ry * tz - rz * ty,
+    y + rw * ty + rz * tx - rx * tz,
+    z + rw * tz + rx * ty - ry * tx,
   ];
 }
 
@@ -61,21 +61,21 @@ function decompose(matrix: number[]) {
   const [m00, m01, m02] = [matrix[0] / sx, matrix[4] / sy, matrix[8] / sz];
   const [m10, m11, m12] = [matrix[1] / sx, matrix[5] / sy, matrix[9] / sz];
   const [m20, m21, m22] = [matrix[2] / sx, matrix[6] / sy, matrix[10] / sz];
-  let quaternion: number[];
+  let rotor: number[];
   if (m00 + m11 + m22 > 0) {
     const s = Math.sqrt(1 + m00 + m11 + m22) * 2;
-    quaternion = [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, s / 4];
+    rotor = [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, s / 4];
   } else if (m00 > m11 && m00 > m22) {
     const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
-    quaternion = [s / 4, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s];
+    rotor = [s / 4, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s];
   } else if (m11 > m22) {
     const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
-    quaternion = [(m01 + m10) / s, s / 4, (m12 + m21) / s, (m02 - m20) / s];
+    rotor = [(m01 + m10) / s, s / 4, (m12 + m21) / s, (m02 - m20) / s];
   } else {
     const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
-    quaternion = [(m02 + m20) / s, (m12 + m21) / s, s / 4, (m10 - m01) / s];
+    rotor = [(m02 + m20) / s, (m12 + m21) / s, s / 4, (m10 - m01) / s];
   }
-  return { position: matrix.slice(12, 15), quaternion, scale };
+  return { position: matrix.slice(12, 15), rotor, scale };
 }
 
 function transform(node: any) {
@@ -83,21 +83,21 @@ function transform(node: any) {
     ? decompose(node.matrix)
     : {
         position: node.translation ?? [0, 0, 0],
-        quaternion: node.rotation ?? [0, 0, 0, 1],
+        rotor: node.rotation ?? [0, 0, 0, 1],
         scale: node.scale ?? [1, 1, 1],
       };
 }
 
 function compose(parent: any, local: any) {
   const position = rotate(
-    parent.quaternion,
+    parent.rotor,
     local.position.map(
       (value: number, lane: number) => value * parent.scale[lane],
     ),
   );
   return {
     position: position.map((value, lane) => value + parent.position[lane]),
-    quaternion: multiply(parent.quaternion, local.quaternion),
+    rotor: multiply(parent.rotor, local.rotor),
     scale: local.scale.map(
       (value: number, lane: number) => value * parent.scale[lane],
     ),
@@ -275,7 +275,7 @@ async function load(url: string) {
     id: number,
     parent = {
       position: [0, 0, 0],
-      quaternion: [0, 0, 0, 1],
+      rotor: [0, 0, 0, 1],
       scale: [1, 1, 1],
     },
   ) => {

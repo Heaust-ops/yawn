@@ -52,27 +52,27 @@ function build(boxes: Box[]): Branch | undefined {
   };
 }
 
-function rotate(quaternion: number[], value: number[]) {
-  const [qx, qy, qz, qw] = quaternion;
+function rotate(rotor: number[], value: number[]) {
+  const [rx, ry, rz, rw] = rotor;
   const [x, y, z] = value;
-  const tx = 2 * (qy * z - qz * y);
-  const ty = 2 * (qz * x - qx * z);
-  const tz = 2 * (qx * y - qy * x);
+  const tx = 2 * (ry * z - rz * y);
+  const ty = 2 * (rz * x - rx * z);
+  const tz = 2 * (rx * y - ry * x);
   return [
-    x + qw * tx + qy * tz - qz * ty,
-    y + qw * ty + qz * tx - qx * tz,
-    z + qw * tz + qx * ty - qy * tx,
+    x + rw * tx + ry * tz - rz * ty,
+    y + rw * ty + rz * tx - rx * tz,
+    z + rw * tz + rx * ty - ry * tx,
   ];
 }
 
 function rebuild() {
   const bounds = view("bounds");
   const positions = view("nodePositions");
-  const quaternions = view("nodeQuaternions");
+  const rotors = view("nodeRotors");
   const scales = view("nodeScales");
   const meshes = view("meshInfo");
   const nodes = view("nodes");
-  if (!bounds || !positions || !quaternions || !scales || !meshes || !nodes)
+  if (!bounds || !positions || !rotors || !scales || !meshes || !nodes)
     return;
   const count = shares.bounds.descriptor.rows;
   const boxes: Box[] = [];
@@ -82,8 +82,8 @@ function rebuild() {
     const transform = id * 4;
     const min = [Infinity, Infinity, Infinity];
     const max = [-Infinity, -Infinity, -Infinity];
-    const quaternion = [0, 1, 2, 3].map((lane) =>
-      Number(quaternions[transform + lane]),
+    const rotor = [0, 1, 2, 3].map((lane) =>
+      Number(rotors[transform + lane]),
     );
     for (let corner = 0; corner < 8; corner++) {
       const local = [0, 1, 2].map(
@@ -91,7 +91,7 @@ function rebuild() {
           Number(bounds[offset + (corner & (1 << lane) ? 4 : 0) + lane]) *
           Number(scales[transform + lane]),
       );
-      const rotated = rotate(quaternion, local);
+      const rotated = rotate(rotor, local);
       for (let lane = 0; lane < 3; lane++) {
         const value = rotated[lane] + Number(positions[transform + lane]);
         min[lane] = Math.min(min[lane], value);

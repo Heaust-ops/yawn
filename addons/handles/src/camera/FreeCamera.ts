@@ -64,15 +64,15 @@ export class FreeCamera extends Camera {
     const sensitivity = this.#controls.sensitivity ?? 0.002;
     this.cameraRow()[13] -= event.movementX * sensitivity;
     this.cameraRow()[14] = Math.min(1.55, Math.max(-1.55, this.cameraRow()[14] - event.movementY * sensitivity));
-    this.#writeQuaternion();
+    this.#writeRotor();
   };
 
-  #writeQuaternion() {
+  #writeRotor() {
     const yaw = this.cameraRow()[13];
     const pitch = this.cameraRow()[14];
     const sy = Math.sin(yaw / 2), cy = Math.cos(yaw / 2);
     const sx = Math.sin(pitch / 2), cx = Math.cos(pitch / 2);
-    this.quaternion = [sx * cy, cx * sy, -sx * sy, cx * cy];
+    this.setRotor([sx * cy, cx * sy, -sx * sy, cx * cy]);
   }
 
   #update = (time: number) => {
@@ -88,10 +88,12 @@ export class FreeCamera extends Camera {
     }
     const speed = (this.#controls.speed ?? 4) * delta;
     const yaw = this.cameraRow()[13];
-    this.position[0] += (x * Math.cos(yaw) + z * Math.sin(yaw)) * speed;
-    this.position[1] += y * speed;
-    this.position[2] += (x * -Math.sin(yaw) + z * Math.cos(yaw)) * speed;
-    this.refreshMatrix();
+    const position = this.position;
+    this.setPosition([
+      position.x + (x * Math.cos(yaw) + z * Math.sin(yaw)) * speed,
+      position.y + y * speed,
+      position.z + (x * -Math.sin(yaw) + z * Math.cos(yaw)) * speed,
+    ]);
     this.#frame = requestAnimationFrame(this.#update);
   };
 

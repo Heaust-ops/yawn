@@ -1,6 +1,6 @@
 # Scene and shared data
 
-Think of every handle as an array index, not an object mirrored into core. `Node.position`, `Node.quaternion`, and `Node.scale` are views into separate flat SOA arrays.
+Think of every handle as an array index, not an object mirrored into core. `Node.position`, `Node.rotor`, and `Node.scale` are component views into separate flat SOA arrays.
 
 ## Direct transform movement
 
@@ -11,12 +11,12 @@ const pivot = new Node(scene, { position: [0, 1, 0] });
 await pivot.ready;
 
 canvas.addEventListener("pointermove", (event) => {
-  pivot.position[0] += event.movementX * 0.002;
-  pivot.position[1] -= event.movementY * 0.002;
+  pivot.position.x += event.movementX * 0.002;
+  pivot.position.y -= event.movementY * 0.002;
 });
 ```
 
-The pointer handler sends no messages. The typed-array view points directly into the arena shared with the render worker. The camera helpers use this same pattern; see [Cameras and controls](/guide/cameras).
+The pointer handler sends no messages. Each component property reads or writes its lane in the arena shared with the render worker. Replace complete transforms with `setPosition([x, y, z])`, `setRotor([x, y, z, w])`, and `setScale([x, y, z])`. `translate(...)`, `rotate(...)`, and `rotateX/Y/Z(...)` are convenience methods over those same SAB lanes. The camera helpers use this same pattern; see [Cameras and controls](/guide/cameras).
 
 <Playground example="sab" />
 

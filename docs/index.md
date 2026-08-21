@@ -39,7 +39,7 @@ const mesh = new Mesh(scene, {
 });
 await mesh.ready;
 
-mesh.position[0] = 0.25; // direct SAB mutation
+mesh.position.x = 0.25; // direct SAB mutation
 ```
 
 `Scene` installs one HDR clustered-forward loadout. Adding compute, custom shaders, textures, or post effects rebuilds that same loadout; changing values already present in shared rows does not send a message.

@@ -496,6 +496,7 @@ canvas {
   height: 100%;
   display: block;
   object-fit: contain;
+  touch-action: none;
 }
 .output {
   position: absolute;

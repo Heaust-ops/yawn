@@ -11,7 +11,7 @@ const point = new PointLight(scene, {
 });
 
 const sun = new DirectionalLight(scene, {
-  quaternion: [0.2, 0, 0, 0.98],
+  rotor: [0.2, 0, 0, 0.98],
   color: [1, 0.95, 0.8],
   intensity: 3,
 });
